@@ -1,0 +1,426 @@
+//! The stream.
+//!
+//! Suspect the data before the mechanism. A flat measurement on a source that
+//! never contained the structure being measured says nothing about the
+//! mechanism, and the cheapest way to be wrong here is to build a generator that
+//! quietly lacks what the experiment is looking for. So this generator is
+//! constructed so that each claim has something to bite on, and `gencheck.rs`
+//! asserts -- on the emitted stream, not on the construction -- that it really
+//! does.
+//!
+//! Three item types carry the three claims:
+//!
+//! * **First order.** A cue, a gap, a target. Tests retrieval across a gap.
+//! * **Second order.** Two cues separated by a controlled interval, then a gap,
+//!   then a target drawn from a Latin square over the cue pair. The square makes
+//!   each cue's marginal information about the target *exactly zero*: only the
+//!   conjunction identifies it. This is what the second-order window measures,
+//!   and without the square the measurement would be satisfied by first-order
+//!   lookup.
+//! * **Composition.** `a r1 -> b` and `b r2 -> c` appear in the stream; the
+//!   query `a r12 -> c` never does. Anything above the backoff prior here has to
+//!   have come from the payload chain, since the address has nothing to find.
+//!
+//! Segmentation is carried by the baseline and nothing else. The model receives
+//! `Option<usize>` per tick and never sees the episode records, which exist only
+//! for measurement.
+
+use crate::num::{uniform, uniform_below};
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// Each regime owns its entities, so regime identity is present in the input.
+    A,
+    /// Entities are byte-identical across regimes and only targets differ. The
+    /// adversarial bound, not the main setting.
+    B,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Kind {
+    First,
+    Second,
+    /// One of the two support facts for a composition query.
+    CompSupport,
+    /// The composition query itself, never presented as a fact.
+    CompQuery,
+}
+
+#[derive(Clone, Copy)]
+pub enum Tick {
+    Baseline,
+    Token(usize),
+}
+
+/// What the metrics need and the model must never see.
+#[derive(Clone)]
+pub struct EpisodeRec {
+    pub kind: Kind,
+    pub domain: usize,
+    /// Ticks between the two cues, for second-order items. Zero otherwise.
+    pub separation: u32,
+    /// Ticks of baseline between the last cue and the target.
+    pub answer_gap: u32,
+    pub target: usize,
+    /// The cue tokens, in the order they were presented.
+    pub cues: Vec<usize>,
+    /// Index into `ticks` where the target is presented.
+    pub target_tick: usize,
+    /// Index into `ticks` of the last cue.
+    pub last_cue_tick: usize,
+}
+
+pub struct Stream {
+    pub ticks: Vec<Tick>,
+    pub episodes: Vec<EpisodeRec>,
+    /// `ep_at[t]` is the episode whose target sits at tick t, if any.
+    pub ep_at: Vec<Option<usize>>,
+    pub vocab: usize,
+}
+
+impl Stream {
+    pub fn len(&self) -> usize {
+        self.ticks.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.ticks.is_empty()
+    }
+    /// The only thing the model is allowed to consume.
+    #[inline]
+    pub fn observe(&self, t: usize) -> Option<usize> {
+        match self.ticks[t] {
+            Tick::Baseline => None,
+            Tick::Token(x) => Some(x),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GenConfig {
+    pub vocab: usize,
+    pub mode: Mode,
+    pub domains: usize,
+    pub ents_per_domain: usize,
+    pub tgts_per_domain: usize,
+    /// Side of the Latin square, i.e. how many distinct cueA, cueB and targets
+    /// take part in the second-order items of each domain.
+    pub square_m: usize,
+    pub zipf_s: f64,
+    /// Ticks a regime stays live before the stream moves to the next.
+    pub span_ticks: usize,
+    /// Baseline ticks between the last cue and the target.
+    pub answer_gap: u32,
+    /// Baseline ticks after the target, before the next episode.
+    pub tail_gap: u32,
+    /// Separations swept by the second-order items, in ticks.
+    pub separations: Vec<u32>,
+    /// Relative frequency of the three item types.
+    pub w_first: f64,
+    pub w_second: f64,
+    pub w_comp: f64,
+    pub seed: u64,
+}
+
+impl GenConfig {
+    pub fn local() -> Self {
+        GenConfig {
+            vocab: 4096,
+            mode: Mode::A,
+            domains: 6,
+            ents_per_domain: 48,
+            tgts_per_domain: 48,
+            square_m: 6,
+            zipf_s: 1.0,
+            span_ticks: 4000,
+            answer_gap: 6,
+            tail_gap: 4,
+            separations: vec![1, 2, 4, 8, 16, 32, 64],
+            w_first: 0.45,
+            w_second: 0.40,
+            w_comp: 0.15,
+            seed: 0xA11CE,
+        }
+    }
+}
+
+struct Domain {
+    ents: Vec<usize>,
+    tgts: Vec<usize>,
+    /// square[a * m + b] indexes into `sq_tgts`.
+    square: Vec<usize>,
+    sq_a: Vec<usize>,
+    sq_b: Vec<usize>,
+    sq_tgts: Vec<usize>,
+    /// First-order facts: (cue, target).
+    firsts: Vec<(usize, usize)>,
+    /// Composition chains: (a, b, c) with relation tokens r1, r2, r12.
+    chains: Vec<(usize, usize, usize)>,
+    r1: usize,
+    r2: usize,
+    r12: usize,
+}
+
+pub struct Generator {
+    pub cfg: GenConfig,
+    domains: Vec<Domain>,
+    zipf_cdf: Vec<f64>,
+}
+
+impl Generator {
+    pub fn new(cfg: GenConfig) -> Self {
+        let m = cfg.square_m;
+        let block = cfg.ents_per_domain + cfg.tgts_per_domain + 3;
+        assert!(
+            block * cfg.domains <= cfg.vocab,
+            "vocabulary too small for {} domains",
+            cfg.domains
+        );
+        let mut domains = Vec::new();
+        for d in 0..cfg.domains {
+            // Mode B makes every regime share the same entity surface, so the
+            // routing signal is removed and only the targets differ.
+            let ent_base = match cfg.mode {
+                Mode::A => d * block,
+                Mode::B => 0,
+            };
+            let tgt_base = d * block + cfg.ents_per_domain;
+            let ents: Vec<usize> = (0..cfg.ents_per_domain).map(|i| ent_base + i).collect();
+            let tgts: Vec<usize> = (0..cfg.tgts_per_domain).map(|i| tgt_base + i).collect();
+            let r1 = tgt_base + cfg.tgts_per_domain;
+            let r2 = r1 + 1;
+            let r12 = r1 + 2;
+
+            let sq_a: Vec<usize> = ents[0..m].to_vec();
+            let sq_b: Vec<usize> = ents[m..2 * m].to_vec();
+            let sq_tgts: Vec<usize> = tgts[0..m].to_vec();
+            // A Latin square: T[a][b] = (a + b) mod m. Every row and every
+            // column is a permutation of the targets, so I(target ; cueA) and
+            // I(target ; cueB) are exactly zero while I(target ; cueA, cueB) is
+            // log m. Nothing but the conjunction identifies the answer.
+            let mut square = vec![0usize; m * m];
+            for a in 0..m {
+                for b in 0..m {
+                    square[a * m + b] = (a + b) % m;
+                }
+            }
+
+            // First-order facts drawn from the entities that are not in the
+            // square, so the two item types do not contaminate each other.
+            let mut firsts = Vec::new();
+            let mut i = 2 * m;
+            let mut j = m;
+            while i < ents.len() && j < tgts.len() {
+                firsts.push((ents[i], tgts[j]));
+                i += 1;
+                j += 1;
+            }
+
+            // Composition chains a -> b -> c, using entities as intermediates.
+            let mut chains = Vec::new();
+            let n_chain = 8.min(ents.len() / 4);
+            for k in 0..n_chain {
+                let a = ents[2 * m + k % (ents.len() - 2 * m)];
+                let b = ents[(2 * m + k + 1) % ents.len()];
+                let c = tgts[(m + k) % tgts.len()];
+                if a != b {
+                    chains.push((a, b, c));
+                }
+            }
+
+            domains.push(Domain { ents, tgts, square, sq_a, sq_b, sq_tgts, firsts, chains, r1, r2, r12 });
+        }
+
+        // Zipf over episode slots inside a domain, which is what makes hub items
+        // frequent and tail items rare.
+        let slots = 256usize;
+        let mut cdf = Vec::with_capacity(slots);
+        let mut acc = 0.0f64;
+        for i in 0..slots {
+            acc += 1.0 / ((i + 1) as f64).powf(cfg.zipf_s);
+            cdf.push(acc);
+        }
+        for v in cdf.iter_mut() {
+            *v /= acc;
+        }
+
+        Generator { cfg, domains, zipf_cdf: cdf }
+    }
+
+    fn zipf_pick(&self, key: u64, idx: u64, n: usize) -> usize {
+        let u = uniform(key, idx) as f64;
+        let mut lo = 0usize;
+        let mut hi = self.zipf_cdf.len() - 1;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.zipf_cdf[mid] < u {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo % n.max(1)
+    }
+
+    pub fn generate(&self, total_ticks: usize) -> Stream {
+        let cfg = &self.cfg;
+        let key = cfg.seed;
+        let mut ticks: Vec<Tick> = Vec::with_capacity(total_ticks + 64);
+        let mut episodes: Vec<EpisodeRec> = Vec::new();
+        let mut counter: u64 = 0;
+
+        while ticks.len() < total_ticks {
+            let domain = (ticks.len() / cfg.span_ticks) % cfg.domains;
+            let dom = &self.domains[domain];
+            counter += 1;
+
+            let r = uniform(key ^ 0x11, counter) as f64;
+            let total_w = cfg.w_first + cfg.w_second + cfg.w_comp;
+            let kind = if r < cfg.w_first / total_w {
+                Kind::First
+            } else if r < (cfg.w_first + cfg.w_second) / total_w {
+                Kind::Second
+            } else {
+                Kind::CompSupport
+            };
+
+            match kind {
+                Kind::First => {
+                    if dom.firsts.is_empty() {
+                        ticks.push(Tick::Baseline);
+                        continue;
+                    }
+                    let i = self.zipf_pick(key ^ 0x21, counter, dom.firsts.len());
+                    let (cue, tgt) = dom.firsts[i];
+                    let last_cue_tick = ticks.len();
+                    ticks.push(Tick::Token(cue));
+                    for _ in 0..cfg.answer_gap {
+                        ticks.push(Tick::Baseline);
+                    }
+                    let target_tick = ticks.len();
+                    ticks.push(Tick::Token(tgt));
+                    episodes.push(EpisodeRec {
+                        kind: Kind::First,
+                        domain,
+                        separation: 0,
+                        answer_gap: cfg.answer_gap,
+                        target: tgt,
+                        cues: vec![cue],
+                        target_tick,
+                        last_cue_tick,
+                    });
+                }
+                Kind::Second => {
+                    let m = cfg.square_m;
+                    let a = self.zipf_pick(key ^ 0x31, counter, m);
+                    let b = uniform_below(key ^ 0x32, counter, m as u64) as usize;
+                    let sep_i =
+                        uniform_below(key ^ 0x33, counter, cfg.separations.len() as u64) as usize;
+                    let sep = cfg.separations[sep_i];
+                    let tgt = dom.sq_tgts[dom.square[a * m + b]];
+
+                    ticks.push(Tick::Token(dom.sq_a[a]));
+                    for _ in 0..sep {
+                        ticks.push(Tick::Baseline);
+                    }
+                    let last_cue_tick = ticks.len();
+                    ticks.push(Tick::Token(dom.sq_b[b]));
+                    for _ in 0..cfg.answer_gap {
+                        ticks.push(Tick::Baseline);
+                    }
+                    let target_tick = ticks.len();
+                    ticks.push(Tick::Token(tgt));
+                    episodes.push(EpisodeRec {
+                        kind: Kind::Second,
+                        domain,
+                        separation: sep,
+                        answer_gap: cfg.answer_gap,
+                        target: tgt,
+                        cues: vec![dom.sq_a[a], dom.sq_b[b]],
+                        target_tick,
+                        last_cue_tick,
+                    });
+                }
+                _ => {
+                    if dom.chains.is_empty() {
+                        ticks.push(Tick::Baseline);
+                        continue;
+                    }
+                    let i = self.zipf_pick(key ^ 0x41, counter, dom.chains.len());
+                    let (a, b, c) = dom.chains[i];
+                    // Most of the time present one of the two support facts;
+                    // occasionally pose the composition query, which has never
+                    // been presented as a fact.
+                    let roll = uniform(key ^ 0x42, counter);
+                    if roll < 0.4 {
+                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, a, dom.r1, b, Kind::CompSupport);
+                    } else if roll < 0.8 {
+                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, b, dom.r2, c, Kind::CompSupport);
+                    } else {
+                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, a, dom.r12, c, Kind::CompQuery);
+                    }
+                }
+            }
+
+            for _ in 0..cfg.tail_gap {
+                ticks.push(Tick::Baseline);
+            }
+        }
+
+        ticks.truncate(total_ticks);
+        episodes.retain(|e| e.target_tick < total_ticks);
+        let mut ep_at = vec![None; ticks.len()];
+        for (i, e) in episodes.iter().enumerate() {
+            ep_at[e.target_tick] = Some(i);
+        }
+        Stream { ticks, episodes, ep_at, vocab: cfg.vocab }
+    }
+
+    fn emit_pair(
+        ticks: &mut Vec<Tick>,
+        episodes: &mut Vec<EpisodeRec>,
+        cfg: &GenConfig,
+        domain: usize,
+        head: usize,
+        rel: usize,
+        tail: usize,
+        kind: Kind,
+    ) {
+        ticks.push(Tick::Token(head));
+        let last_cue_tick = ticks.len();
+        ticks.push(Tick::Token(rel));
+        for _ in 0..cfg.answer_gap {
+            ticks.push(Tick::Baseline);
+        }
+        let target_tick = ticks.len();
+        ticks.push(Tick::Token(tail));
+        episodes.push(EpisodeRec {
+            kind,
+            domain,
+            separation: 0,
+            answer_gap: cfg.answer_gap,
+            target: tail,
+            cues: vec![head, rel],
+            target_tick,
+            last_cue_tick,
+        });
+    }
+
+    /// Ground-truth tables, for the generator self-tests only.
+    pub fn square_of(&self, domain: usize) -> (usize, &[usize], &[usize], &[usize], &[usize]) {
+        let d = &self.domains[domain];
+        (self.cfg.square_m, &d.sq_a, &d.sq_b, &d.sq_tgts, &d.square)
+    }
+
+    pub fn chains_of(&self, domain: usize) -> (&[(usize, usize, usize)], usize, usize, usize) {
+        let d = &self.domains[domain];
+        (&d.chains, d.r1, d.r2, d.r12)
+    }
+
+    pub fn entities_of(&self, domain: usize) -> &[usize] {
+        &self.domains[domain].ents
+    }
+
+    pub fn targets_of(&self, domain: usize) -> &[usize] {
+        &self.domains[domain].tgts
+    }
+}

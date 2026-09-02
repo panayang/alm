@@ -1,0 +1,21 @@
+[package]
+name = "alm"
+version = "0.1.0"
+edition = "2021"
+description = "Challenge-response continual memory: one tick, one factor"
+
+# No dependencies. Everything -- RNG, linear algebra, CSV, argument parsing --
+# is written here, because the exactness assertions in tests/structural.rs
+# require bit-reproducible floating point and a counter-based RNG whose draws
+# do not depend on call order.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.test]
+opt-level = 2
