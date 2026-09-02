@@ -26,6 +26,67 @@
 use crate::gen::{EpisodeRec, Kind, Stream};
 use crate::model::{Model, TickOutcome};
 
+/// A test martingale on the comparison with the reference coder.
+///
+/// Averages with standard errors are weak inference on a single non-stationary
+/// stream run once: the events are not independent, the regime changes under
+/// the estimator, and there is no second sample to appeal to. The betting form
+/// of the prequential comparison has none of those problems. Wealth is the
+/// likelihood ratio process
+///
+/// ```text
+/// W_n = prod_i  q_ours(o_i) / q_ref(o_i)
+/// ```
+///
+/// which under the null "the reference is at least as good" is a non-negative
+/// martingale with expectation at most one. So `W_n >= 1/alpha` at *any* stopping
+/// time, chosen however you like after seeing the data, is a valid test at level
+/// alpha. In bits, log2 W is exactly the cumulative codelength saved, which is
+/// the quantity already being accumulated -- the point is that it may be read as
+/// evidence and not only as an average.
+#[derive(Default, Clone)]
+pub struct EProcess {
+    pub log2_wealth: f64,
+    pub min_log2_wealth: f64,
+    pub max_log2_wealth: f64,
+    pub n: u64,
+}
+
+impl EProcess {
+    pub fn push(&mut self, bits_ours: f64, bits_ref: f64) {
+        self.log2_wealth += bits_ref - bits_ours;
+        self.n += 1;
+        if self.log2_wealth < self.min_log2_wealth {
+            self.min_log2_wealth = self.log2_wealth;
+        }
+        if self.log2_wealth > self.max_log2_wealth {
+            self.max_log2_wealth = self.log2_wealth;
+        }
+    }
+    /// Anytime-valid bound on the p-value: 1 / wealth, clamped at one.
+    pub fn p_value_bound(&self) -> f64 {
+        if self.log2_wealth <= 0.0 {
+            1.0
+        } else {
+            (2.0f64).powf(-self.log2_wealth).max(f64::MIN_POSITIVE)
+        }
+    }
+    pub fn verdict(&self) -> String {
+        if self.log2_wealth > 0.0 {
+            format!(
+                "ours ahead by {:.0} bits total; anytime-valid p <= {:.2e}",
+                self.log2_wealth,
+                self.p_value_bound()
+            )
+        } else {
+            format!(
+                "reference ahead by {:.0} bits total; no evidence for ours",
+                -self.log2_wealth
+            )
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Bucket {
     pub n: u64,
@@ -70,8 +131,13 @@ impl Bucket {
 pub struct Metrics {
     /// Entropy against ticks since the last event.
     pub sharpening: Vec<Bucket>,
-    /// Second-order items, bucketed by separation.
+    /// Latin second-order items, bucketed by separation. Not representable by a
+    /// linear readout on the superposed cues.
     pub window: Vec<(u32, Bucket)>,
+    /// Product-code second-order items, same buckets. Representable. The two
+    /// curves read together are what separates an address failure from a
+    /// representation failure.
+    pub window_product: Vec<(u32, Bucket)>,
     /// First-order items, bucketed by answer gap. The first-order special case
     /// of the same curve.
     pub gap: Vec<(u32, Bucket)>,
@@ -106,6 +172,14 @@ pub struct Metrics {
     /// failure is downstream.
     pub leaf_pair: std::collections::HashMap<usize, std::collections::HashMap<(usize, usize), u64>>,
 
+    /// Ticks after the last event at which the right answer first showed up in
+    /// inner speech, and at which it was first said. Two reaction times, and the
+    /// distance between them is what the commitment rule costs.
+    pub idea_onset: Bucket,
+    pub speech_onset: Bucket,
+    /// Evidence against the reference coder, accumulated on the same events.
+    pub evidence: EProcess,
+
     pub cumulative_bits: f64,
     pub charged_events: u64,
     /// Diagnostics, printed but not promoted.
@@ -124,6 +198,7 @@ impl Metrics {
         Metrics {
             sharpening: vec![Bucket::default(); SHARP_MAX],
             window: separations.iter().map(|&s| (s, Bucket::default())).collect(),
+            window_product: separations.iter().map(|&s| (s, Bucket::default())).collect(),
             gap: gaps.iter().map(|&g| (g, Bucket::default())).collect(),
             by_distance: vec![Bucket::default(); DIST_MAX],
             poisoning: vec![Bucket::default(); POISON_BINS],
@@ -133,6 +208,9 @@ impl Metrics {
             leaf_domain: std::collections::HashMap::new(),
             domains: 0,
             leaf_pair: std::collections::HashMap::new(),
+            idea_onset: Bucket::default(),
+            speech_onset: Bucket::default(),
+            evidence: EProcess::default(),
             cumulative_bits: 0.0,
             charged_events: 0,
             overt_ticks: 0,
@@ -156,7 +234,7 @@ impl Metrics {
             e.resize(n, 0);
         }
         e[ep.domain] += 1;
-        if ep.kind == Kind::Second && ep.cues.len() >= 2 {
+        if matches!(ep.kind, Kind::Second | Kind::Product) && ep.cues.len() >= 2 {
             *self
                 .leaf_pair
                 .entry(leaf)
@@ -216,6 +294,13 @@ impl Metrics {
         let d = (out.ticks_since_event as usize).min(DIST_MAX - 1);
         self.by_distance[d].push(out.bits, out.correct);
 
+        if let Some(k) = out.idea_onset {
+            self.idea_onset.push(k as f64, true);
+        }
+        if let Some(k) = out.speech_onset {
+            self.speech_onset.push(k as f64, true);
+        }
+
         let sf = self.self_fraction();
         let pb = ((sf * POISON_BINS as f64) as usize).min(POISON_BINS - 1);
         self.poisoning[pb].push(out.bits, out.correct);
@@ -232,6 +317,13 @@ impl Metrics {
                 Kind::First => {
                     for (g, b) in self.gap.iter_mut() {
                         if *g == e.answer_gap {
+                            b.push(out.bits, out.correct);
+                        }
+                    }
+                }
+                Kind::Product => {
+                    for (s, b) in self.window_product.iter_mut() {
+                        if *s == e.separation {
                             b.push(out.bits, out.correct);
                         }
                     }
@@ -281,6 +373,14 @@ impl Metrics {
             self.bits_per_event(),
             self.all_events.accuracy()
         );
+        println!("  evidence vs PPM: {}", self.evidence.verdict());
+        println!(
+            "  onsets: idea at t+{:.2} on {} events, speech at t+{:.2} on {}",
+            self.idea_onset.mean(),
+            self.idea_onset.n,
+            self.speech_onset.mean(),
+            self.speech_onset.n
+        );
         println!(
             "  tree: {} nodes, depth {}, {} leaves, {} occupied rows  (widen {}, deepen {})",
             model.tree.nodes(),
@@ -320,6 +420,30 @@ impl Metrics {
                 b.mean(),
                 b.accuracy()
             );
+        }
+
+        println!("  -- product-code window (separable control)");
+        for (s, b) in self.window_product.iter() {
+            println!(
+                "     sep={:<4} n={:<6} bits={:.3} acc={:.3}",
+                s,
+                b.n,
+                b.mean(),
+                b.accuracy()
+            );
+        }
+
+        println!("  -- first-order gap curve");
+        for (g, b) in self.gap.iter() {
+            if b.n > 0 {
+                println!(
+                    "     gap={:<4} n={:<6} bits={:.3} acc={:.3}",
+                    g,
+                    b.n,
+                    b.mean(),
+                    b.accuracy()
+                );
+            }
         }
 
         println!("  -- per-level calibration");
@@ -372,6 +496,21 @@ impl Metrics {
             model.cfg.rungs - 1,
             model.ladder.band_correlation(0, model.cfg.rungs - 1)
         );
+        print!("  -- rung visits ");
+        for (k, v) in model.tree.rung_visits.iter().enumerate() {
+            print!("r{}:{} ", k, v);
+        }
+        println!(
+            " (coverage {:.2}; a rung with no visits is a band the model does \
+             not have)",
+            model.tree.rung_coverage()
+        );
+        println!(
+            "  -- leaf surprise mean {:.2} bits over {} writes  (a split \
+             threshold below this range makes every node split always)",
+            model.tree.leaf_surprise.mean,
+            model.tree.leaf_surprise.n
+        );
         println!(
             "  -- leaf purity by regime {:.3}  (chance {:.3}, over {} leaves that took writes)",
             self.leaf_purity(),
@@ -419,12 +558,25 @@ impl Metrics {
 }
 
 /// Drive a model over a stream and collect everything.
+///
+/// The reference coder runs in lockstep on the same events, so the evidence
+/// process is a per-event likelihood ratio rather than a comparison of two
+/// separately computed averages.
 pub fn run(model: &mut Model, stream: &Stream, metrics: &mut Metrics) {
     let every = model.cfg.entropy_every;
+    let mut reference = crate::baseline::Ppm::new(4, stream.vocab + 1);
+    let silence = stream.vocab as u32;
     for t in 0..stream.len() {
         let want_entropy = every > 0 && (t as u64) % every == 0;
         let obs = stream.observe(t);
         let out = model.tick(obs, want_entropy);
+        let (ref_bits, _) = reference.observe(match obs {
+            Some(x) => x as u32,
+            None => silence,
+        });
+        if out.charged {
+            metrics.evidence.push(out.bits, ref_bits);
+        }
         let ep = stream.ep_at[t].map(|i| &stream.episodes[i]);
         if out.wrote {
             if let Some(e) = ep {

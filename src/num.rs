@@ -273,6 +273,25 @@ pub fn argmax(xs: &[f32]) -> usize {
     best
 }
 
+/// Circular convolution, the binding operation.
+///
+/// A sum superposes and loses which cue went with which; a convolution binds,
+/// and `a (*) b` is a vector nearly orthogonal to both factors and distinct for
+/// every pair. That distinction is the whole reason a Latin square is reachable
+/// at all: the target is linear in the tensor features E_A x E_B and not in
+/// their sum, so a linear readout over a bound trace can represent what a linear
+/// readout over a superposition cannot.
+pub fn circconv(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let d = a.len();
+    for k in 0..d {
+        let mut s = 0.0f32;
+        for j in 0..d {
+            s += a[j] * b[(k + d - j) % d];
+        }
+        out[k] = s;
+    }
+}
+
 /// Running mean and variance (Welford), used for the allocation criterion.
 #[derive(Clone, Default)]
 pub struct Running {

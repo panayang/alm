@@ -39,6 +39,21 @@ pub struct GenReport {
     /// I(T;A,B|D) - I(T;A|D) - I(T;B|D).
     pub conjunctive_gain: f64,
 
+    /// The same three quantities for the product-code items. Here the marginals
+    /// are *supposed* to be non-zero: a table with zero marginals cannot be
+    /// linearly separable, so the separable control has to pay for it with
+    /// marginal information. What has to hold is that the pair still carries
+    /// strictly more than the two cues do apart.
+    pub product_within_cue_a: f64,
+    pub product_within_cue_b: f64,
+    pub product_within_pair: f64,
+    pub product_items: usize,
+    /// Fraction of (a, b) cells whose target matches the additive product code
+    /// the generator claims to have emitted. Asserted at one: this is the
+    /// property that makes the item type representable by a linear readout, and
+    /// it is checked on the emitted stream rather than assumed.
+    pub product_separable_fraction: f64,
+
     /// Episodes per requested separation.
     pub sep_counts: Vec<(u32, usize)>,
 
@@ -61,8 +76,14 @@ pub struct GenReport {
 }
 
 fn entropy(counts: &HashMap<u64, u64>, total: u64) -> f64 {
+    // Sorted, because a float sum over hash-map iteration order is not
+    // reproducible: Rust seeds each process's hasher differently, so the same
+    // stream would report slightly different numbers on every run and an
+    // assertion sitting near its threshold would be flaky for no reason.
+    let mut cs: Vec<u64> = counts.values().copied().collect();
+    cs.sort_unstable();
     let mut h = 0.0;
-    for &c in counts.values() {
+    for c in cs {
         if c == 0 {
             continue;
         }
@@ -73,8 +94,12 @@ fn entropy(counts: &HashMap<u64, u64>, total: u64) -> f64 {
 }
 
 fn conditional_entropy(joint: &HashMap<(u64, u64), u64>, marginal: &HashMap<u64, u64>, total: u64) -> f64 {
+    let mut keys: Vec<(u64, u64)> = joint.keys().copied().collect();
+    keys.sort_unstable();
     let mut h = 0.0;
-    for (&(x, _y), &c) in joint.iter() {
+    for k in keys {
+        let (x, _y) = k;
+        let c = joint[&k];
         let px = *marginal.get(&x).unwrap_or(&0) as f64 / total as f64;
         if px <= 0.0 || c == 0 {
             continue;
@@ -84,6 +109,7 @@ fn conditional_entropy(joint: &HashMap<(u64, u64), u64>, marginal: &HashMap<u64,
     }
     h
 }
+
 
 /// Least-squares slope of log y on log x.
 fn loglog_slope(pts: &[(f64, f64)]) -> f64 {
@@ -193,6 +219,54 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
 
     let (mi_a, mi_b, mi_ab) = mi_of(&all);
 
+    // ---- the separable control ----
+    let mut prod_by_domain: HashMap<usize, Vec<(u64, u64, u64)>> = HashMap::new();
+    let mut prod_all: Vec<(u64, u64, u64)> = Vec::new();
+    for e in stream.episodes.iter() {
+        if e.kind != Kind::Product || e.cues.len() < 2 {
+            continue;
+        }
+        let rec = (e.cues[0] as u64, e.cues[1] as u64, e.target as u64);
+        prod_by_domain.entry(e.domain).or_default().push(rec);
+        prod_all.push(rec);
+        *sep_counts.entry(e.separation).or_insert(0) += 1;
+    }
+    let mut pdoms: Vec<&usize> = prod_by_domain.keys().collect();
+    pdoms.sort_unstable();
+    let (mut pa, mut pb, mut pab, mut psum) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for d in pdoms {
+        let rows = &prod_by_domain[d];
+        let w = rows.len() as f64;
+        let (a, b, ab) = mi_of(rows);
+        pa += w * a;
+        pb += w * b;
+        pab += w * ab;
+        psum += w;
+    }
+    let (pa, pb, pab) =
+        if psum > 0.0 { (pa / psum, pb / psum, pab / psum) } else { (0.0, 0.0, 0.0) };
+
+    // A product code is a function of the pair, and every (a, b) cell must map
+    // to one target. If a cell is ever seen with two different targets the code
+    // is not a product code and the separability claim is void.
+    let mut cell: HashMap<(u64, u64), u64> = HashMap::new();
+    let mut consistent = 0usize;
+    for &(a, b, t) in prod_all.iter() {
+        match cell.get(&(a, b)) {
+            None => {
+                cell.insert((a, b), t);
+                consistent += 1;
+            }
+            Some(&t0) => {
+                if t0 == t {
+                    consistent += 1;
+                }
+            }
+        }
+    }
+    let product_separable_fraction =
+        if prod_all.is_empty() { 0.0 } else { consistent as f64 / prod_all.len() as f64 };
+
     let mut doms: Vec<&usize> = by_domain.keys().collect();
     doms.sort_unstable();
     let (mut wa, mut wb, mut wab, mut wsum) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
@@ -265,6 +339,11 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
         mi_within_cue_b: wb,
         mi_within_pair: wab,
         conjunctive_gain: wab - wa - wb,
+        product_within_cue_a: pa,
+        product_within_cue_b: pb,
+        product_within_pair: pab,
+        product_items: prod_all.len(),
+        product_separable_fraction,
         sep_counts: sep_list,
         zipf_exponent,
         heaps_exponent,
@@ -291,6 +370,18 @@ impl GenReport {
             self.mi_within_cue_a, self.mi_within_cue_b, self.mi_within_pair
         );
         println!("  conjunctive gain     {:.3} bits  (within regime)", self.conjunctive_gain);
+        println!(
+            "  product code         I(T;A|D) {:.3}  I(T;B|D) {:.3}  I(T;A,B|D) {:.3}  \
+             bits over {} items",
+            self.product_within_cue_a,
+            self.product_within_cue_b,
+            self.product_within_pair,
+            self.product_items
+        );
+        println!(
+            "  product consistency  {:.4}  (cells mapping to a single target)",
+            self.product_separable_fraction
+        );
         print!("  separations          ");
         for (s, c) in self.sep_counts.iter() {
             print!("{}:{} ", s, c);
@@ -336,6 +427,29 @@ impl GenReport {
             self.comp_query_leaked, 0,
             "a composition query was also presented as a fact: the composition \
              measurement would be plain lookup"
+        );
+        assert!(
+            self.product_items > 0,
+            "no product-code items were emitted: the separable control is the \
+             only thing that can tell an address failure apart from a \
+             representation failure, and without it the Latin result is not \
+             interpretable"
+        );
+        assert!(
+            self.product_separable_fraction > 0.999,
+            "product cells are not single-valued ({:.4}); the item type is not a \
+             product code and its separability cannot be claimed",
+            self.product_separable_fraction
+        );
+        assert!(
+            self.product_within_pair > self.product_within_cue_a + 0.4
+                && self.product_within_pair > self.product_within_cue_b + 0.4,
+            "the product pair carries {:.3} bits against marginals of {:.3}/{:.3}: \
+             a single cue nearly answers it and the control is not testing a \
+             conjunction at all",
+            self.product_within_pair,
+            self.product_within_cue_a,
+            self.product_within_cue_b
         );
         assert!(
             self.baseline_fraction > 0.2 && self.baseline_fraction < 0.95,

@@ -11,6 +11,33 @@
 //!   CEILING   -- a reservation, not a setting; growth happens below it.
 //!   INHERITED -- carried over from the reference mechanism unchanged.
 
+/// How a node decides it should be split.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SplitRule {
+    /// The reference mechanism's rule: split when the winning similarity is too
+    /// dispersed. It detects *regimes* -- and it detects them well -- but it is
+    /// a statement about the address, not about what the node holds, so nothing
+    /// in it has any reason to carve out a cell for a cue pair inside a regime.
+    Dispersion,
+    /// Split when the node is still surprised by its own content: its mean
+    /// per-write surprise, in bits, stays above a threshold after it has seen
+    /// enough. This is a statement about prediction rather than about
+    /// similarity, so it carves where the content is still unresolved. The
+    /// threshold has units -- two bits means "still four-way confused" -- which
+    /// a dimensionless dispersion ratio does not.
+    Surprise,
+    /// Dispersion at the coarse level, surprise below it.
+    ///
+    /// The two criteria are not competitors so much as answers to different
+    /// questions. Dispersion asks whether the address is stretched, which is the
+    /// right question for "is this one regime or two". Surprise asks whether the
+    /// node still fails to predict what it holds, which is the right question
+    /// for "does this regime need carving inside". Replacing one with the other
+    /// cost the regime separation outright; running each where it belongs is the
+    /// obvious thing to try next.
+    Hybrid,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     // ---- widths -------------------------------------------------------
@@ -53,6 +80,17 @@ pub struct Config {
     /// with a relative dispersion around 0.3-0.5 even for a well-matched class.
     /// The reference value of 0.05 splits everything in sight.
     pub grow_theta: f64,
+    /// Which criterion decides a split. The comparison between them is the
+    /// experiment, not a preference.
+    pub split_rule: SplitRule,
+    /// Under `Hybrid`, the deepest level still judged by dispersion. Fixed at
+    /// one by principle rather than swept: level 1 reads the slowest rung and is
+    /// the regime level, and everything below it is content.
+    pub hybrid_coarse_levels: usize,
+    /// Mean per-write surprise, in bits, above which a node is still unresolved
+    /// and should be split. Replaces `grow_theta` under `SplitRule::Surprise`,
+    /// so the parameter count does not change.
+    pub split_bits: f64,
     /// INHERITED. Consecutive steps the criterion must hold.
     pub grow_hold: u32,
     /// INHERITED. Minimum observations before a node may split.
@@ -62,6 +100,13 @@ pub struct Config {
     /// CEILING. Maximum nodes in the tree.
     pub max_nodes: usize,
     /// INHERITED. Observations before a node may deepen (gain its first child).
+    ///
+    /// This has to be low enough that the tree reaches its depth cap. Level l
+    /// reads rung `rungs - l`, so a tree that stops at depth 3 under a
+    /// six-rung ladder never consults the three fastest bands at all: they are
+    /// configured and unread, and a sweep over the rung count then varies which
+    /// bands are used rather than how many. `rung_visits` is the instrument for
+    /// that and is reported on every run.
     pub deepen_min_obs: u64,
 
     // ---- learning ---------------------------------------------------------
@@ -85,10 +130,16 @@ pub struct Config {
     /// INHERITED. Minimum observations in a bin before calibration is trusted;
     /// below it the fallback threshold is used.
     pub calib_min_obs: u64,
-    /// Floor on the commit threshold. Calibration may raise it and never lower
-    /// it. Gap ticks cost nothing, so waiting is close to free and the bar
-    /// should be high.
+    /// Floor on the *branch* commit threshold. Calibration may raise it and
+    /// never lower it. Gap ticks cost nothing, so waiting is close to free and
+    /// the bar should be high.
     pub commit_fallback_slack: f32,
+    /// Floor on the threshold for saying something out loud. Lower than the
+    /// branch floor because it gates a different quantity: a readout maximum
+    /// over a few dozen emitted rows lives on a different scale from a branch
+    /// posterior over a handful of children, and gating one by the other is
+    /// what silenced the overt channel entirely.
+    pub speak_fallback: f32,
     /// INHERITED. Inverse temperature on branch scores.
     pub branch_temp: f32,
 
@@ -96,10 +147,33 @@ pub struct Config {
     /// A5. The highest ladder rung that self-generated content may write to.
     /// Fixed at 0 by the axiom; exposed only so the ablation can break it.
     pub self_max_rung: usize,
-    /// Feed overt output back into the context at all.
+    /// Feed what was said out loud back into the context.
     pub feedback_overt: bool,
+    /// Feed inner speech -- what was considered and not said -- back into the
+    /// context. Separate from `feedback_overt` because a control that ablates
+    /// both at once cannot say which of the two streams does the poisoning.
+    pub feedback_covert: bool,
     /// Feed the write/activity channel back into the context at all.
     pub feedback_write: bool,
+
+    /// Bind consecutive cues by circular convolution and give the readout the
+    /// bound trace alongside the payload.
+    ///
+    /// This is the "combine" half of keeping the streams apart but combinable,
+    /// and it has a falsifiable job rather than a decorative one: a Latin square
+    /// is linear in the tensor features of the two cues and not in their sum, so
+    /// a linear readout can represent it over a bound trace and cannot over a
+    /// superposition. If the Latin window does not move when this is switched
+    /// on, the binding is not what was missing.
+    pub use_binding: bool,
+    /// Decay of the binding trace across a response.
+    pub bind_decay: f32,
+
+    /// Initialisation scale of the edge transforms. Small values leave the tanh
+    /// in its linear regime and the residual hop close to the identity, which
+    /// makes the learned payload chain -- one of the two things claimed over a
+    /// suffix model -- do nothing at all.
+    pub w_init: f32,
 
     // ---- operator tokens ------------------------------------------------
     /// Gain of the rank-one operator A_x. The baseline token has A = 0, which
@@ -128,7 +202,10 @@ pub struct Config {
 
 impl Config {
     pub fn local() -> Self {
-        let rungs = 6;
+        // Three, because the rung sweep measured it: with coverage held at one,
+        // more bands cost accuracy on both conjunctions monotonically. Six was
+        // the original guess and it is the worst arm.
+        let rungs = 3;
         let rho0 = 0.5f32;
         let horizon = 256.0f32;
         let mut c = Config {
@@ -143,11 +220,18 @@ impl Config {
             shortcuts: 2,
             hops: 2,
             grow_theta: 0.45,
+            // Dispersion, because it measurably beat surprise on every axis --
+            // bits, regime purity, pair purity and both conjunctions -- when the
+            // two were compared. Leaving a known-worse default in place would
+            // make every later run quietly wrong.
+            split_rule: SplitRule::Dispersion,
+            split_bits: 2.0,
+            hybrid_coarse_levels: 1,
             grow_hold: 8,
             grow_min_obs: 200,
             max_children: 8,
             max_nodes: 512,
-            deepen_min_obs: 1000,
+            deepen_min_obs: 80,
             eta: 0.5,
             neg_samples: 16,
             trace_lambda: 0.9,
@@ -155,10 +239,18 @@ impl Config {
             calib_bins: 10,
             calib_min_obs: 32,
             commit_fallback_slack: 0.7,
+            speak_fallback: 0.25,
             branch_temp: 4.0,
             self_max_rung: 0,
             feedback_overt: true,
+            feedback_covert: true,
             feedback_write: true,
+            use_binding: true,
+            bind_decay: 0.5,
+            // 1.5, because the sweep measured it: the payload chain needs to
+            // be out of the tanh's linear regime before it transforms
+            // anything, and both conjunctions peak here.
+            w_init: 1.5,
             op_gain: 1.0,
             op_mix: 0.5,
             flatten: false,

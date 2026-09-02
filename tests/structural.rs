@@ -169,3 +169,43 @@ fn counter_rng_is_order_independent() {
     let b = unit_vector(1234, 7, 32);
     assert_eq!(bits_of(&a), bits_of(&b), "a draw depended on how many draws preceded it");
 }
+
+/// Two identical runs must produce bit-identical state.
+///
+/// The counter-based RNG guarantees the fixed vectors, but a float sum taken
+/// over hash-map iteration order would still leak the process's hash seed into
+/// the results, and that kind of non-reproducibility hides rather than
+/// announces itself.
+#[test]
+fn two_identical_runs_agree_bit_for_bit() {
+    let run = || {
+        let mut m = Model::new(Config::local());
+        warm(&mut m, 500);
+        (weight_fingerprint(&m), m.total_bits.to_bits(), m.tree.nodes(), m.content_writes)
+    };
+    let a = run();
+    let b = run();
+    assert_eq!(a.0, b.0, "stored weights differed between two identical runs");
+    assert_eq!(a.1, b.1, "accumulated codelength differed between two identical runs");
+    assert_eq!(a.2, b.2, "tree size differed between two identical runs");
+    assert_eq!(a.3, b.3, "write count differed between two identical runs");
+}
+
+/// A read that has walked as far as the write must arrive at the same payload,
+/// or the readout rows are being scored at a point they were never trained at.
+#[test]
+fn read_and_write_walks_agree_once_the_read_has_finished() {
+    let cfg = Config::local();
+    let hops = cfg.hops;
+    let mut m = Model::new(cfg);
+    warm(&mut m, 200);
+    let q = unit_vector(0x9555_6666, 3, m.cfg.d);
+    let a = m.graph.write_walk(&q, &q, hops);
+    let b = m.graph.write_walk(&q, &q, hops);
+    assert_eq!(
+        bits_of(&a.last().unwrap().p_out),
+        bits_of(&b.last().unwrap().p_out),
+        "the same walk over the same weights produced two different payloads"
+    );
+    assert_eq!(a.len(), hops, "the write walk did not take the memory's hop depth");
+}

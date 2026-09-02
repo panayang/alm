@@ -80,7 +80,14 @@ impl Graph {
         }
         let m = head.len();
         let keys = (0..m).map(|a| unit_vector(key ^ KEY_EDGE, a as u64, d)).collect();
-        let w = (0..m).map(|a| Mat::random(key ^ KEY_WMAT, a as u64, d, d, 0.05)).collect();
+        // The initialisation scale decides whether the payload chain does any
+        // work at all. At 0.05 the argument of the tanh is small, the tanh is in
+        // its linear regime, and the residual keeps the input dominant, so the
+        // "learned continuous transform" -- one of the two things this design
+        // claims over a suffix model -- arrives at the readout as very nearly
+        // the identity. It is a config field so that it is swept rather than
+        // silently chosen.
+        let w = (0..m).map(|a| Mat::random(key ^ KEY_WMAT, a as u64, d, d, cfg.w_init)).collect();
         Graph { d, nodes: n, out, head, keys, w, trace: vec![0.0; m], read_cache: vec![None; m] }
     }
 
@@ -244,11 +251,4 @@ impl Graph {
         touched
     }
 
-    pub fn total_weight_norm(&self) -> f64 {
-        let mut s = 0.0f64;
-        for m in self.w.iter() {
-            s += m.frob() as f64;
-        }
-        s
-    }
 }

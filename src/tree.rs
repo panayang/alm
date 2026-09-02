@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::config::Config;
+use crate::config::{Config, SplitRule};
 use crate::num::{dot, normalize, softmax, Running};
 
 pub struct Node {
@@ -38,6 +38,8 @@ pub struct Node {
 
     /// Dispersion statistics for the widen criterion.
     pub sim: Running,
+    /// Per-write surprise in bits, for the predictive split criterion.
+    pub surprise: Running,
     pub hold: u32,
     /// The very first child of the tree has nowhere meaningful to be placed at
     /// construction, so it is placed at the first query that reaches it. Every
@@ -58,6 +60,7 @@ impl Node {
             rows: Vec::new(),
             row_index: HashMap::new(),
             sim: Running::default(),
+            surprise: Running::default(),
             hold: 0,
             placed: true,
         }
@@ -168,6 +171,29 @@ impl Calibration {
         }
         e
     }
+    /// The confidence at which this model is as sure as it ever gets: the
+    /// centre of the highest bin that has enough observations to speak for
+    /// itself.
+    ///
+    /// The commit rule cannot be reused for speaking. "Calibration may only
+    /// raise the bar" is right for a branch -- committing on noise is worse than
+    /// waiting -- but applied to speech it deadlocks: a model that is
+    /// over-confident anywhere has its bar raised to the top, never speaks,
+    /// never generates the data that would calibrate it, and stays silent
+    /// forever. Speaking asks a different question -- am I at the top of my own
+    /// reliability range -- and this is that question's answer, still read out
+    /// of counters and still without a free parameter.
+    pub fn top_bin_centre(&self, min_obs: u64, fallback: f32) -> f32 {
+        let n = self.bins.len();
+        let need = (min_obs / (n as u64)).max(4);
+        for b in (0..n).rev() {
+            if self.bins[b].0 >= need {
+                return ((b as f32 + 0.5) / n as f32).max(fallback);
+            }
+        }
+        fallback
+    }
+
     /// The confidence a branch must reach before this level commits to it.
     ///
     /// Calibration may only *raise* the bar, never lower it. The lowest bin
@@ -198,7 +224,13 @@ impl Calibration {
 }
 
 pub struct Tree {
+    /// Reliability of the *answer*, as distinct from the reliability of a
+    /// branch. Speaking is gated by this one.
+    pub answer_calib: Calibration,
     pub d: usize,
+    /// Width of a readout row. Equal to `d` when the readout sees only the
+    /// payload, and `2 * d` when the bound trace is concatenated onto it.
+    pub fw: usize,
     pub vocab: usize,
     pub arena: Vec<Node>,
     pub calib: Vec<Calibration>,
@@ -206,11 +238,24 @@ pub struct Tree {
     max_children: usize,
     max_nodes: usize,
     grow_theta: f64,
+    split_rule: SplitRule,
+    split_bits: f64,
+    hybrid_coarse_levels: usize,
     grow_hold: u32,
     grow_min_obs: u64,
     deepen_min_obs: u64,
     pub widen_events: u64,
     pub deepen_events: u64,
+    /// How many write descents consulted each ladder rung. A rung with zero
+    /// visits is a band the model does not have, whatever the configuration
+    /// says, and every measurement that varies the rung count depends on this
+    /// being non-degenerate.
+    pub rung_visits: Vec<u64>,
+    /// Mean per-write surprise at the destination, in bits. The split threshold
+    /// has to be chosen against this and not guessed: a threshold below the
+    /// observed range makes every node split always, and a sweep over such
+    /// thresholds returns identical arms.
+    pub leaf_surprise: Running,
 }
 
 impl Tree {
@@ -227,7 +272,9 @@ impl Tree {
         arena.push(first);
         arena[0].children.push(1);
         Tree {
+            answer_calib: Calibration::new(cfg.calib_bins),
             d,
+            fw: if cfg.use_binding { 2 * d } else { d },
             vocab: cfg.vocab,
             arena,
             calib: (0..cap + 1).map(|_| Calibration::new(cfg.calib_bins)).collect(),
@@ -235,12 +282,32 @@ impl Tree {
             max_children: cfg.max_children,
             max_nodes: cfg.max_nodes,
             grow_theta: cfg.grow_theta,
+            split_rule: cfg.split_rule,
+            split_bits: cfg.split_bits,
+            hybrid_coarse_levels: cfg.hybrid_coarse_levels,
             grow_hold: cfg.grow_hold,
             grow_min_obs: cfg.grow_min_obs,
             deepen_min_obs: cfg.deepen_min_obs,
             widen_events: 0,
             deepen_events: 0,
+            rung_visits: vec![0; cfg.rungs],
+            leaf_surprise: Running::default(),
         }
+    }
+
+    /// Fraction of rungs the address genuinely uses.
+    ///
+    /// Counting any rung with a single visit as "used" is too generous: a band
+    /// read twice in fourteen thousand descents is not a band the model has.
+    /// The threshold is one per cent of the busiest rung.
+    pub fn rung_coverage(&self) -> f64 {
+        let max = *self.rung_visits.iter().max().unwrap_or(&0);
+        if max == 0 {
+            return 0.0;
+        }
+        let floor = (max as f64 * 0.01).ceil() as u64;
+        let used = self.rung_visits.iter().filter(|&&v| v >= floor).count();
+        used as f64 / self.rung_visits.len().max(1) as f64
     }
 
     pub fn nodes(&self) -> usize {
@@ -340,6 +407,17 @@ impl Tree {
         sim: f32,
         query: &[f32],
     ) -> bool {
+        let dispersion_here = match self.split_rule {
+            SplitRule::Dispersion => true,
+            SplitRule::Surprise => false,
+            SplitRule::Hybrid => self.arena[winner].level <= self.hybrid_coarse_levels,
+        };
+        if !dispersion_here {
+            // Under a surprise-governed level the statistic arrives after the
+            // write, so the similarity is still recorded but decides nothing.
+            self.arena[winner].sim.push(sim as f64);
+            return false;
+        }
         {
             let n = &mut self.arena[winner];
             n.sim.push(sim as f64);
@@ -357,6 +435,60 @@ impl Tree {
                 return false;
             }
             n.hold = 0;
+        }
+        let grew = self.widen(parent, query).is_some();
+        if grew {
+            self.widen_events += 1;
+        }
+        grew
+    }
+
+    /// Record how surprised a node was by what it just had to store, and split
+    /// it if it is still not predicting its own content.
+    ///
+    /// Called after the write, with the surprise measured *before* the token was
+    /// counted, so a node is never rewarded for the observation that is about to
+    /// be added to it.
+    pub fn observe_surprise(
+        &mut self,
+        parent: usize,
+        node: usize,
+        bits: f64,
+        query: &[f32],
+    ) -> bool {
+        let surprise_here = match self.split_rule {
+            SplitRule::Surprise => true,
+            SplitRule::Dispersion => false,
+            SplitRule::Hybrid => self.arena[node].level > self.hybrid_coarse_levels,
+        };
+        if !surprise_here {
+            // Still record it: the threshold for a later sweep has to be read
+            // off the observed range, and a run that does not use the rule is
+            // exactly where an unbiased range comes from.
+            self.leaf_surprise.push(bits);
+            return false;
+        }
+        self.leaf_surprise.push(bits);
+        {
+            let n = &mut self.arena[node];
+            n.surprise.push(bits);
+            if n.surprise.n < self.grow_min_obs {
+                n.hold = 0;
+                return false;
+            }
+            if n.surprise.mean > self.split_bits {
+                n.hold += 1;
+            } else {
+                n.hold = 0;
+            }
+            if n.hold < self.grow_hold {
+                return false;
+            }
+            n.hold = 0;
+            // Start the estimate again, so a node that has just been given a
+            // sibling is judged on what it holds afterwards rather than on the
+            // backlog that caused the split.
+            n.surprise = Running::default();
         }
         let grew = self.widen(parent, query).is_some();
         if grew {
@@ -423,12 +555,15 @@ impl Tree {
 
     /// Softmax over the node's own emitted rows. Returns the (token, prob)
     /// pairs; tokens outside the row set are covered by the escape mass.
-    pub fn readout_dist(&self, u: usize, p: &[f32]) -> Vec<(u32, f32)> {
+    /// `phi` is the feature vector: the payload, followed by the bound trace
+    /// when binding is on. Its length must be `self.fw`.
+    pub fn readout_dist(&self, u: usize, phi: &[f32]) -> Vec<(u32, f32)> {
         let node = &self.arena[u];
         if node.rows.is_empty() {
             return Vec::new();
         }
-        let mut s: Vec<f32> = node.rows.iter().map(|(_, r)| dot(r, p)).collect();
+        let w = self.fw.min(phi.len());
+        let mut s: Vec<f32> = node.rows.iter().map(|(_, r)| dot(&r[..w], &phi[..w])).collect();
         softmax(&mut s);
         node.rows.iter().map(|(t, _)| *t).zip(s).collect()
     }
@@ -440,13 +575,13 @@ impl Tree {
     pub fn readout_update(
         &mut self,
         u: usize,
-        p: &[f32],
+        phi: &[f32],
         target: u32,
         negatives: &[u32],
         eta: f32,
     ) -> Vec<f32> {
-        let d = self.d;
-        let dist = self.readout_dist(u, p);
+        let d = self.fw.min(phi.len());
+        let dist = self.readout_dist(u, phi);
         let mut prob: HashMap<u32, f32> = HashMap::new();
         for (t, q) in dist.iter() {
             prob.insert(*t, *q);
@@ -464,9 +599,10 @@ impl Tree {
             let q = *prob.get(&t).unwrap_or(&0.0);
             let err = if t == target { 1.0 - q } else { -q };
             {
-                let row = self.arena[u].row_mut_or_insert(t, d);
+                let fw = self.fw;
+                let row = self.arena[u].row_mut_or_insert(t, fw);
                 for i in 0..d {
-                    row[i] += eta * err * p[i];
+                    row[i] += eta * err * phi[i];
                 }
             }
             if let Some(row) = self.arena[u].row_of(t) {

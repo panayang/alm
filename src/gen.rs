@@ -11,12 +11,30 @@
 //! Three item types carry the three claims:
 //!
 //! * **First order.** A cue, a gap, a target. Tests retrieval across a gap.
-//! * **Second order.** Two cues separated by a controlled interval, then a gap,
-//!   then a target drawn from a Latin square over the cue pair. The square makes
-//!   each cue's marginal information about the target *exactly zero*: only the
-//!   conjunction identifies it. This is what the second-order window measures,
-//!   and without the square the measurement would be satisfied by first-order
-//!   lookup.
+//! * **Second order (Latin).** Two cues separated by a controlled interval, then
+//!   a gap, then a target drawn from a Latin square over the cue pair. The square
+//!   makes each cue's marginal information about the target *exactly zero*: only
+//!   the conjunction identifies it.
+//! * **Second order (product).** The same shape, but the target is a product
+//!   code: cue A names one attribute, cue B names the other, and the pair names
+//!   the cell. The marginals are non-zero here and that is not a defect -- it is
+//!   forced. A zero-marginal table cannot be linearly separable: for each class
+//!   the winning region is a permutation pattern, one cell per row and column,
+//!   while an additive score w_c[a] + v_c[b] carves the grid into intersections
+//!   of staircase half-spaces, which contain whole blocks and cannot isolate m
+//!   scattered cells for m >= 3. So "zero marginals and linearly separable" is
+//!   an empty requirement, and the two item types have to split the difference
+//!   between them:
+//!
+//! ```text
+//!       Latin   -- zero marginals, NOT representable by a linear readout on the
+//!                  superposed cue embeddings. Only the address, or a term that
+//!                  stores the pair, can answer it.
+//!       Product -- non-zero marginals, IS representable. If the model handles
+//!                  product items and fails Latin ones, the readout works and the
+//!                  address is not isolating pairs; if it fails both, something
+//!                  more basic is wrong.
+//! ```
 //! * **Composition.** `a r1 -> b` and `b r2 -> c` appear in the stream; the
 //!   query `a r12 -> c` never does. Anything above the backoff prior here has to
 //!   have come from the payload chain, since the address has nothing to find.
@@ -39,7 +57,10 @@ pub enum Mode {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Kind {
     First,
+    /// Latin square: zero marginals, not linearly separable.
     Second,
+    /// Product code: non-zero marginals, linearly separable.
+    Product,
     /// One of the two support facts for a composition query.
     CompSupport,
     /// The composition query itself, never presented as a fact.
@@ -103,8 +124,12 @@ pub struct GenConfig {
     pub ents_per_domain: usize,
     pub tgts_per_domain: usize,
     /// Side of the Latin square, i.e. how many distinct cueA, cueB and targets
-    /// take part in the second-order items of each domain.
+    /// take part in the Latin second-order items of each domain.
     pub square_m: usize,
+    /// Product code: cue A takes `product_na` values, cue B takes `product_nb`,
+    /// and the target is the cell, so there are na*nb of them.
+    pub product_na: usize,
+    pub product_nb: usize,
     pub zipf_s: f64,
     /// Ticks a regime stays live before the stream moves to the next.
     pub span_ticks: usize,
@@ -117,6 +142,7 @@ pub struct GenConfig {
     /// Relative frequency of the three item types.
     pub w_first: f64,
     pub w_second: f64,
+    pub w_product: f64,
     pub w_comp: f64,
     pub seed: u64,
 }
@@ -130,14 +156,17 @@ impl GenConfig {
             ents_per_domain: 48,
             tgts_per_domain: 48,
             square_m: 6,
+            product_na: 3,
+            product_nb: 2,
             zipf_s: 1.0,
             span_ticks: 4000,
             answer_gap: 6,
             tail_gap: 4,
             separations: vec![1, 2, 4, 8, 16, 32, 64],
-            w_first: 0.45,
-            w_second: 0.40,
-            w_comp: 0.15,
+            w_first: 0.30,
+            w_second: 0.28,
+            w_product: 0.28,
+            w_comp: 0.14,
             seed: 0xA11CE,
         }
     }
@@ -151,6 +180,10 @@ struct Domain {
     sq_a: Vec<usize>,
     sq_b: Vec<usize>,
     sq_tgts: Vec<usize>,
+    pc_a: Vec<usize>,
+    pc_b: Vec<usize>,
+    /// pc_tgts[a * nb + b] is the cell named by the pair.
+    pc_tgts: Vec<usize>,
     /// First-order facts: (cue, target).
     firsts: Vec<(usize, usize)>,
     /// Composition chains: (a, b, c) with relation tokens r1, r2, r12.
@@ -190,9 +223,25 @@ impl Generator {
             let r2 = r1 + 1;
             let r12 = r1 + 2;
 
+            let (na, nb) = (cfg.product_na, cfg.product_nb);
+            // Token budget, laid out so no two item types share a cue or a
+            // target and the measurements cannot contaminate each other.
+            let ent_sq = 2 * m;
+            let ent_pc = na + nb;
+            let free_ent = ent_sq + ent_pc;
+            let tgt_pc = na * nb;
+            let free_tgt = m + tgt_pc;
+            assert!(
+                ents.len() > free_ent + 8 && tgts.len() > free_tgt + 8,
+                "not enough tokens per domain for all item types"
+            );
+
             let sq_a: Vec<usize> = ents[0..m].to_vec();
             let sq_b: Vec<usize> = ents[m..2 * m].to_vec();
             let sq_tgts: Vec<usize> = tgts[0..m].to_vec();
+            let pc_a: Vec<usize> = ents[ent_sq..ent_sq + na].to_vec();
+            let pc_b: Vec<usize> = ents[ent_sq + na..free_ent].to_vec();
+            let pc_tgts: Vec<usize> = tgts[m..free_tgt].to_vec();
             // A Latin square: T[a][b] = (a + b) mod m. Every row and every
             // column is a permutation of the targets, so I(target ; cueA) and
             // I(target ; cueB) are exactly zero while I(target ; cueA, cueB) is
@@ -204,11 +253,11 @@ impl Generator {
                 }
             }
 
-            // First-order facts drawn from the entities that are not in the
-            // square, so the two item types do not contaminate each other.
+            // First-order facts drawn from the entities and targets no other
+            // item type touches.
             let mut firsts = Vec::new();
-            let mut i = 2 * m;
-            let mut j = m;
+            let mut i = free_ent;
+            let mut j = free_tgt;
             while i < ents.len() && j < tgts.len() {
                 firsts.push((ents[i], tgts[j]));
                 i += 1;
@@ -217,17 +266,32 @@ impl Generator {
 
             // Composition chains a -> b -> c, using entities as intermediates.
             let mut chains = Vec::new();
-            let n_chain = 8.min(ents.len() / 4);
+            let n_chain = 8.min((ents.len() - free_ent) / 3);
             for k in 0..n_chain {
-                let a = ents[2 * m + k % (ents.len() - 2 * m)];
-                let b = ents[(2 * m + k + 1) % ents.len()];
-                let c = tgts[(m + k) % tgts.len()];
+                let a = ents[free_ent + 3 * k];
+                let b = ents[free_ent + 3 * k + 1];
+                let c = tgts[free_tgt + k];
                 if a != b {
                     chains.push((a, b, c));
                 }
             }
 
-            domains.push(Domain { ents, tgts, square, sq_a, sq_b, sq_tgts, firsts, chains, r1, r2, r12 });
+            domains.push(Domain {
+                ents,
+                tgts,
+                square,
+                sq_a,
+                sq_b,
+                sq_tgts,
+                pc_a,
+                pc_b,
+                pc_tgts,
+                firsts,
+                chains,
+                r1,
+                r2,
+                r12,
+            });
         }
 
         // Zipf over episode slots inside a domain, which is what makes hub items
@@ -274,11 +338,13 @@ impl Generator {
             counter += 1;
 
             let r = uniform(key ^ 0x11, counter) as f64;
-            let total_w = cfg.w_first + cfg.w_second + cfg.w_comp;
+            let total_w = cfg.w_first + cfg.w_second + cfg.w_product + cfg.w_comp;
             let kind = if r < cfg.w_first / total_w {
                 Kind::First
             } else if r < (cfg.w_first + cfg.w_second) / total_w {
                 Kind::Second
+            } else if r < (cfg.w_first + cfg.w_second + cfg.w_product) / total_w {
+                Kind::Product
             } else {
                 Kind::CompSupport
             };
@@ -336,6 +402,37 @@ impl Generator {
                         answer_gap: cfg.answer_gap,
                         target: tgt,
                         cues: vec![dom.sq_a[a], dom.sq_b[b]],
+                        target_tick,
+                        last_cue_tick,
+                    });
+                }
+                Kind::Product => {
+                    let (na, nb) = (cfg.product_na, cfg.product_nb);
+                    let a = self.zipf_pick(key ^ 0x51, counter, na);
+                    let b = uniform_below(key ^ 0x52, counter, nb as u64) as usize;
+                    let sep_i =
+                        uniform_below(key ^ 0x53, counter, cfg.separations.len() as u64) as usize;
+                    let sep = cfg.separations[sep_i];
+                    let tgt = dom.pc_tgts[a * nb + b];
+
+                    ticks.push(Tick::Token(dom.pc_a[a]));
+                    for _ in 0..sep {
+                        ticks.push(Tick::Baseline);
+                    }
+                    let last_cue_tick = ticks.len();
+                    ticks.push(Tick::Token(dom.pc_b[b]));
+                    for _ in 0..cfg.answer_gap {
+                        ticks.push(Tick::Baseline);
+                    }
+                    let target_tick = ticks.len();
+                    ticks.push(Tick::Token(tgt));
+                    episodes.push(EpisodeRec {
+                        kind: Kind::Product,
+                        domain,
+                        separation: sep,
+                        answer_gap: cfg.answer_gap,
+                        target: tgt,
+                        cues: vec![dom.pc_a[a], dom.pc_b[b]],
                         target_tick,
                         last_cue_tick,
                     });
@@ -403,6 +500,11 @@ impl Generator {
             target_tick,
             last_cue_tick,
         });
+    }
+
+    pub fn product_of(&self, domain: usize) -> (&[usize], &[usize], &[usize]) {
+        let d = &self.domains[domain];
+        (&d.pc_a, &d.pc_b, &d.pc_tgts)
     }
 
     /// Ground-truth tables, for the generator self-tests only.

@@ -145,6 +145,7 @@ pub struct PpmResult {
     pub ppm: Ppm,
     pub first: crate::metrics::Bucket,
     pub second: crate::metrics::Bucket,
+    pub product: crate::metrics::Bucket,
 }
 
 /// Two variants, and the difference between them matters more than either.
@@ -162,6 +163,7 @@ pub fn run(stream: &crate::gen::Stream, order: usize, skip_baseline: bool) -> Pp
     let silence = stream.vocab as u32;
     let mut second = crate::metrics::Bucket::default();
     let mut first = crate::metrics::Bucket::default();
+    let mut product = crate::metrics::Bucket::default();
     for t in 0..stream.len() {
         let sym = match stream.observe(t) {
             Some(x) => x as u32,
@@ -179,10 +181,11 @@ pub fn run(stream: &crate::gen::Stream, order: usize, skip_baseline: bool) -> Pp
         if let Some(i) = stream.ep_at[t] {
             match stream.episodes[i].kind {
                 crate::gen::Kind::Second => second.push(bits, hit),
+                crate::gen::Kind::Product => product.push(bits, hit),
                 crate::gen::Kind::First => first.push(bits, hit),
                 _ => {}
             }
         }
     }
-    PpmResult { ppm, first, second }
+    PpmResult { ppm, first, second, product }
 }

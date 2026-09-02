@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::embed::Embeddings;
 use crate::graph::Graph;
 use crate::ladder::Ladder;
-use crate::num::{argmax, cbrng, normalize, softmax};
+use crate::num::{argmax, normalize, softmax};
 use crate::tree::Tree;
 
 /// Which ladder rung feeds which tree level. Level 1 -- the coarsest decision --
@@ -117,19 +117,19 @@ impl Swarm {
     /// Start a fresh response from a payload. Every particle begins at the root
     /// and they diverge through sampled branches.
     ///
-    /// The memory walk is done once, here, to the same depth and by the same
-    /// routing as the write walk, so a read arrives at exactly the vector the
-    /// readout rows were trained at. Spreading the hops across the descent
-    /// instead couples two resources that are not the same one: the tree depth
-    /// is how finely the address is resolved, the hop count is how far into the
-    /// memory the payload is carried.
-    pub fn seed_response(&mut self, n: usize, p0: &[f32], graph: &mut Graph, hops: usize) {
+    /// The memory walk is *not* done here. One hop happens per tick, so how far
+    /// into the memory a payload is carried is a temporal resource: a response
+    /// gets the depth the world gave it time for. Routing is by the fixed `q0`,
+    /// the same way the write walks, so a read that has taken as many hops as
+    /// the write arrives at the same vector and the readout rows mean something.
+    ///
+    /// Hop count is deliberately not tied to tree depth. They are different
+    /// resources -- how finely the address is resolved, and how far the payload
+    /// has been carried -- and coupling them was what made the readout get
+    /// evaluated at points it was never trained at.
+    pub fn seed_response(&mut self, n: usize, p0: &[f32], graph: &mut Graph, _hops: usize) {
         let gn = graph.entry(p0);
-        let steps = graph.write_walk(p0, p0, hops);
-        for st in steps.iter() {
-            graph.touch_read(st);
-        }
-        let p_end = steps.last().map(|s| s.p_out.clone()).unwrap_or_else(|| p0.to_vec());
+        let p_end = p0.to_vec();
         self.parts.clear();
         self.weights.clear();
         self.pending.clear();
@@ -138,7 +138,7 @@ impl Swarm {
                 code: PathCode::root(),
                 p: p_end.clone(),
                 q0: p0.to_vec(),
-                hops_taken: hops,
+                hops_taken: 0,
                 gnode: gn,
                 logw: 0.0,
                 ticks_here: 0,
@@ -153,21 +153,42 @@ impl Swarm {
     /// is composed multiplicatively, so order matters, and no separate re-drive
     /// rule is needed -- the particles are rescored against the new background
     /// on the very next tick and the ones that no longer fit lose their weight.
-    pub fn drive(&mut self, tok: usize, emb: &Embeddings, graph: &mut Graph, hops: usize) {
+    pub fn drive(&mut self, tok: usize, emb: &Embeddings, graph: &mut Graph, _hops: usize) {
         for i in 0..self.parts.len() {
             emb.apply_operator(Some(tok), &mut self.parts[i].q0);
             let q0 = self.parts[i].q0.clone();
-            let steps = graph.write_walk(&q0, &q0, hops);
-            for st in steps.iter() {
-                graph.touch_read(st);
-            }
-            self.parts[i].p =
-                steps.last().map(|s| s.p_out.clone()).unwrap_or_else(|| q0.clone());
+            self.parts[i].p = q0.clone();
             self.parts[i].gnode = graph.entry(&q0);
-            self.parts[i].hops_taken = hops;
+            self.parts[i].hops_taken = 0;
             self.parts[i].evidence.clear();
             self.parts[i].ticks_here = 0;
         }
+    }
+
+    /// One memory hop per particle per tick, until the walk is as deep as the
+    /// memory allows. This is the rate limit doing its work: a response reaches
+    /// only as far into the memory as it had ticks for.
+    pub fn advance_walk(&mut self, graph: &mut Graph) {
+        for i in 0..self.parts.len() {
+            if self.parts[i].hops_taken >= self.hops {
+                continue;
+            }
+            let a = graph.select(self.parts[i].gnode, &self.parts[i].q0);
+            let st = graph.hop(a, &self.parts[i].p);
+            self.parts[i].p = st.p_out.clone();
+            self.parts[i].gnode = graph.head_of(a);
+            self.parts[i].hops_taken += 1;
+            graph.touch_read(&st);
+        }
+    }
+
+    /// Mean hops taken, so the depth a response actually reached is reported
+    /// rather than assumed.
+    pub fn mean_hops(&self) -> f32 {
+        if self.parts.is_empty() {
+            return 0.0;
+        }
+        self.parts.iter().map(|p| p.hops_taken as f32).sum::<f32>() / self.parts.len() as f32
     }
 
     fn query_for(&self, level: usize, p: &[f32], ladder: &Ladder, out: &mut Vec<f32>) {
@@ -189,6 +210,7 @@ impl Swarm {
     /// stream.
     pub fn step(&mut self, tree: &mut Tree, graph: &mut Graph, ladder: &Ladder) {
         self.step_counter += 1;
+        self.advance_walk(graph);
         let mut query = Vec::with_capacity(self.d);
 
         for i in 0..self.parts.len() {
@@ -464,7 +486,4 @@ impl Swarm {
         seen.len() as f32 / self.parts.len() as f32
     }
 
-    pub fn touch(&self, _c: u64) -> u64 {
-        cbrng(self.seed, self.step_counter)
-    }
 }

@@ -33,9 +33,6 @@ impl Channel {
             Channel::Write => 3,
         }
     }
-    pub fn is_self(self) -> bool {
-        !matches!(self, Channel::In)
-    }
 }
 
 pub struct Embeddings {
