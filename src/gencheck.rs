@@ -53,6 +53,9 @@ pub struct GenReport {
     /// property that makes the item type representable by a linear readout, and
     /// it is checked on the emitted stream rather than assumed.
     pub product_separable_fraction: f64,
+    /// Second-order items per regime. The conjunction estimate is only worth
+    /// asserting on when this is comfortably above the number of cells.
+    pub second_per_domain: f64,
 
     /// Episodes per requested separation.
     pub sep_counts: Vec<(u32, usize)>,
@@ -80,26 +83,47 @@ fn entropy(counts: &HashMap<u64, u64>, total: u64) -> f64 {
     // reproducible: Rust seeds each process's hasher differently, so the same
     // stream would report slightly different numbers on every run and an
     // assertion sitting near its threshold would be flaky for no reason.
+    //
+    // Miller-Madow corrected. The plug-in entropy is biased *down* by roughly
+    // (K-1)/(2N) nats, so a plug-in mutual information is biased *up* -- and
+    // with a 6x6 table seen 78 times per regime that bias is about 0.23 bits,
+    // which is the whole of what an uncorrected estimator reports as "the cue
+    // already tells you the answer". Correcting it is not a nicety here: it is
+    // the difference between a data check that measures the source and one that
+    // measures its own sample size.
     let mut cs: Vec<u64> = counts.values().copied().collect();
     cs.sort_unstable();
     let mut h = 0.0;
+    let mut support = 0u64;
     for c in cs {
         if c == 0 {
             continue;
         }
+        support += 1;
         let p = c as f64 / total as f64;
         h -= p * p.log2();
+    }
+    if total > 0 && support > 1 {
+        h += (support - 1) as f64 / (2.0 * total as f64 * std::f64::consts::LN_2);
     }
     h
 }
 
-fn conditional_entropy(joint: &HashMap<(u64, u64), u64>, marginal: &HashMap<u64, u64>, total: u64) -> f64 {
+fn conditional_entropy(
+    joint: &HashMap<(u64, u64), u64>,
+    marginal: &HashMap<u64, u64>,
+    total: u64,
+) -> f64 {
     let mut keys: Vec<(u64, u64)> = joint.keys().copied().collect();
     keys.sort_unstable();
     let mut h = 0.0;
+    // Support of T within each value of X, for the same correction applied
+    // conditionally.
+    let mut support_per_x: HashMap<u64, u64> = HashMap::new();
     for k in keys {
         let (x, _y) = k;
         let c = joint[&k];
+        *support_per_x.entry(x).or_insert(0) += 1;
         let px = *marginal.get(&x).unwrap_or(&0) as f64 / total as f64;
         if px <= 0.0 || c == 0 {
             continue;
@@ -107,9 +131,20 @@ fn conditional_entropy(joint: &HashMap<(u64, u64), u64>, marginal: &HashMap<u64,
         let pxy = c as f64 / total as f64;
         h -= pxy * (pxy / px).log2();
     }
+    if total > 0 {
+        let mut xs: Vec<u64> = support_per_x.keys().copied().collect();
+        xs.sort_unstable();
+        let mut extra = 0.0;
+        for x in xs {
+            let k = support_per_x[&x];
+            if k > 1 {
+                extra += (k - 1) as f64;
+            }
+        }
+        h += extra / (2.0 * total as f64 * std::f64::consts::LN_2);
+    }
     h
 }
-
 
 /// Least-squares slope of log y on log x.
 fn loglog_slope(pts: &[(f64, f64)]) -> f64 {
@@ -344,6 +379,11 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
         product_within_pair: pab,
         product_items: prod_all.len(),
         product_separable_fraction,
+        second_per_domain: if by_domain.is_empty() {
+            0.0
+        } else {
+            second as f64 / by_domain.len() as f64
+        },
         sep_counts: sep_list,
         zipf_exponent,
         heaps_exponent,
@@ -369,7 +409,10 @@ impl GenReport {
             "  within regime        I(T;A|D) {:.3}  I(T;B|D) {:.3}  I(T;A,B|D) {:.3}  bits",
             self.mi_within_cue_a, self.mi_within_cue_b, self.mi_within_pair
         );
-        println!("  conjunctive gain     {:.3} bits  (within regime)", self.conjunctive_gain);
+        println!(
+            "  conjunctive gain     {:.3} bits  (within regime, Miller-Madow              corrected, {:.0} items per regime)",
+            self.conjunctive_gain, self.second_per_domain
+        );
         println!(
             "  product code         I(T;A|D) {:.3}  I(T;B|D) {:.3}  I(T;A,B|D) {:.3}  \
              bits over {} items",
@@ -405,6 +448,11 @@ impl GenReport {
              information beyond their marginals, so the second-order window \
              would measure nothing. Fix the generator, not the model.",
             self.conjunctive_gain
+        );
+        assert!(
+            self.second_per_domain >= 2.0 * 36.0,
+            "only {:.0} second-order items per regime against 36 cells: the              conjunction estimate is sample-limited and asserting on it would              be asserting on the sample size, not on the source",
+            self.second_per_domain
         );
         assert!(
             self.mi_within_cue_a < 0.25 && self.mi_within_cue_b < 0.25,

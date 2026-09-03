@@ -17,6 +17,7 @@
 use crate::config::Config;
 use crate::num::{dot, norm, normalize};
 
+#[derive(Clone)]
 pub struct Ladder {
     pub d: usize,
     pub rungs: usize,

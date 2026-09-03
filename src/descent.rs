@@ -32,6 +32,7 @@ pub fn rung_for_level(rungs: usize, level: usize) -> usize {
     rungs.saturating_sub(level).min(rungs - 1)
 }
 
+#[derive(Clone)]
 pub struct Particle {
     pub code: PathCode,
     /// Confidence in the leading branch on the previous tick at this level.
@@ -64,6 +65,7 @@ pub struct PendingCommit {
     pub chosen: usize,
 }
 
+#[derive(Clone)]
 pub struct Swarm {
     pub parts: Vec<Particle>,
     /// Index of the particle that exploits and whose commitments are

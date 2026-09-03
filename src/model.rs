@@ -48,7 +48,32 @@ pub struct TickOutcome {
     pub wrote: bool,
 }
 
+/// Everything a probe displaces and has to give back.
+///
+/// The memory itself -- the tree, its rows, the edge transforms -- is not in
+/// here: a probe runs frozen, so nothing in the memory may change. What a probe
+/// unavoidably disturbs is the *situation*: the background, the cue it composed,
+/// the bound traces, and the live particles. Those are saved and restored, which
+/// is what makes a retention number a statement about what was stored rather
+/// than about what the probe happened to leave behind.
+#[derive(Clone)]
+pub struct Volatile {
+    ladder: crate::ladder::Ladder,
+    cue: Vec<f32>,
+    binds: Vec<Vec<f32>>,
+    event_hist: Vec<usize>,
+    swarm: Swarm,
+    covert: Option<usize>,
+    overt: Option<usize>,
+    ticks_since_event: u32,
+    prev_answer_conf: f32,
+}
+
 pub struct Model {
+    /// While frozen the model reads and emits but stores nothing: no content
+    /// write, no growth, no calibration, no visit counting. A probe that wrote
+    /// would be retraining on the fact it is testing.
+    pub frozen: bool,
     pub cfg: Config,
     pub emb: Embeddings,
     pub ladder: Ladder,
@@ -111,6 +136,7 @@ impl Model {
         let blocks = cfg.feature_blocks().saturating_sub(1);
         let binds = vec![vec![0.0f32; d]; blocks];
         Model {
+            frozen: false,
             cfg,
             emb,
             ladder,
@@ -141,6 +167,66 @@ impl Model {
         }
     }
 
+    pub fn volatile(&self) -> Volatile {
+        Volatile {
+            ladder: self.ladder.clone(),
+            cue: self.cue.clone(),
+            binds: self.binds.clone(),
+            event_hist: self.event_hist.clone(),
+            swarm: self.swarm.clone(),
+            covert: self.covert,
+            overt: self.overt,
+            ticks_since_event: self.ticks_since_event,
+            prev_answer_conf: self.prev_answer_conf,
+        }
+    }
+
+    pub fn restore(&mut self, v: Volatile) {
+        self.ladder = v.ladder;
+        self.cue = v.cue;
+        self.binds = v.binds;
+        self.event_hist = v.event_hist;
+        self.swarm = v.swarm;
+        self.covert = v.covert;
+        self.overt = v.overt;
+        self.ticks_since_event = v.ticks_since_event;
+        self.prev_answer_conf = v.prev_answer_conf;
+        self.committed = None;
+        self.committed_token = None;
+        self.covert_log.clear();
+        self.overt_log.clear();
+    }
+
+    /// Run one retention probe under frozen memory and return the codelength it
+    /// was charged and whether the top answer was right.
+    ///
+    /// The caller is responsible for nothing: the displaced state is saved and
+    /// put back here, so a probe cannot leak into the stream that follows it.
+    pub fn probe(&mut self, spec: &crate::gen::ProbeSpec, answer_gap: u32) -> (f64, bool) {
+        let saved = self.volatile();
+        let was_frozen = self.frozen;
+        self.frozen = true;
+
+        // Restore the background this regime lived in.
+        for &c in spec.context.iter() {
+            self.tick(Some(c), false);
+            self.tick(None, false);
+        }
+        // Present the cue, then the gap, then score the target.
+        for (i, &c) in spec.cue.iter().enumerate() {
+            self.tick(Some(c), false);
+            let gap = if i + 1 == spec.cue.len() { answer_gap } else { 1 };
+            for _ in 0..gap {
+                self.tick(None, false);
+            }
+        }
+        let out = self.tick(Some(spec.target), false);
+
+        self.frozen = was_frozen;
+        self.restore(saved);
+        (out.bits, out.correct)
+    }
+
     /// The deterministic descent the write takes: argmax at every level, one
     /// pass, no evidence accumulation. Its path is the target the read
     /// particles' branch predictions are calibrated against -- a prediction made
@@ -164,7 +250,7 @@ impl Model {
                 query[i] += p[i];
             }
             normalize(&mut query);
-            if grow {
+            if grow && !self.frozen {
                 self.tree.rung_visits[k] += 1;
                 self.tree.place_pending(u, &query);
             }
@@ -505,7 +591,9 @@ impl Model {
                     };
                     // The answer calibration's target is the stream itself: the
                     // model said t with confidence q before the world said x.
-                    self.tree.answer_calib.push(q, t == x);
+                    if !self.frozen {
+                        self.tree.answer_calib.push(q, t == x);
+                    }
                 }
                 if want_entropy {
                     let sp = code::spread(
@@ -539,8 +627,12 @@ impl Model {
                 let steps = self.graph.write_walk(&cue, &cue, self.cfg.hops);
                 let p_end =
                     steps.last().map(|s| s.p_out.clone()).unwrap_or_else(|| cue.clone());
-                let (truth, truth_queries) = self.write_descent(&p_end, true);
+                let grow = !self.frozen;
+                let (truth, truth_queries) = self.write_descent(&p_end, grow);
                 for pc in self.swarm.pending.clone() {
+                    if self.frozen {
+                        break;
+                    }
                     if pc.level < truth.len() {
                         let correct = truth[pc.level] == pc.chosen;
                         let lv = pc.level.min(self.tree.calib.len() - 1);
@@ -551,7 +643,7 @@ impl Model {
 
                 // 3. Write. Gated by the operator norm, which is exactly zero at
                 //    baseline and so cannot reach this branch from there.
-                let gate = self.emb.drive_norm(Some(x));
+                let gate = if self.frozen { 0.0 } else { self.emb.drive_norm(Some(x)) };
                 if gate > 0.0 {
                     let leaf = *truth.last().unwrap();
                     // How surprised the destination was, measured before the

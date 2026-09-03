@@ -42,6 +42,30 @@
 //! Segmentation is carried by the baseline and nothing else. The model receives
 //! `Option<usize>` per tick and never sees the episode records, which exist only
 //! for measurement.
+//!
+//! # The curriculum
+//!
+//! Regimes **arrive and depart**. A domain becomes live, runs for a few spans,
+//! and is never presented again. The pool is far larger than the number live at
+//! any moment, so over a run the stream introduces far more content than is ever
+//! concurrently active.
+//!
+//! This is the difference between a continual-learning source and a stationary
+//! multi-domain one, and it was missing. With every domain recurring forever
+//! nothing is ever old, there is no forgetting pressure at all, and a single
+//! flat readout large enough to hold the whole vocabulary is not being asked the
+//! question that allocation exists to answer. A flat control winning on such a
+//! source says something about the source.
+//!
+//! Retention is measured by **probes on departed domains**, run under frozen
+//! memory: the probe restores the context that regime needs, is scored, and the
+//! displaced state is put back. Writing during a probe would be retraining on
+//! the thing being tested.
+//!
+//! `stagger` off is the control the reference mechanism's appendix demands: a
+//! regime arriving late benefits from entering an already-shaped system, and a
+//! cost ratio below one cannot be read as amortisation until staggering has been
+//! removed and the effect has survived.
 
 use crate::num::{uniform, uniform_below};
 
@@ -91,11 +115,32 @@ pub struct EpisodeRec {
     pub last_cue_tick: usize,
 }
 
+/// One retention test on a departed regime.
+///
+/// The context tokens are presented first so the background is the one that
+/// regime lived in -- an address conditioned on context cannot be probed from
+/// the wrong context and the result would say nothing. Everything here runs
+/// with memory frozen and the displaced state restored afterwards.
+#[derive(Clone)]
+pub struct ProbeSpec {
+    pub domain: usize,
+    /// Tokens presented to restore the regime's background.
+    pub context: Vec<usize>,
+    /// The cue tokens of the fact being probed.
+    pub cue: Vec<usize>,
+    pub target: usize,
+    pub kind: Kind,
+    /// Spans since this domain last appeared in the stream.
+    pub age_spans: u32,
+}
+
 pub struct Stream {
     pub ticks: Vec<Tick>,
     pub episodes: Vec<EpisodeRec>,
     /// `ep_at[t]` is the episode whose target sits at tick t, if any.
     pub ep_at: Vec<Option<usize>>,
+    /// Probe batches to run at a given tick, under frozen memory.
+    pub probe_at: Vec<Vec<ProbeSpec>>,
     pub vocab: usize,
 }
 
@@ -106,6 +151,10 @@ impl Stream {
     pub fn is_empty(&self) -> bool {
         self.ticks.is_empty()
     }
+    pub fn probes(&self) -> usize {
+        self.probe_at.iter().map(|v| v.len()).sum()
+    }
+
     /// The only thing the model is allowed to consume.
     #[inline]
     pub fn observe(&self, t: usize) -> Option<usize> {
@@ -131,8 +180,19 @@ pub struct GenConfig {
     pub product_na: usize,
     pub product_nb: usize,
     pub zipf_s: f64,
-    /// Ticks a regime stays live before the stream moves to the next.
+    /// Ticks in one span.
     pub span_ticks: usize,
+    /// How many domains are live at once.
+    pub concurrent: usize,
+    /// How many spans a domain stays live before departing for good.
+    pub lifetime_spans: usize,
+    /// Whether domains arrive staggered. Off means every domain is live from
+    /// the start, which is the control for arrival-order effects.
+    pub stagger: bool,
+    /// Spans between batches of retention probes.
+    pub probe_every_spans: usize,
+    /// Probes per batch, spread over the departed domains by age.
+    pub probes_per_batch: usize,
     /// Baseline ticks between the last cue and the target.
     pub answer_gap: u32,
     /// Baseline ticks after the target, before the next episode.
@@ -152,14 +212,19 @@ impl GenConfig {
         GenConfig {
             vocab: 4096,
             mode: Mode::A,
-            domains: 6,
-            ents_per_domain: 48,
-            tgts_per_domain: 48,
+            domains: 32,
+            ents_per_domain: 32,
+            tgts_per_domain: 32,
             square_m: 6,
             product_na: 3,
             product_nb: 2,
             zipf_s: 1.0,
             span_ticks: 4000,
+            concurrent: 3,
+            lifetime_spans: 3,
+            stagger: true,
+            probe_every_spans: 2,
+            probes_per_batch: 24,
             answer_gap: 6,
             tail_gap: 4,
             separations: vec![1, 2, 4, 8, 16, 32, 64],
@@ -310,6 +375,50 @@ impl Generator {
         Generator { cfg, domains, zipf_cdf: cdf }
     }
 
+    /// The domains live during span `s`.
+    ///
+    /// Staggered: domain d is live for `lifetime_spans` spans starting at span
+    /// d, so `concurrent` of them overlap and each departs permanently. Not
+    /// staggered: every domain is live throughout, which is the control -- it
+    /// removes arrival order without removing anything else.
+    pub fn live_domains(&self, s: usize) -> Vec<usize> {
+        let cfg = &self.cfg;
+        if !cfg.stagger {
+            return (0..cfg.domains).collect();
+        }
+        let stride = cfg.lifetime_spans.max(1) / cfg.concurrent.max(1);
+        let stride = stride.max(1);
+        let mut live = Vec::new();
+        for d in 0..cfg.domains {
+            let start = d * stride;
+            if s >= start && s < start + cfg.lifetime_spans {
+                live.push(d);
+            }
+        }
+        if live.is_empty() {
+            // Past the end of the curriculum the last domains stay live rather
+            // than emitting nothing.
+            let last = cfg.domains.saturating_sub(cfg.concurrent);
+            live = (last..cfg.domains).collect();
+        }
+        live
+    }
+
+    /// The last span in which `d` was live, or None if it has not departed by
+    /// span `s`.
+    fn departed_at(&self, d: usize, s: usize) -> Option<usize> {
+        if !self.cfg.stagger {
+            return None;
+        }
+        let stride = (self.cfg.lifetime_spans.max(1) / self.cfg.concurrent.max(1)).max(1);
+        let end = d * stride + self.cfg.lifetime_spans;
+        if end <= s {
+            Some(end)
+        } else {
+            None
+        }
+    }
+
     fn zipf_pick(&self, key: u64, idx: u64, n: usize) -> usize {
         let u = uniform(key, idx) as f64;
         let mut lo = 0usize;
@@ -332,8 +441,26 @@ impl Generator {
         let mut episodes: Vec<EpisodeRec> = Vec::new();
         let mut counter: u64 = 0;
 
+        let mut probe_at: Vec<Vec<ProbeSpec>> = Vec::new();
+        let mut last_span = usize::MAX;
+
         while ticks.len() < total_ticks {
-            let domain = (ticks.len() / cfg.span_ticks) % cfg.domains;
+            let span = ticks.len() / cfg.span_ticks;
+            if span != last_span {
+                last_span = span;
+                // At a span boundary, test what has already departed.
+                if span > 0 && span % cfg.probe_every_spans == 0 {
+                    let batch = self.build_probes(span, counter);
+                    if !batch.is_empty() {
+                        while probe_at.len() <= ticks.len() {
+                            probe_at.push(Vec::new());
+                        }
+                        probe_at[ticks.len()] = batch;
+                    }
+                }
+            }
+            let live = self.live_domains(span);
+            let domain = live[uniform_below(key ^ 0x71, counter, live.len() as u64) as usize];
             let dom = &self.domains[domain];
             counter += 1;
 
@@ -469,7 +596,54 @@ impl Generator {
         for (i, e) in episodes.iter().enumerate() {
             ep_at[e.target_tick] = Some(i);
         }
-        Stream { ticks, episodes, ep_at, vocab: cfg.vocab }
+        probe_at.resize(ticks.len(), Vec::new());
+        Stream { ticks, episodes, ep_at, probe_at, vocab: cfg.vocab }
+    }
+
+    /// One batch of retention probes, spread over the departed domains so that
+    /// recently departed and long departed regimes are both represented.
+    fn build_probes(&self, span: usize, counter: u64) -> Vec<ProbeSpec> {
+        let cfg = &self.cfg;
+        let mut departed: Vec<(usize, u32)> = Vec::new();
+        for d in 0..cfg.domains {
+            if let Some(end) = self.departed_at(d, span) {
+                departed.push((d, (span - end) as u32));
+            }
+        }
+        if departed.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(cfg.probes_per_batch);
+        for i in 0..cfg.probes_per_batch {
+            let (d, age) = departed[i % departed.len()];
+            let dom = &self.domains[d];
+            let m = cfg.square_m;
+            let (na, nb) = (cfg.product_na, cfg.product_nb);
+            // Context: a few of the regime's own entities, so the background is
+            // the one it lived in.
+            let ctx: Vec<usize> = dom.ents.iter().take(4).copied().collect();
+            // Rotate through the item types so retention is not measured on one
+            // kind of fact only.
+            let (cue, target, kind) = match i % 3 {
+                0 if !dom.firsts.is_empty() => {
+                    let j = (counter as usize + i) % dom.firsts.len();
+                    let (c, t) = dom.firsts[j];
+                    (vec![c], t, Kind::First)
+                }
+                1 => {
+                    let a = (counter as usize + i) % m;
+                    let b = (counter as usize + 2 * i) % m;
+                    (vec![dom.sq_a[a], dom.sq_b[b]], dom.sq_tgts[dom.square[a * m + b]], Kind::Second)
+                }
+                _ => {
+                    let a = (counter as usize + i) % na;
+                    let b = (counter as usize + 2 * i) % nb;
+                    (vec![dom.pc_a[a], dom.pc_b[b]], dom.pc_tgts[a * nb + b], Kind::Product)
+                }
+            };
+            out.push(ProbeSpec { domain: d, context: ctx, cue, target, kind, age_spans: age });
+        }
+        out
     }
 
     fn emit_pair(

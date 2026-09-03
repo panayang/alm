@@ -148,6 +148,10 @@ pub struct Metrics {
     /// Self-poisoning: bucketed by the fraction of recent ticks that carried an
     /// overt emission.
     pub poisoning: Vec<Bucket>,
+    /// Retention on departed regimes, bucketed by how many spans ago the regime
+    /// left the stream. Measured under frozen memory, so it is a statement about
+    /// what was stored and not about what the probe left behind.
+    pub retention: Vec<Bucket>,
     pub composition_query: Bucket,
     pub composition_support: Bucket,
     pub all_events: Bucket,
@@ -191,6 +195,7 @@ pub struct Metrics {
 const SHARP_MAX: usize = 24;
 const DIST_MAX: usize = 8;
 const POISON_BINS: usize = 5;
+const RETENTION_BINS: usize = 8;
 const OVERT_WINDOW: usize = 64;
 
 impl Metrics {
@@ -202,6 +207,7 @@ impl Metrics {
             gap: gaps.iter().map(|&g| (g, Bucket::default())).collect(),
             by_distance: vec![Bucket::default(); DIST_MAX],
             poisoning: vec![Bucket::default(); POISON_BINS],
+            retention: vec![Bucket::default(); RETENTION_BINS],
             composition_query: Bucket::default(),
             composition_support: Bucket::default(),
             all_events: Bucket::default(),
@@ -357,6 +363,11 @@ impl Metrics {
         }
     }
 
+    pub fn note_probe(&mut self, age_spans: u32, bits: f64, correct: bool) {
+        let b = (age_spans as usize).min(RETENTION_BINS - 1);
+        self.retention[b].push(bits, correct);
+    }
+
     pub fn bits_per_event(&self) -> f64 {
         if self.charged_events == 0 {
             0.0
@@ -460,6 +471,19 @@ impl Metrics {
                 println!(
                     "     gap={:<4} n={:<6} bits={:.3} acc={:.3}",
                     g,
+                    b.n,
+                    b.mean(),
+                    b.accuracy()
+                );
+            }
+        }
+
+        println!("  -- retention on departed regimes (frozen memory)");
+        for (a, b) in self.retention.iter().enumerate() {
+            if b.n > 0 {
+                println!(
+                    "     age={:<3} spans  n={:<6} bits={:.3} acc={:.3}",
+                    a,
                     b.n,
                     b.mean(),
                     b.accuracy()
@@ -590,6 +614,10 @@ pub fn run(model: &mut Model, stream: &Stream, metrics: &mut Metrics) {
     for t in 0..stream.len() {
         let want_entropy = every > 0 && (t as u64) % every == 0;
         let obs = stream.observe(t);
+        for spec in stream.probe_at[t].iter() {
+            let (bits, correct) = model.probe(spec, 6);
+            metrics.note_probe(spec.age_spans, bits, correct);
+        }
         let out = model.tick(obs, want_entropy);
         let (ref_bits, _) = reference.observe(match obs {
             Some(x) => x as u32,

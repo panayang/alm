@@ -209,3 +209,53 @@ fn read_and_write_walks_agree_once_the_read_has_finished() {
     );
     assert_eq!(a.len(), hops, "the write walk did not take the memory's hop depth");
 }
+
+/// A retention probe must leave the model exactly as it found it.
+///
+/// The memory must not move because a probe that writes is retraining on the
+/// fact it is testing; the volatile state must not move either, because a probe
+/// that leaves its own context behind contaminates every measurement after it.
+/// Both are checked bit for bit rather than approximately.
+#[test]
+fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
+    use alm::gen::{GenConfig, Generator, Kind};
+    let mut m = Model::new(Config::local());
+    warm(&mut m, 400);
+    // Put the model mid-response, so the restored state is a non-trivial one.
+    m.tick(Some(31), false);
+    m.tick(None, false);
+
+    let gen = Generator::new(GenConfig::local());
+    let ents = gen.entities_of(0).to_vec();
+    let tgts = gen.targets_of(0).to_vec();
+    let spec = alm::gen::ProbeSpec {
+        domain: 0,
+        context: ents[0..4].to_vec(),
+        cue: vec![ents[0]],
+        target: tgts[0],
+        kind: Kind::First,
+        age_spans: 1,
+    };
+
+    let mem_before = weight_fingerprint(&m);
+    let counts_before: Vec<(usize, u64)> =
+        m.tree.arena.iter().enumerate().map(|(i, n)| (i, n.total)).collect();
+    let nodes_before = m.tree.nodes();
+    let writes_before = m.content_writes;
+    let sit_before = bits_of(&m.swarm.payloads().concat());
+
+    let (bits, _) = m.probe(&spec, 6);
+    assert!(bits.is_finite() && bits > 0.0, "the probe was not charged anything");
+
+    assert!(mem_before == weight_fingerprint(&m), "a probe changed stored weights");
+    assert_eq!(nodes_before, m.tree.nodes(), "a probe grew the tree");
+    assert_eq!(writes_before, m.content_writes, "a probe performed a content write");
+    let counts_after: Vec<(usize, u64)> =
+        m.tree.arena.iter().enumerate().map(|(i, n)| (i, n.total)).collect();
+    assert_eq!(counts_before, counts_after, "a probe changed the occupancy counts");
+    assert_eq!(
+        sit_before,
+        bits_of(&m.swarm.payloads().concat()),
+        "a probe left its own context behind instead of restoring the displaced state"
+    );
+}
