@@ -68,6 +68,20 @@ fn main() {
                 );
             }
         }
+        "scale" => {
+            let suite = experiments::scale(ticks, seed);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
+        "capacity" => {
+            let suite = experiments::capacity(ticks, seed);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "screen" | "full" => {
             let suite = experiments::screen(ticks, seed, cmd == "full");
             println!();
@@ -81,6 +95,6 @@ fn main() {
 csv written to {}", path);
             }
         }
-        other => panic!("unknown command {} (try gencheck, baseline, screen, full)", other),
+        other => panic!("unknown command {} (try gencheck, baseline, capacity, screen, full)", other),
     }
 }

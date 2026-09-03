@@ -402,6 +402,22 @@ impl Model {
     /// than autonomous, and therefore what makes it converge instead of drifting
     /// into a fixed point or a cycle.
     fn step_walk(&mut self) {
+        if self.cfg.bypass_graph {
+            // The monolith still integrates the background -- the ladder is
+            // part of the single body, not part of the extension. What is gone
+            // is the routed transform.
+            if self.cfg.anchor > 0.0 {
+                for k in 0..self.cfg.rungs {
+                    let b = self.ladder.delta(k);
+                    for i in 0..self.cfg.d {
+                        self.p[i] += self.cfg.anchor * b[i];
+                    }
+                }
+            }
+            crate::num::normalize(&mut self.p);
+            self.hops += 1;
+            return;
+        }
         let mut q = Vec::with_capacity(self.cfg.d);
         self.query(&mut q);
         let a = self.graph.select_rank(self.gnode, &q, self.cfg.route_perturb);
@@ -679,7 +695,11 @@ impl Model {
                     // landed on the same edge together, so the near-miss
                     // experiment had no inconsistency left to detect and its
                     // flat curve measured nothing.
-                    let steps = self.graph.write_walk(&p0, &p0, self.cfg.hops);
+                    let steps = if self.cfg.bypass_graph {
+                        Vec::new()
+                    } else {
+                        self.graph.write_walk(&p0, &p0, self.cfg.hops)
+                    };
                     self.store.write_surprise.push(out.bits);
                     let eta = self.cfg.eta * gate;
                     if !self.cfg.no_readout {

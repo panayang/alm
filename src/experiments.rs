@@ -89,6 +89,146 @@ pub fn hop_slope(m: &Metrics) -> (f64, f64, usize) {
     (slope, last - first, pts.len())
 }
 
+/// Phase A: where is the monolith's capacity knee?
+///
+/// A multi-body extension buys capacity with addressing error. Comparing it to a
+/// monolith that is not yet capacity-bound charges it the whole price of scale
+/// and credits it none of the benefit -- which is what the previous ablation
+/// table did, and why every routed arm read as dead weight.
+///
+/// So this asks the prior question. The monolith's capacity is the linear
+/// separability of a fixed-width phi, so sweeping `d` sweeps capacity directly
+/// at constant load. Flat in `d` means there is spare capacity, no extension can
+/// pay here, and the comparison has to move to a heavier load before it means
+/// anything.
+///
+/// Parameter counts are printed because the comparison that follows has to be
+/// budget-matched: the monolith should be allowed to spend on width whatever the
+/// extension spends on nodes.
+pub fn capacity(ticks: usize, seed: u64) -> Suite {
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for d in [16usize, 32, 64, 128] {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = gcfg.vocab;
+        c.d = d;
+        c.bypass_graph = true;
+        c.derive();
+        arms.push((format!("mono d={}", d), c));
+    }
+    // The extension at the default width, for reference only -- it is not yet a
+    // fair comparison and is not reported as one.
+    let mut g = Config::local();
+    g.seed = seed;
+    g.vocab = gcfg.vocab;
+    g.derive();
+    arms.push(("graph d=64 (ref)".into(), g));
+
+    for (name, c) in arms {
+        let readout = c.feature_blocks() * c.d;
+        let graph_params = if c.bypass_graph { 0 } else { c.nodes * (2 + c.shortcuts) * c.d * c.d };
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        let rows = o.model.store.occupied_rows();
+        suite.note(format!(
+            "[cap] {:<16} {:.3} bits/ev | Latin {:.3} | product {:.3} |              retention {:.3} | readout {} x {} = {:.2}M | graph {:.2}M",
+            name,
+            o.metrics.bits_per_event(),
+            la,
+            pa,
+            ret_acc,
+            rows,
+            readout,
+            (rows * readout) as f64 / 1e6,
+            graph_params as f64 / 1e6
+        ));
+    }
+    suite
+}
+
+/// Phase B: is the graph an addressed memory, or one nonlinear transform?
+///
+/// The width sweep settled that the monolith is not width-limited -- doubling
+/// the readout bought nothing -- while the graph at the same readout width won
+/// on every metric. But near-miss perturbation costs almost nothing, and two
+/// opposite readings survive that:
+///
+/// * H1: the value is that *a* learned nonlinear transform sits on the state,
+///   and which one hardly matters. Then this is random-feature expansion, not
+///   addressing, and `nodes = 1` should match `nodes = 64`.
+/// * H2: the value is addressed capacity, and a near miss is cheap because
+///   neighbouring nodes on a small-world graph hold related content -- the
+///   graceful degradation the design predicted.
+///
+/// They disagree on the shape of this curve: H1 flat, H2 rising.
+///
+/// `nodes = 1` is the honest monolith for this question -- one body, one place
+/// for all capacity, the learned operator kept. The earlier `bypass_graph` arm
+/// removed the transform and the addressing together and so could not separate
+/// them.
+pub fn scale(ticks: usize, seed: u64) -> Suite {
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for n in [1usize, 4, 16, 64, 256] {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = gcfg.vocab;
+        c.nodes = n;
+        c.derive();
+        arms.push((format!("nodes={}", n), c));
+    }
+    // Budget matching from the other side: one body, given the width the
+    // extension spends on nodes.
+    for d in [128usize, 256] {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = gcfg.vocab;
+        c.nodes = 1;
+        c.d = d;
+        c.derive();
+        arms.push((format!("nodes=1 d={}", d), c));
+    }
+
+    for (name, c) in arms {
+        let readout = c.feature_blocks() * c.d;
+        let dd = c.d;
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        let rows = o.model.store.occupied_rows();
+        let edges = o.model.graph.edges();
+        suite.note(format!(
+            "[scale] {:<14} {:.3} bits/ev | Latin {:.3} | product {:.3} |              retention {:.3} | {} edges | readout {:.2}M | operator {:.2}M |              total {:.2}M",
+            name,
+            o.metrics.bits_per_event(),
+            la,
+            pa,
+            ret_acc,
+            edges,
+            (rows * readout) as f64 / 1e6,
+            (edges * dd * dd) as f64 / 1e6,
+            (rows * readout + edges * dd * dd) as f64 / 1e6
+        ));
+    }
+    suite
+}
+
 pub struct Suite {
     pub csv: String,
     pub summary: Vec<String>,

@@ -171,6 +171,19 @@ pub struct Config {
     /// changes nothing. This is the control that separates "the response unfolds"
     /// from "the prior is a broad mixture and the readout does the rest" -- two
     /// explanations that produce the same aggregate numbers.
+    /// FREE. Remove the graph entirely: no routing, no hop, no operator write.
+    ///
+    /// This is the monolith. What is left is the background ladder, the bound
+    /// traces, the shared delta-rule readout and the three streams -- a single
+    /// body whose capacity is the linear separability of a fixed-width phi.
+    ///
+    /// It exists because `walk_during_gap = false` was never this arm: the event
+    /// tick walked unconditionally, so every arm in the suite carried the graph
+    /// and the suite had no single-body end to compare against at all. A
+    /// multi-body extension buys capacity with addressing error, so comparing it
+    /// to a monolith that is not yet capacity-bound charges it the whole price
+    /// of scale and credits it none of the benefit.
+    pub bypass_graph: bool,
     pub walk_during_gap: bool,
 
     /// What the bound trace binds. See `BindMode`.
@@ -247,6 +260,7 @@ impl Config {
             feedback_overt: true,
             feedback_covert: true,
             feedback_write: true,
+            bypass_graph: false,
             walk_during_gap: true,
             anchor: 0.35,
             route_perturb: 0,
