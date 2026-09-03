@@ -13,7 +13,7 @@ use alm::gen::GenConfig;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = args.first().map(|s| s.as_str()).unwrap_or("quick");
+    let cmd = args.first().map(|s| s.as_str()).unwrap_or("screen");
 
     let mut ticks: usize = match cmd {
         "full" => 600_000,

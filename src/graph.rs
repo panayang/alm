@@ -15,6 +15,7 @@
 use crate::config::Config;
 use crate::num::{argmax, axpy, dot, normalize, unit_vector, Mat};
 
+#[derive(Clone)]
 pub struct WalkStep {
     pub edge: usize,
     pub p_in: Vec<f32>,
@@ -53,6 +54,8 @@ pub struct Graph {
     /// real settlement credits every traced edge, so a probe's footprints would
     /// end up steering real weight updates.
     pub frozen: bool,
+    rank_clamped: std::cell::Cell<u64>,
+    rank_selected: std::cell::Cell<u64>,
 }
 
 const KEY_SHORTCUT: u64 = 0x0000_0000_0000_0021;
@@ -103,6 +106,8 @@ impl Graph {
             trace: vec![0.0; m],
             read_cache: vec![None; m],
             frozen: false,
+            rank_clamped: std::cell::Cell::new(0),
+            rank_selected: std::cell::Cell::new(0),
         }
     }
 
@@ -133,6 +138,37 @@ impl Graph {
             scores.push(dot(&self.keys[a], q));
         }
         outs[argmax(&scores)]
+    }
+
+    /// The `rank`-th best out-edge, zero being the argmax.
+    ///
+    /// The near-miss instrument. Taking the runner-up on every hop is what a
+    /// crowded address space does to a competition, and the design's central
+    /// claim is that in an operator set this costs a small perturbation rather
+    /// than a cliff.
+    pub fn select_rank(&self, u: usize, q: &[f32], rank: usize) -> usize {
+        let outs = &self.out[u];
+        if rank == 0 || outs.len() == 1 {
+            return self.select(u, q);
+        }
+        let mut scored: Vec<(usize, f32)> =
+            outs.iter().map(|&a| (a, dot(&self.keys[a], q))).collect();
+        scored.sort_by(|x, y| {
+            y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal).then(x.0.cmp(&y.0))
+        });
+        if rank >= scored.len() {
+            self.rank_clamped.set(self.rank_clamped.get() + 1);
+        }
+        self.rank_selected.set(self.rank_selected.get() + 1);
+        scored[rank.min(scored.len() - 1)].0
+    }
+
+    /// Fraction of perturbed selections that fell back to a lower rank because
+    /// the node did not have that many out-edges. A near-miss arm with a high
+    /// value here is partly the arm below it, and the two are not independent.
+    pub fn clamp_rate(&self) -> f64 {
+        let n = self.rank_selected.get();
+        if n == 0 { 0.0 } else { self.rank_clamped.get() as f64 / n as f64 }
     }
 
     #[inline]

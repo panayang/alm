@@ -429,9 +429,7 @@ impl Metrics {
             self.speech_onset.n
         );
         println!(
-            "  memory: {} of {} nodes live, {} rows, mean write surprise {:.2} bits",
-            model.store.live_nodes(),
-            model.store.nodes.len(),
+            "  memory: {} rows, mean charge {:.2} bits",
             model.store.occupied_rows(),
             model.store.write_surprise.mean
         );

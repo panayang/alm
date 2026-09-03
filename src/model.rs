@@ -36,7 +36,7 @@
 //! load-bearing rather than philosophical. If ablating it changes nothing, the
 //! walk was never being driven and this design is wrong.
 
-use crate::code::{self, Visit};
+use crate::code::{self};
 use crate::config::{BindMode, Config};
 use crate::embed::{Channel, Embeddings};
 use crate::graph::Graph;
@@ -109,6 +109,9 @@ pub struct Model {
     gnode: usize,
     visit: Vec<f32>,
     hops: u32,
+    /// The transform applied on the last tick, so the operator write is local
+    /// to it and nothing has to cross a hop.
+    last_step: Option<crate::graph::WalkStep>,
 
     /// Bound traces, one per block the mode carries.
     binds: Vec<Vec<f32>>,
@@ -119,7 +122,7 @@ pub struct Model {
     covert_log: Vec<(u32, usize)>,
     overt_log: Vec<(u32, usize)>,
     /// The distribution as it stood when this response first spoke.
-    committed: Option<(Visit, Vec<f32>)>,
+    committed: Option<Vec<f32>>,
     committed_token: Option<usize>,
     prev_answer_conf: f32,
 
@@ -144,9 +147,9 @@ impl Model {
         let emb = Embeddings::new(&cfg);
         let ladder = Ladder::new(&cfg);
         let graph = Graph::new(&cfg);
-        let store = Store::new(&cfg, graph.nodes);
+        let store = Store::new(&cfg);
         let d = cfg.d;
-        let blocks = cfg.feature_blocks().saturating_sub(1);
+        let blocks = cfg.bind_blocks();
         let mut p = vec![0.0f32; d];
         p[0] = 1.0;
         let n = graph.nodes;
@@ -161,6 +164,7 @@ impl Model {
             gnode: 0,
             visit: vec![0.0; n],
             hops: 0,
+            last_step: None,
             binds: vec![vec![0.0; d]; blocks],
             event_hist: Vec::new(),
             covert: None,
@@ -268,21 +272,66 @@ impl Model {
         self.p.clone()
     }
 
-    /// The full emitted distribution as it stands, for the normalisation
-    /// assertion.
-    pub fn spread_now(&self) -> code::Spread {
-        let visit = self.visit_dist();
+    /// The current feature vector, for the block-agreement assertion.
+    pub fn features_now(&self) -> Vec<f32> {
+        self.features(&self.p.clone())
+    }
+
+    /// How big the operator term is against the state, and how much of the
+    /// state one hop preserves.
+    pub fn hop_scale(&self) -> (f32, f32) {
+        let p = crate::num::unit_vector(0xA11, 3, self.cfg.d);
+        let mut b = vec![0.0f32; self.cfg.d];
+        self.graph.w[0].matvec(&p, &mut b);
+        let th: Vec<f32> = b.iter().map(|x| x.tanh()).collect();
+        let mut out: Vec<f32> = (0..self.cfg.d).map(|i| p[i] + th[i]).collect();
+        normalize(&mut out);
+        (crate::num::norm(&th), crate::num::dot(&out, &p))
+    }
+
+    /// Where the walk is, for the route-perturbation sanity check.
+    pub fn node_now(&self) -> usize {
+        self.gnode
+    }
+
+    /// Cosine between the state and the summed background. Near one means the
+    /// anchor has swamped the operator term and the state carries nothing the
+    /// bands do not already carry.
+    pub fn state_vs_background(&self) -> f32 {
+        let mut b = vec![0.0f32; self.cfg.d];
+        for k in 0..self.cfg.rungs {
+            let d = self.ladder.delta(k);
+            for i in 0..self.cfg.d {
+                b[i] += d[i];
+            }
+        }
+        normalize(&mut b);
+        crate::num::dot(&b, &self.p).abs()
+    }
+
+    /// The emitted distribution as it stands, for the normalisation assertion.
+    pub fn spread_now(&self) -> code::Scored {
         let phi = self.features(&self.p.clone());
-        code::spread(&self.store, &visit, &phi, !self.cfg.no_readout)
+        code::score(&self.store, &phi, !self.cfg.no_readout)
     }
 
     // ---- features -------------------------------------------------------
 
+    /// The state, the bound traces, and the background bands.
+    ///
+    /// The bands belong here. They used to feed only the routing query, so the
+    /// three self channels -- which write into the ladder -- had no path to the
+    /// prediction, and every ablation of them read as no effect. This closes
+    /// that loop, and it is also where the fuzzy multi-level background does its
+    /// work now that there is no counted prior to carry it.
     fn features(&self, p: &[f32]) -> Vec<f32> {
         let mut f = Vec::with_capacity(self.cfg.feature_blocks() * self.cfg.d);
         f.extend_from_slice(p);
         for b in self.binds.iter() {
             f.extend_from_slice(b);
+        }
+        for k in 0..self.cfg.rungs {
+            f.extend_from_slice(self.ladder.delta(k));
         }
         f
     }
@@ -345,17 +394,36 @@ impl Model {
         normalize(out);
     }
 
-    /// One read: a single hop, and the visit accumulator advances.
+    /// One read: the memory transforms the state, and the background pulls it
+    /// back toward the challenge.
+    ///
+    /// `p <- nu( p + tanh(W_a p) + anchor * Delta )`. The operator term is the
+    /// computation; the anchor term is what makes the iteration driven rather
+    /// than autonomous, and therefore what makes it converge instead of drifting
+    /// into a fixed point or a cycle.
     fn step_walk(&mut self) {
         let mut q = Vec::with_capacity(self.cfg.d);
         self.query(&mut q);
-        let a = self.graph.select(self.gnode, &q);
+        let a = self.graph.select_rank(self.gnode, &q, self.cfg.route_perturb);
         let cur = self.p.clone();
         let st = self.graph.hop(a, &cur);
         self.p = st.p_out.clone();
+
+        if self.cfg.anchor > 0.0 {
+            let b = self.cfg.anchor;
+            for k in 0..self.cfg.rungs {
+                let band = self.ladder.delta(k);
+                for i in 0..self.cfg.d {
+                    self.p[i] += b * band[i];
+                }
+            }
+            normalize(&mut self.p);
+        }
+
         self.gnode = self.graph.head_of(a);
-        self.hops += 1;
         self.graph.touch_read(&st);
+        self.last_step = Some(st);
+        self.hops += 1;
 
         let lam = self.cfg.visit_decay;
         for v in self.visit.iter_mut() {
@@ -364,59 +432,66 @@ impl Model {
         self.visit[self.gnode] += 1.0;
     }
 
+    /// The local write into the operator that was just applied.
+    ///
+    /// No gradient crosses a hop. The founding requirement is that a node
+    /// performs a memory write rather than an autoregressive fit, and this is
+    /// that write: move the transform so that, from the state it was applied to,
+    /// it carries the state toward what the world then said. Because it is
+    /// local, "an identity input does not strongly change a node" is a property
+    /// of the layout -- nothing can flow in from elsewhere -- rather than an
+    /// approximation.
+    fn write_operator_on(&mut self, st: &crate::graph::WalkStep, x: usize, eta: f32) {
+        let target = if self.cfg.write_toward_embedding {
+            self.emb.row(x).to_vec()
+        } else {
+            match self.store.row_of(x as u32) {
+                None => self.emb.row(x).to_vec(),
+                Some(r) => r[..self.cfg.d].to_vec(),
+            }
+        };
+        let mut delta = vec![0.0f32; self.cfg.d];
+        for i in 0..self.cfg.d {
+            delta[i] = target[i] - st.p_out[i];
+        }
+        // Through the tanh, so a saturated unit is not asked to move.
+        for i in 0..self.cfg.d {
+            delta[i] *= 1.0 - st.th[i] * st.th[i];
+        }
+        self.graph.w[st.edge].sub_outer(-eta, &delta, &st.p_in);
+    }
+
     /// The nodes this response has touched, normalised. Nodes below a hundredth
     /// of the peak are dropped: they contribute nothing to the prior and each
     /// one costs a pass over its candidate list.
-    fn visit_dist(&self) -> Visit {
-        let mut peak = 0.0f32;
+    /// Spread of the visit accumulator. Diagnostic only now: nothing reads the
+    /// visit distribution, but a walk that covers the whole graph uniformly is
+    /// still worth seeing.
+    fn visit_entropy(&self) -> f64 {
+        let total: f32 = self.visit.iter().sum();
+        if total <= 0.0 {
+            return 0.0;
+        }
+        let mut h = 0.0f64;
         for &v in self.visit.iter() {
-            if v > peak {
-                peak = v;
+            let q = (v / total) as f64;
+            if q > 1e-12 {
+                h -= q * q.log2();
             }
         }
-        if peak <= 0.0 {
-            return Visit::single(self.gnode);
-        }
-        let floor = peak * 0.01;
-        let mut w: Vec<(usize, f32)> = Vec::new();
-        let mut total = 0.0f32;
-        for (u, &v) in self.visit.iter().enumerate() {
-            if v >= floor {
-                w.push((u, v));
-                total += v;
-            }
-        }
-        for e in w.iter_mut() {
-            e.1 /= total;
-        }
-        Visit { w }
+        h
     }
 
     // ---- emission --------------------------------------------------------
 
-    fn best_answer(&self, visit: &Visit, phi: &[f32]) -> Option<(usize, f32)> {
-        let sc = code::score(&self.store, visit, phi, !self.cfg.no_readout);
-        if let Some((t, q)) = sc.top() {
-            return Some((t as usize, q));
-        }
-        let u = visit.argmax();
-        let node = &self.store.nodes[u];
-        if node.counts.is_empty() {
-            return None;
-        }
-        let mut best = node.counts[0];
-        for &(t, c) in node.counts.iter() {
-            if c > best.1 {
-                best = (t, c);
-            }
-        }
-        Some((best.0 as usize, best.1 as f32 / node.total.max(1) as f32))
+    fn best_answer(&self, phi: &[f32]) -> Option<(usize, f32)> {
+        code::score(&self.store, phi, !self.cfg.no_readout).top().map(|(t, q)| (t as usize, q))
     }
 
     /// Decide what to think and what to say, and log both. Runs on every tick,
     /// driven or not: the system is always outputting.
-    fn emit(&mut self, out: &mut TickOutcome, visit: &Visit, phi: &[f32]) {
-        let (t, q) = match self.best_answer(visit, phi) {
+    fn emit(&mut self, out: &mut TickOutcome, phi: &[f32]) {
+        let (t, q) = match self.best_answer(phi) {
             None => {
                 self.covert = None;
                 self.overt = None;
@@ -442,7 +517,7 @@ impl Model {
             self.overt_emissions += 1;
             self.overt_log.push((self.ticks_since_event, t));
             if self.cfg.commit_locks_charge {
-                self.committed = Some((visit.clone(), phi.to_vec()));
+                self.committed = Some(phi.to_vec());
                 self.committed_token = Some(t);
                 self.commitments += 1;
             }
@@ -479,8 +554,8 @@ impl Model {
         }
     }
 
-    fn sample_negatives(&self, node: usize, target: u32, k: usize) -> Vec<u32> {
-        let toks = self.store.emitted(node);
+    fn sample_negatives(&self, target: u32, k: usize) -> Vec<u32> {
+        let toks = self.store.known();
         if toks.is_empty() || k == 0 {
             return Vec::new();
         }
@@ -537,16 +612,15 @@ impl Model {
                     self.step_walk();
                 }
 
-                let visit = self.visit_dist();
                 let p = self.p.clone();
                 let phi = self.features(&p);
                 if want_entropy {
-                    let sp = code::spread(&self.store, &visit, &phi, !self.cfg.no_readout);
-                    out.entropy_bits = Some(sp.entropy_bits());
+                    let sc = code::score(&self.store, &phi, !self.cfg.no_readout);
+                    out.entropy_bits = Some(sc.entropy_bits());
                 }
-                self.emit(&mut out, &visit, &phi);
+                self.emit(&mut out, &phi);
                 out.hops = self.hops;
-                out.visit_entropy = visit.entropy_bits();
+                out.visit_entropy = self.visit_entropy();
                 out
             }
 
@@ -557,29 +631,22 @@ impl Model {
                 out.ticks_since_event = self.ticks_since_event;
 
                 // 1. Settle the standing code before anything is written.
-                let live_visit = self.visit_dist();
                 let p0 = self.p.clone();
                 let live_phi = self.features(&p0);
-                let (visit, phi, silent) =
-                    match (self.cfg.commit_locks_charge, self.committed.clone()) {
-                        (true, Some((v, f))) => (v, f, false),
-                        (true, None) => (live_visit.clone(), live_phi.clone(), true),
-                        (false, _) => (live_visit.clone(), live_phi.clone(), false),
-                    };
+                let (phi, silent) = match (self.cfg.commit_locks_charge, self.committed.clone()) {
+                    (true, Some(f)) => (f, false),
+                    (true, None) => (live_phi.clone(), true),
+                    (false, _) => (live_phi.clone(), false),
+                };
                 if silent {
                     self.silent_settlements += 1;
                 }
-                let prob = code::prob(
-                    &self.store,
-                    &visit,
-                    &phi,
-                    x as u32,
-                    !self.cfg.no_readout && !silent,
-                );
+                let sc = code::score(&self.store, &phi, !self.cfg.no_readout && !silent);
+                let prob = sc.prob_of(&self.store, x as u32);
                 out.bits = code::charge_bits(prob);
                 self.total_bits += out.bits;
 
-                if let Some((t, q)) = self.best_answer(&live_visit, &live_phi) {
+                if let Some((t, q)) = self.best_answer(&live_phi) {
                     out.top1 = Some(t);
                     out.correct = if self.cfg.commit_locks_charge {
                         self.committed_token == Some(x)
@@ -591,9 +658,7 @@ impl Model {
                     }
                 }
                 if want_entropy {
-                    let sp =
-                        code::spread(&self.store, &live_visit, &live_phi, !self.cfg.no_readout);
-                    out.entropy_bits = Some(sp.entropy_bits());
+                    out.entropy_bits = Some(sc.entropy_bits());
                 }
 
                 out.idea_onset = self.covert_log.iter().find(|(_, t)| *t == x).map(|(k, _)| *k);
@@ -606,36 +671,41 @@ impl Model {
                 //    keeps the consistency the read path does not need.
                 let gate = if self.frozen { 0.0 } else { self.emb.drive_norm(Some(x)) };
                 if gate > 0.0 {
+                    // The write takes its own deterministic, content-addressed
+                    // walk: `hops` steps routed by the state alone, never
+                    // perturbed. A3 is the whole point -- reads may wander,
+                    // writes may not -- and writing into the read's own
+                    // (perturbable) step instead meant reads and writes always
+                    // landed on the same edge together, so the near-miss
+                    // experiment had no inconsistency left to detect and its
+                    // flat curve measured nothing.
                     let steps = self.graph.write_walk(&p0, &p0, self.cfg.hops);
-                    let node =
-                        steps.last().map(|s| self.graph.head_of(s.edge)).unwrap_or(self.gnode);
-                    let bits_before = code::charge_bits(self.store.prior_of(node, x as u32));
-                    self.store.write_surprise.push(bits_before);
-
-                    let negs = self.sample_negatives(node, x as u32, self.cfg.neg_samples);
-                    // Trained at the features the charge was settled on, so the
-                    // rows are fitted where they will be evaluated.
-                    let grad = if self.cfg.no_readout {
-                        vec![0.0f32; self.store.fw]
-                    } else {
-                        self.store.readout_update(
-                            &live_visit,
-                            &live_phi,
-                            x as u32,
-                            &negs,
-                            self.cfg.eta * gate,
-                        )
-                    };
+                    self.store.write_surprise.push(out.bits);
+                    let eta = self.cfg.eta * gate;
                     if !self.cfg.no_readout {
-                        let grad_p: Vec<f32> = grad[..self.cfg.d].to_vec();
-                        self.graph.backprop(&steps, &grad_p, self.cfg.eta * gate);
-                        if !self.cfg.no_eligibility {
-                            self.graph.credit_traces(&grad_p, self.cfg.eta * gate * 0.25, 0.05);
-                        }
+                        // The associative write: the same `Scored` the ledger
+                        // charged, so the rows are fitted against the
+                        // distribution that was actually settled.
+                        let negs = self.sample_negatives(x as u32, self.cfg.neg_samples);
+                        let sc_live =
+                            code::score(&self.store, &live_phi, !self.cfg.no_readout);
+                        self.store.write(&sc_live, &live_phi, x as u32, &negs, eta);
+                    }
+                    if !self.cfg.no_eligibility {
+                        // Gap-time reads get their share of the settlement
+                        // through the traces they left, in O(1) per edge.
+                        let seed: Vec<f32> = (0..self.cfg.d)
+                            .map(|i| self.emb.row(x)[i] - p0[i])
+                            .collect();
+                        self.graph.credit_traces(&seed, eta * 0.25, 0.05);
                     }
 
-                    self.store.record(node, x as u32);
-                    self.last_write_node = node;
+                    // The operator write, on the write walk's own last step.
+                    // Local: nothing crosses a hop.
+                    if let Some(st) = steps.last() {
+                        self.write_operator_on(st, x, eta);
+                        self.last_write_node = self.graph.head_of(st.edge);
+                    }
                     self.content_writes += 1;
                     out.wrote = true;
                 }
@@ -659,10 +729,9 @@ impl Model {
                 self.hops = 0;
 
                 let scored = (out.top1, out.correct);
-                let nv = self.visit_dist();
                 let np = self.p.clone();
                 let nphi = self.features(&np);
-                self.emit(&mut out, &nv, &nphi);
+                self.emit(&mut out, &nphi);
                 out.top1 = scored.0;
                 out.correct = scored.1;
                 // out.hops keeps the value captured at entry: the hops this
@@ -670,7 +739,7 @@ impl Model {
                 // zero here filed every charged event in the hops=0 bucket and
                 // left the speed-accuracy curve -- the architecture's reason to
                 // exist -- unmeasured while looking like a flat result.
-                out.visit_entropy = nv.entropy_bits();
+                out.visit_entropy = self.visit_entropy();
                 out
             }
         }

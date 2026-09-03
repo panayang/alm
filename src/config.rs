@@ -133,6 +133,38 @@ pub struct Config {
     /// Feed the write/activity channel back into the context at all.
     pub feedback_write: bool,
 
+    /// Weight of the background anchor in the state update.
+    ///
+    /// Without it the operator iteration is autonomous and settles into a fixed
+    /// point or a short cycle -- the same failure the gap walk had. With it the
+    /// system is *driven*: the challenge keeps pulling the state back toward
+    /// itself while the operators compute, so the state converges to an
+    /// attractor that depends on the challenge. Convergence is what makes the
+    /// emitted distribution sharpen rather than wander.
+    pub anchor: f32,
+
+    /// How many ranks below the best edge to route to.
+    ///
+    /// Zero is the argmax. One takes the runner-up on every hop, two the third
+    /// best, and so on. This is the near-miss instrument, and it tests the claim
+    /// the whole design rests on: in a table, a neighbouring address holds an
+    /// unrelated candidate set and a near miss is a cliff; in an operator set,
+    /// neighbouring keys are applied to similar states and so were written by
+    /// similar data, and a near miss should be a small perturbation that the
+    /// next tick can correct. A cliff here falsifies the design.
+    pub route_perturb: usize,
+
+    /// Write the operator toward the observed token's fixed embedding (a pure
+    /// association) rather than toward its readout row.
+    ///
+    /// The founding requirement is that a node performs a memory *write*, not an
+    /// autoregressive fit. Writing toward the embedding involves no prediction
+    /// error at all and is unambiguously a write; writing toward the row is more
+    /// directed but lets readout information flow back into the operator, which
+    /// is a step toward fitting. Kept switchable because the difference is a
+    /// design question, not a tuning one.
+    pub write_toward_embedding: bool,
+
     /// Whether the response keeps walking during the gap.
     ///
     /// Off, the state freezes after the event's own hop and every later gap tick
@@ -216,6 +248,9 @@ impl Config {
             feedback_covert: true,
             feedback_write: true,
             walk_during_gap: true,
+            anchor: 0.35,
+            route_perturb: 0,
+            write_toward_embedding: true,
             use_binding: true,
             bind_mode: BindMode::Both,
             bind_lags: 2,
@@ -223,11 +258,20 @@ impl Config {
             // 1.5, because the sweep measured it: the payload chain needs to
             // be out of the tanh's linear regime before it transforms
             // anything, and both conjunctions peak here.
-            w_init: 1.5,
+            // Back to a scale that leaves the residual hop a residual. At 1.5
+            // the operator term is six times the norm of the state and a
+            // quarter of the units saturate, so `nu(p + tanh(Wp))` is very
+            // nearly `nu(tanh(Wp))`: the state is overwritten every hop by a
+            // saturated near-random map, all edges destroy it about equally,
+            // and the saturation also blocks the operator write through its
+            // own (1 - tanh^2) factor. 1.5 came from a sweep that was later
+            // shown to be an artefact of a gradient defect, and the setting was
+            // left in place after the evidence for it was withdrawn.
+            w_init: 0.1,
             op_gain: 1.0,
             op_mix: 0.5,
             no_readout: false,
-            no_eligibility: false,
+            no_eligibility: true,
             seed: 0x5EED_1234,
             entropy_every: 16,
         };
@@ -238,6 +282,12 @@ impl Config {
     /// Recompute every DERIVED field. Call after changing a FREE or CEILING
     /// field; the experiment drivers do this for every sweep point.
     pub fn derive(&mut self) {
+        // bind_blocks() branches on use_binding; rebind() branches on
+        // bind_mode. If they disagree, rebind writes past the end of the
+        // bind array. Catch it here rather than as an out-of-bounds panic
+        // a thousand ticks in.
+        let inconsistent = !self.use_binding && !matches!(self.bind_mode, BindMode::Off);
+        assert!(!inconsistent, "use_binding=false requires bind_mode=Off");
         // Rungs cover [1/rho0, horizon] log-uniformly.
         self.beta = if self.rungs > 1 {
             let span = (self.rho0 * self.horizon).max(1.001);
@@ -253,11 +303,31 @@ impl Config {
 
     /// Number of `d`-wide blocks in a readout row: the payload, plus one per
     /// bound trace the mode carries.
+    /// Blocks of width `d` in a readout row: the state, the bound traces, and
+    /// the background bands.
+    ///
+    /// The bands are new here and the omission mattered: the ladder previously
+    /// fed only the routing query and never the features, so the self channels
+    /// -- which write into the ladder -- had no path to the prediction at all.
+    /// That is why every three-stream ablation read as no effect.
     pub fn feature_blocks(&self) -> usize {
+        1 + self.bind_blocks() + self.rungs
+    }
+
+    /// Bound traces only -- not counting the state block, and exactly the number
+    /// `Model::rebind` actually fills.
+    ///
+    /// This used to include the state block *and* be added to `rungs` again in
+    /// `feature_blocks`, so the row width came out one block short of what
+    /// `features()` emitted. The readout truncated to the row width and the
+    /// background bands, which sit last, were never read at all -- which is why
+    /// every self-feedback ablation measured as no effect. Three of the
+    /// allocated bind slots were also never written and stayed zero.
+    pub fn bind_blocks(&self) -> usize {
         if !self.use_binding {
-            return 1;
+            return 0;
         }
-        1 + match self.bind_mode {
+        match self.bind_mode {
             BindMode::Off => 0,
             BindMode::EventLag => self.bind_lags,
             BindMode::Band => self.rungs,

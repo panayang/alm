@@ -119,11 +119,10 @@ fn emitted_distribution_is_normalised_at_every_hop() {
     m.tick(Some(23), false);
     for _ in 0..8 {
         let out = m.tick(None, false);
-        let sp = m.spread_now();
-        let mass = sp.mass();
+        let mass = m.spread_now().mass();
         assert!(
             (mass - 1.0).abs() < 1e-3,
-            "the emitted distribution sums to {:.6} after {} hops; a mixture of              normalised priors times a likelihood over a candidate set has to              telescope to one however many nodes the walk has touched",
+            "the emitted distribution sums to {:.6} after {} hops; a softmax over              the rows plus one term per row-less token has to telescope to one",
             mass,
             out.hops
         );
@@ -133,19 +132,24 @@ fn emitted_distribution_is_normalised_at_every_hop() {
 /// Nothing in the store grows, so there is no append to be non-destructive
 /// about. What replaced that property is weaker and worth pinning: a node the
 /// walk has never reached holds nothing and contributes nothing.
+/// The operator write is local: applying it must not touch any edge but the
+/// one that was applied. Nothing crosses a hop, which is what makes "an identity
+/// input does not strongly change a node" a property of the layout rather than
+/// an approximation.
 #[test]
-fn unused_memory_holds_nothing() {
+fn the_operator_write_touches_one_edge() {
     let cfg = Config::local();
     let mut m = Model::new(cfg);
-    warm(&mut m, 300);
-    let live = m.store.live_nodes();
-    assert!(live > 0 && live <= m.store.nodes.len());
-    for n in m.store.nodes.iter() {
-        if n.total == 0 {
-            assert!(n.counts.is_empty(), "an unused node holds counts");
-            assert_eq!(n.escape(), 1.0, "an unused node does not escape entirely");
-        }
-    }
+    warm(&mut m, 200);
+    let before: Vec<Vec<u32>> = m.graph.w.iter().map(|w| bits_of(&w.a)).collect();
+    m.tick(Some(37), false);
+    let after: Vec<Vec<u32>> = m.graph.w.iter().map(|w| bits_of(&w.a)).collect();
+    let changed = before.iter().zip(after.iter()).filter(|(a, b)| a != b).count();
+    assert!(
+        changed <= 1,
+        "one event changed {} edge transforms; the operator write is supposed to          be local to the transform that was applied",
+        changed
+    );
 }
 
 #[test]
@@ -167,13 +171,13 @@ fn two_identical_runs_agree_bit_for_bit() {
     let run = || {
         let mut m = Model::new(Config::local());
         warm(&mut m, 500);
-        (weight_fingerprint(&m), m.total_bits.to_bits(), m.store.nodes.len(), m.content_writes)
+        (weight_fingerprint(&m), m.total_bits.to_bits(), m.store.occupied_rows(), m.content_writes)
     };
     let a = run();
     let b = run();
     assert_eq!(a.0, b.0, "stored weights differed between two identical runs");
     assert_eq!(a.1, b.1, "accumulated codelength differed between two identical runs");
-    assert_eq!(a.2, b.2, "tree size differed between two identical runs");
+    assert_eq!(a.2, b.2, "row count differed between two identical runs");
     assert_eq!(a.3, b.3, "write count differed between two identical runs");
 }
 
@@ -224,9 +228,7 @@ fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
     };
 
     let mem_before = weight_fingerprint(&m);
-    let counts_before: Vec<(usize, u64)> =
-        m.store.nodes.iter().enumerate().map(|(i, n)| (i, n.total)).collect();
-    let nodes_before = m.store.live_nodes();
+    let rows_before = m.store.occupied_rows();
     let writes_before = m.content_writes;
     let sit_before = bits_of(&m.state_now());
     // The eligibility trace is not part of the memory but it steers it: the
@@ -239,11 +241,8 @@ fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
     assert!(bits.is_finite() && bits > 0.0, "the probe was not charged anything");
 
     assert!(mem_before == weight_fingerprint(&m), "a probe changed stored weights");
-    assert_eq!(nodes_before, m.store.live_nodes(), "a probe made a node live");
+    assert_eq!(rows_before, m.store.occupied_rows(), "a probe created a row");
     assert_eq!(writes_before, m.content_writes, "a probe performed a content write");
-    let counts_after: Vec<(usize, u64)> =
-        m.store.nodes.iter().enumerate().map(|(i, n)| (i, n.total)).collect();
-    assert_eq!(counts_before, counts_after, "a probe changed the occupancy counts");
     assert_eq!(
         sit_before,
         bits_of(&m.state_now()),
@@ -259,4 +258,151 @@ fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
         (m.events, m.commitments, m.silent_settlements, m.baseline_ticks),
         "a probe moved counters that a printed statistic divides against a          probe-free denominator"
     );
+}
+
+/// Sanity for the operator memory: the pieces must actually move.
+///
+/// A flat near-miss curve reads identically whether the near miss is cheap or
+/// the routing is inert, and this project has mistaken a broken instrument for a
+/// null result several times. These are the three things that have to be true
+/// before "perturbing the route costs nothing" can be read as a property of the
+/// design rather than as the route not mattering.
+#[test]
+fn the_operator_memory_is_not_inert() {
+    let cfg = Config::local();
+    let mut m = Model::new(cfg);
+
+    // 1. The operator write changes the transform it was applied to.
+    warm(&mut m, 100);
+    let w_before: Vec<Vec<u32>> = m.graph.w.iter().map(|w| bits_of(&w.a)).collect();
+    for i in 0..40 {
+        m.tick(Some(11 + i % 17), false);
+        m.tick(None, false);
+    }
+    let w_after: Vec<Vec<u32>> = m.graph.w.iter().map(|w| bits_of(&w.a)).collect();
+    let moved = w_before.iter().zip(w_after.iter()).filter(|(a, b)| a != b).count();
+    assert!(moved > 0, "no edge transform moved after forty writes: the operator write is inert");
+
+    // 2. Perturbing the route actually lands somewhere else.
+    let mut a = Model::new(Config::local());
+    let mut cfg2 = Config::local();
+    cfg2.route_perturb = 1;
+    let mut b = Model::new(cfg2);
+    let mut differed = 0usize;
+    for i in 0..200 {
+        let tok = if i % 4 == 0 { None } else { Some(20 + i % 31) };
+        a.tick(tok, false);
+        b.tick(tok, false);
+        if a.node_now() != b.node_now() {
+            differed += 1;
+        }
+    }
+    assert!(
+        differed > 20,
+        "the perturbed route visited a different node on only {} of 200 ticks: \
+         taking the runner-up edge is not changing where the walk goes",
+        differed
+    );
+
+    // 3. The state is not simply a copy of the background.
+    let mut m3 = Model::new(Config::local());
+    warm(&mut m3, 200);
+    m3.tick(Some(41), false);
+    for _ in 0..4 {
+        m3.tick(None, false);
+    }
+    let cos = m3.state_vs_background();
+    assert!(
+        cos < 0.98,
+        "the state is {:.4} aligned with the background: the operator term is \
+         contributing nothing and the state is just another copy of the anchor",
+        cos
+    );
+}
+
+/// The feature vector and the row width must agree exactly.
+///
+/// They did not: `features()` emitted one block more than a row was wide, the
+/// readout truncated to the row width, and the blocks that fell off the end were
+/// the background bands. Every self-feedback ablation then measured as no
+/// effect, because the channel it ablated had no path to the prediction at all.
+/// A silent truncation like this produces a plausible null rather than an error.
+#[test]
+fn every_feature_block_is_read_and_written() {
+    let cfg = Config::local();
+    let expect = cfg.feature_blocks() * cfg.d;
+    let mut m = Model::new(Config::local());
+    warm(&mut m, 120);
+    let phi = m.features_now();
+    assert_eq!(phi.len(), expect, "features() and the row width disagree");
+    assert_eq!(m.store.fw, expect, "the store's row width disagrees with the config");
+    // No block may be identically zero: an allocated-but-never-filled block is
+    // dead width that silently dilutes every dot product.
+    for b in 0..cfg.feature_blocks() {
+        let blk = &phi[b * cfg.d..(b + 1) * cfg.d];
+        assert!(
+            blk.iter().any(|x| x.abs() > 1e-9),
+            "feature block {} is entirely zero after warm-up",
+            b
+        );
+    }
+}
+
+/// The residual hop has to stay a residual.
+///
+/// If `tanh(W p)` dwarfs `p`, the state is overwritten every hop rather than
+/// transformed, every edge destroys it about equally, and a near-miss curve
+/// comes out flat for a mechanical reason that has nothing to do with operator
+/// memory degrading gracefully.
+#[test]
+fn the_hop_transforms_the_state_rather_than_replacing_it() {
+    let cfg = Config::local();
+    let m = Model::new(cfg);
+    let (ratio, cos) = m.hop_scale();
+    assert!(
+        ratio < 1.0,
+        "the operator term is {:.2}x the state: the residual is not a residual",
+        ratio
+    );
+    assert!(
+        cos > 0.6,
+        "one hop leaves the state only {:.3} aligned with its input; the \
+         challenge does not survive a gap",
+        cos
+    );
+}
+
+/// A3 on the *live* path, and the honest statement of what it does not cover.
+///
+/// The old A3 assertion called `graph.write_path()`, which the model never
+/// invoked -- it certified dead code while `write_operator` wrote into the read
+/// walk's own perturbable step. The write walk is now live, and this asserts the
+/// property the design actually claims: *given a query*, the write route is
+/// deterministic and carries no perturbation.
+///
+/// It deliberately does NOT assert that read perturbation leaves the written
+/// address alone. It does not: the write query is the running state, and reads
+/// move the state. So a near-miss arm perturbs the write address too, one tick
+/// later and indirectly. That is a real property of a design whose addresses are
+/// contextual rather than content-only -- it is the compound effect the
+/// near-miss arms measure, and pretending otherwise by asserting invariance here
+/// would only hide it.
+#[test]
+fn the_write_route_is_deterministic_given_its_query() {
+    let mut cfg = alm::config::Config::local();
+    cfg.seed = 7;
+    cfg.vocab = 64;
+    cfg.route_perturb = 2;
+    cfg.derive();
+    let mut g = alm::graph::Graph::new(&cfg);
+    let q: Vec<f32> = (0..cfg.d).map(|i| ((i * 37 % 19) as f32 - 9.0) / 9.0).collect();
+
+    let a = g.write_walk(&q, &q, cfg.hops).iter().map(|s| s.edge).collect::<Vec<_>>();
+    // Wander the read head all over the graph in between.
+    for r in 0..40usize {
+        let _ = g.select_rank(r % cfg.nodes, &q, r % 3);
+    }
+    let b = g.write_walk(&q, &q, cfg.hops).iter().map(|s| s.edge).collect::<Vec<_>>();
+    assert_eq!(a, b, "the write route moved without its query moving");
+    assert_eq!(a.len(), cfg.hops, "the write walk did not take cfg.hops steps");
 }

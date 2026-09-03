@@ -141,11 +141,44 @@ pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
     wg.walk_during_gap = false;
     arms.push(("walk off".into(), wg));
 
+    // The near-miss curve: the claim the whole design rests on. Taking the
+    // runner-up edge on every hop is what a crowded address space does to a
+    // competition. In a table that is a cliff, because a neighbouring address
+    // holds an unrelated candidate set. In an operator set it should be a small
+    // perturbation the next tick can correct.
+    for r in [1usize, 2] {
+        let mut c = base.clone();
+        c.route_perturb = r;
+        arms.push((format!("near-miss {}", r), c));
+    }
+
+    // Does the anchor do the converging?
+    let mut na = base.clone();
+    na.anchor = 0.0;
+    arms.push(("anchor off".into(), na));
+
     // Is binding still what makes the conjunction learnable at all.
     let mut nb = base.clone();
     nb.use_binding = false;
     nb.bind_mode = BindMode::Off;
     arms.push(("bind off".into(), nb));
+
+    // The residual scale. 1.5 came from a sweep later shown to be an artefact
+    // of a gradient bug, and at 1.5 the hop overwrites the state rather than
+    // transforming it. These stay inside the range where |tanh(Wp)| < |p|, so
+    // what is being swept is how much of the state a hop may rewrite -- not
+    // whether the walk degenerates into a random projection.
+    for w in [0.3f32, 0.5] {
+        let mut c = base.clone();
+        c.w_init = w;
+        arms.push((format!("w_init={}", w), c));
+    }
+
+    // Gap-time reads left eligibility traces that nothing ever credited. This
+    // is the first run in which that channel exists, so it is its own arm.
+    let mut el = base.clone();
+    el.no_eligibility = false;
+    arms.push(("eligibility on".into(), el));
 
     // Is the shared readout doing the work.
     let mut nr = base.clone();
@@ -181,7 +214,7 @@ pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
         let (slope, delta, npts) = hop_slope(&o.metrics);
         suite.note(format!(
             "[screen] {:<12} {:.3} bits/ev | Latin {:.3} | product {:.3} | \
-             retention {:.3} | hop slope {:+.4} (d {:+.3}, {} pts) | {} live nodes",
+             retention {:.3} | hop slope {:+.4} (d {:+.3}, {} pts) | {} rows |              clamp {:.2}",
             name,
             o.metrics.bits_per_event(),
             la,
@@ -190,7 +223,8 @@ pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
             slope,
             delta,
             npts,
-            o.model.store.live_nodes()
+            o.model.store.occupied_rows(),
+            o.model.graph.clamp_rate()
         ));
         if name == "full" {
             o.metrics.print(&o.model, "full");
