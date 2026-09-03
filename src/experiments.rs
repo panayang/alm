@@ -229,6 +229,56 @@ pub fn scale(ticks: usize, seed: u64) -> Suite {
     suite
 }
 
+/// Phase C: is the nodes curve flattening because the addresses are enough, or
+/// because they have started to crowd?
+///
+/// The two are indistinguishable at one load and make opposite predictions
+/// across loads. If the addresses are merely sufficient, raising the load moves
+/// the knee right and the curve keeps its shape. If they are crowding, the
+/// benefit of more addresses *shrinks* as the load grows, because each new
+/// address lands closer to its neighbours -- the named weakness of this whole
+/// family, and the thing that would argue for replacing hard argmax routing
+/// with a soft top-k mixture that has no cliff to fall off.
+///
+/// Load is raised by adding domains, with the tick budget scaled to match so
+/// that exposure per fact is held constant. Anything else confounds "more to
+/// remember" with "less chance to learn it".
+pub fn load_sweep(base_ticks: usize, seed: u64) -> Suite {
+    let mut suite = Suite::new();
+    for domains in [12usize, 24, 48] {
+        let mut gcfg = GenConfig::fast();
+        gcfg.seed = seed ^ 0xA11CE;
+        gcfg.domains = domains;
+        let ticks = base_ticks * domains / 12;
+        let stream = build_stream(&gcfg, ticks, 20, false);
+        for n in [1usize, 16, 64, 256] {
+            let mut c = Config::local();
+            c.seed = seed;
+            c.vocab = gcfg.vocab;
+            c.nodes = n;
+            c.derive();
+            let o = run_one("load", c, &gcfg, &stream);
+            let (_, la) = window_mean(&o.metrics.window);
+            let (_, pa) = window_mean(&o.metrics.window_product);
+            let ret: (u64, u64) =
+                o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+            let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+            suite.note(format!(
+                "[load] domains={:<3} ticks={:<7} nodes={:<4} {:.3} bits/ev |                  Latin {:.3} | product {:.3} | retention {:.3} | {} rows",
+                domains,
+                ticks,
+                n,
+                o.metrics.bits_per_event(),
+                la,
+                pa,
+                ret_acc,
+                o.model.store.occupied_rows()
+            ));
+        }
+    }
+    suite
+}
+
 pub struct Suite {
     pub csv: String,
     pub summary: Vec<String>,

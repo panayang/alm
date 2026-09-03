@@ -68,6 +68,13 @@ fn main() {
                 );
             }
         }
+        "load" => {
+            let suite = experiments::load_sweep(ticks, seed);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "scale" => {
             let suite = experiments::scale(ticks, seed);
             println!();
