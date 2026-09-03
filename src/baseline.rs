@@ -143,6 +143,15 @@ impl Ppm {
 
 pub struct PpmResult {
     pub ppm: Ppm,
+    /// Bits over the symbols the *mechanism* is charged on -- non-silence only.
+    ///
+    /// `ppm.bits_per_event()` divides by every symbol it saw, and on this stream
+    /// most symbols are silence, which a suffix model predicts almost for free.
+    /// Reporting that number against the mechanism's event-only ledger compared
+    /// two different denominators and flattered the baseline by several times.
+    /// A2 says the world is charged when it speaks; this is the same rule
+    /// applied to PPM.
+    pub charged: crate::metrics::Bucket,
     pub first: crate::metrics::Bucket,
     pub second: crate::metrics::Bucket,
     pub product: crate::metrics::Bucket,
@@ -164,6 +173,7 @@ pub fn run(stream: &crate::gen::Stream, order: usize, skip_baseline: bool) -> Pp
     let mut second = crate::metrics::Bucket::default();
     let mut first = crate::metrics::Bucket::default();
     let mut product = crate::metrics::Bucket::default();
+    let mut charged = crate::metrics::Bucket::default();
     for t in 0..stream.len() {
         let sym = match stream.observe(t) {
             Some(x) => x as u32,
@@ -178,6 +188,7 @@ pub fn run(stream: &crate::gen::Stream, order: usize, skip_baseline: bool) -> Pp
         if sym == silence {
             continue;
         }
+        charged.push(bits, hit);
         if let Some(i) = stream.ep_at[t] {
             match stream.episodes[i].kind {
                 crate::gen::Kind::Second => second.push(bits, hit),
@@ -187,5 +198,5 @@ pub fn run(stream: &crate::gen::Stream, order: usize, skip_baseline: bool) -> Pp
             }
         }
     }
-    PpmResult { ppm, first, second, product }
+    PpmResult { ppm, first, second, product, charged }
 }
