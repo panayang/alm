@@ -30,7 +30,7 @@
 pub mod baseline;
 pub mod code;
 pub mod config;
-pub mod descent;
+
 pub mod embed;
 pub mod experiments;
 pub mod gen;
@@ -40,4 +40,4 @@ pub mod ladder;
 pub mod metrics;
 pub mod model;
 pub mod num;
-pub mod tree;
+pub mod store;

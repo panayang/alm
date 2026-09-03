@@ -140,6 +140,24 @@ impl Graph {
         self.head[a]
     }
 
+    /// A node's identity as a vector: the fixed key of its first out-edge.
+    ///
+    /// This is what the write channel reports -- "the memory I am touching" --
+    /// and feeding it back into the fast rung is what keeps a response moving
+    /// through the gap. Without it the walk is autonomous on a decaying
+    /// background and settles into a fixed point or a short cycle; with it,
+    /// visiting a node pushes the next query away from that node, so
+    /// inhibition of return is a consequence rather than an added mechanism.
+    #[inline]
+    pub fn node_key(&self, u: usize) -> &[f32] {
+        &self.keys[self.out[u][0]]
+    }
+
+    /// Out-degree, reported so the branching a walk actually has is not assumed.
+    pub fn out_degree(&self, u: usize) -> usize {
+        self.out[u].len()
+    }
+
     /// One residual hop: p_out = nu( p_in + tanh(W_a p_in) ).
     pub fn hop(&mut self, a: usize, p_in: &[f32]) -> WalkStep {
         let mut th = vec![0.0f32; self.d];

@@ -20,7 +20,7 @@ fn weight_fingerprint(m: &Model) -> Vec<u32> {
     for w in m.graph.w.iter() {
         out.extend(bits_of(&w.a));
     }
-    for (t, row) in m.tree.rows.iter() {
+    for (t, row) in m.store.rows.iter() {
         out.push(*t);
         out.extend(bits_of(row));
     }
@@ -112,49 +112,40 @@ fn a5_self_output_cannot_reach_the_slow_rungs() {
 }
 
 #[test]
-fn emitted_distribution_is_normalised_at_every_depth() {
+fn emitted_distribution_is_normalised_at_every_hop() {
     let cfg = Config::local();
     let mut m = Model::new(cfg);
     warm(&mut m, 600);
-    // Sample the swarm mid-response.
     m.tick(Some(23), false);
-    for _ in 0..6 {
-        m.tick(None, false);
-        if m.swarm.is_empty() {
-            continue;
-        }
-        let i = m.swarm.leader();
-        let phi = m.swarm.payloads()[i].clone();
-        let leaf = m.swarm.parts[i].code.leaf();
-        let sp = code::spread(&m.tree, leaf, &phi, true);
+    for _ in 0..8 {
+        let out = m.tick(None, false);
+        let sp = m.spread_now();
         let mass = sp.mass();
         assert!(
             (mass - 1.0).abs() < 1e-3,
-            "the emitted distribution sums to {:.6} at depth {:.2}; the \
-             factorisation is supposed to telescope to one at every level",
+            "the emitted distribution sums to {:.6} after {} hops; a mixture of              normalised priors times a likelihood over a candidate set has to              telescope to one however many nodes the walk has touched",
             mass,
-            m.swarm.mean_depth()
+            out.hops
         );
     }
 }
 
+/// Nothing in the store grows, so there is no append to be non-destructive
+/// about. What replaced that property is weaker and worth pinning: a node the
+/// walk has never reached holds nothing and contributes nothing.
 #[test]
-fn appending_capacity_disturbs_nothing() {
+fn unused_memory_holds_nothing() {
     let cfg = Config::local();
     let mut m = Model::new(cfg);
     warm(&mut m, 300);
-    let protos: Vec<Vec<u32>> = m.tree.arena.iter().map(|n| bits_of(&n.proto)).collect();
-    let rows = weight_fingerprint(&m);
-    let n_before = m.tree.nodes();
-
-    let q = unit_vector(0x9333_4444, 7, m.cfg.d);
-    m.tree.widen(0, &q);
-    assert_eq!(m.tree.nodes(), n_before + 1, "widen did not append");
-
-    for (i, before) in protos.iter().enumerate() {
-        assert_eq!(*before, bits_of(&m.tree.arena[i].proto), "node {} moved on append", i);
+    let live = m.store.live_nodes();
+    assert!(live > 0 && live <= m.store.nodes.len());
+    for n in m.store.nodes.iter() {
+        if n.total == 0 {
+            assert!(n.counts.is_empty(), "an unused node holds counts");
+            assert_eq!(n.escape(), 1.0, "an unused node does not escape entirely");
+        }
     }
-    assert!(rows == weight_fingerprint(&m), "appending a node changed stored rows");
 }
 
 #[test]
@@ -176,7 +167,7 @@ fn two_identical_runs_agree_bit_for_bit() {
     let run = || {
         let mut m = Model::new(Config::local());
         warm(&mut m, 500);
-        (weight_fingerprint(&m), m.total_bits.to_bits(), m.tree.nodes(), m.content_writes)
+        (weight_fingerprint(&m), m.total_bits.to_bits(), m.store.nodes.len(), m.content_writes)
     };
     let a = run();
     let b = run();
@@ -234,10 +225,10 @@ fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
 
     let mem_before = weight_fingerprint(&m);
     let counts_before: Vec<(usize, u64)> =
-        m.tree.arena.iter().enumerate().map(|(i, n)| (i, n.total)).collect();
-    let nodes_before = m.tree.nodes();
+        m.store.nodes.iter().enumerate().map(|(i, n)| (i, n.total)).collect();
+    let nodes_before = m.store.live_nodes();
     let writes_before = m.content_writes;
-    let sit_before = bits_of(&m.swarm.payloads().concat());
+    let sit_before = bits_of(&m.state_now());
     // The eligibility trace is not part of the memory but it steers it: the
     // next real settlement credits every traced edge, so footprints a probe
     // leaves behind would end up driving real weight updates.
@@ -248,14 +239,14 @@ fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
     assert!(bits.is_finite() && bits > 0.0, "the probe was not charged anything");
 
     assert!(mem_before == weight_fingerprint(&m), "a probe changed stored weights");
-    assert_eq!(nodes_before, m.tree.nodes(), "a probe grew the tree");
+    assert_eq!(nodes_before, m.store.live_nodes(), "a probe made a node live");
     assert_eq!(writes_before, m.content_writes, "a probe performed a content write");
     let counts_after: Vec<(usize, u64)> =
-        m.tree.arena.iter().enumerate().map(|(i, n)| (i, n.total)).collect();
+        m.store.nodes.iter().enumerate().map(|(i, n)| (i, n.total)).collect();
     assert_eq!(counts_before, counts_after, "a probe changed the occupancy counts");
     assert_eq!(
         sit_before,
-        bits_of(&m.swarm.payloads().concat()),
+        bits_of(&m.state_now()),
         "a probe left its own context behind instead of restoring the displaced state"
     );
     assert_eq!(

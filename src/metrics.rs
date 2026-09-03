@@ -155,6 +155,14 @@ pub struct Metrics {
     /// left the stream. Measured under frozen memory, so it is a statement about
     /// what was stored and not about what the probe left behind.
     pub retention: Vec<Bucket>,
+    /// The native speed-accuracy curve: what the response was charged, by how
+    /// many hops it had taken when the world spoke. Rising accuracy here is the
+    /// reason the architecture exists; flat means the response is a lookup after
+    /// all and the gap is doing nothing.
+    pub by_hops: Vec<Bucket>,
+    /// Visit entropy at the same buckets. Saturating toward log2(nodes) means
+    /// the walk is diffusing and its prior says nothing.
+    pub visit_h: Vec<Bucket>,
     pub composition_query: Bucket,
     pub composition_support: Bucket,
     pub all_events: Bucket,
@@ -199,6 +207,7 @@ const SHARP_MAX: usize = 24;
 const DIST_MAX: usize = 8;
 const POISON_BINS: usize = 5;
 const RETENTION_BINS: usize = 8;
+const HOP_BINS: usize = 16;
 const OVERT_WINDOW: usize = 64;
 
 impl Metrics {
@@ -211,6 +220,8 @@ impl Metrics {
             by_distance: vec![Bucket::default(); DIST_MAX],
             poisoning: vec![Bucket::default(); POISON_BINS],
             retention: vec![Bucket::default(); RETENTION_BINS],
+            by_hops: vec![Bucket::default(); HOP_BINS],
+            visit_h: vec![Bucket::default(); HOP_BINS],
             composition_query: Bucket::default(),
             composition_support: Bucket::default(),
             all_events: Bucket::default(),
@@ -305,6 +316,10 @@ impl Metrics {
         self.cumulative_bits += out.bits;
         self.charged_events += 1;
         self.all_events.push(out.bits, out.correct);
+
+        let hb = (out.hops as usize).min(HOP_BINS - 1);
+        self.by_hops[hb].push(out.bits, out.correct);
+        self.visit_h[hb].push(out.visit_entropy, false);
 
         let d = (out.ticks_since_event as usize).min(DIST_MAX - 1);
         self.by_distance[d].push(out.bits, out.correct);
@@ -414,35 +429,26 @@ impl Metrics {
             self.speech_onset.n
         );
         println!(
-            "  tree: {} nodes, depth {}, {} leaves, {} occupied rows  (widen {}, deepen {})",
-            model.tree.nodes(),
-            model.tree.realised_depth(),
-            model.tree.leaves(),
-            model.tree.occupied_rows(),
-            model.tree.widen_events,
-            model.tree.deepen_events
-        );
-        println!(
-            "  particles: resamples {}, backtracks {}, commits {} ({:.2}/event), \
-             mean depth {:.2}, root spread {:.2}",
-            model.swarm.resamples,
-            model.swarm.backtracks,
-            model.swarm.commits,
-            model.swarm.commits as f64 / self.charged_events.max(1) as f64,
-            model.swarm.mean_depth(),
-            model.swarm.spread_at_root()
+            "  memory: {} of {} nodes live, {} rows, mean write surprise {:.2} bits",
+            model.store.live_nodes(),
+            model.store.nodes.len(),
+            model.store.occupied_rows(),
+            model.store.write_surprise.mean
         );
 
-        print!("  -- ticks to mature, by level ");
-        for (l, t) in model.swarm.ticks_per_level().iter().enumerate() {
-            if *t > 0.0 {
-                print!("L{}:{:.2} ", l, t);
+        println!("  -- response depth: accuracy by hops taken since the event");
+        for (h, b) in self.by_hops.iter().enumerate() {
+            if b.n > 0 {
+                println!(
+                    "     hops={:<3} n={:<7} bits={:.3} acc={:.3} visitH={:.2}",
+                    h,
+                    b.n,
+                    b.mean(),
+                    b.accuracy(),
+                    if self.visit_h[h].n == 0 { 0.0 } else { self.visit_h[h].mean() }
+                );
             }
         }
-        println!(
-            " (cap {}; flat at the cap means the maturity rule is inert)",
-            model.cfg.max_ticks_per_level
-        );
 
         println!("  -- sharpening (entropy bits by ticks since event)");
         for (i, b) in self.sharpening.iter().enumerate() {
@@ -502,13 +508,11 @@ impl Metrics {
             }
         }
 
-        println!("  -- per-level calibration");
-        for (l, c) in model.tree.calib.iter().enumerate() {
-            if c.observations() == 0 {
-                continue;
-            }
-            println!("     level {}  n={:<7} ECE={:.3}", l, c.observations(), c.ece());
-        }
+        println!(
+            "  -- answer calibration  n={}  ECE={:.3}",
+            model.store.answer_calib.observations(),
+            model.store.answer_calib.ece()
+        );
 
         println!("  -- self-poisoning (by fraction of recent ticks spoken)");
         for (i, b) in self.poisoning.iter().enumerate() {
@@ -546,30 +550,15 @@ impl Metrics {
             model.cfg.rungs - 1,
             model.ladder.band_correlation(0, model.cfg.rungs - 1)
         );
-        print!("  -- rung visits ");
-        for (k, v) in model.tree.rung_visits.iter().enumerate() {
-            print!("r{}:{} ", k, v);
-        }
         println!(
-            " (coverage {:.2}; a rung with no visits is a band the model does \
-             not have)",
-            model.tree.rung_coverage()
-        );
-        println!(
-            "  -- leaf surprise mean {:.2} bits over {} writes  (a split \
-             threshold below this range makes every node split always)",
-            model.tree.leaf_surprise.mean,
-            model.tree.leaf_surprise.n
-        );
-        println!(
-            "  -- leaf purity by regime {:.3}  (chance {:.3}, over {} leaves that took writes)",
+            "  -- node purity by regime {:.3}  (chance {:.3}, over {} leaves that took writes)",
             self.leaf_purity(),
             if self.domains > 0 { 1.0 / self.domains as f64 } else { 0.0 },
             self.leaf_domain.len()
         );
         let (pp, per_leaf) = self.pair_purity();
         println!(
-            "  -- leaf purity by cue pair {:.3}  (chance about {:.3}: {:.1} distinct \
+            "  -- node purity by cue pair {:.3}  (chance about {:.3}: {:.1} distinct \
              pairs per leaf)",
             pp,
             if per_leaf > 0.0 { 1.0 / per_leaf } else { 0.0 },
@@ -634,7 +623,7 @@ pub fn run(model: &mut Model, stream: &Stream, metrics: &mut Metrics) {
         let ep = stream.ep_at[t].map(|i| &stream.episodes[i]);
         if out.wrote {
             if let Some(e) = ep {
-                metrics.note_write(model.last_write_leaf, e);
+                metrics.note_write(model.last_write_node, e);
             }
         }
         metrics.observe(&out, ep);

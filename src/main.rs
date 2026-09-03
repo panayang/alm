@@ -18,7 +18,7 @@ fn main() {
     let mut ticks: usize = match cmd {
         "full" => 600_000,
         "screen" => 300_000,
-        _ => 80_000,
+        _ => 250_000,
     };
     let mut seed: u64 = 0x5EED_1234;
     let mut out: Option<String> = None;
@@ -49,8 +49,8 @@ fn main() {
             let stream = experiments::build_stream(&g, ticks, 20, true);
             println!("stream ok: {} ticks, {} episodes", stream.len(), stream.episodes.len());
         }
-        "screen" => {
-            let suite = experiments::screen(ticks, seed);
+        "screen" | "full" => {
+            let suite = experiments::screen(ticks, seed, cmd == "full");
             println!();
             println!("== summary ====================================================");
             for line in suite.summary.iter() {
@@ -58,18 +58,8 @@ fn main() {
             }
             if let Some(path) = out {
                 fs::write(&path, &suite.csv).expect("could not write csv");
-            }
-        }
-        "quick" | "full" => {
-            let suite = experiments::full(ticks, seed, cmd == "quick");
-            println!();
-            println!("== summary ====================================================");
-            for line in suite.summary.iter() {
-                println!("{}", line);
-            }
-            if let Some(path) = out {
-                fs::write(&path, &suite.csv).expect("could not write csv");
-                println!("\ncsv written to {}", path);
+                println!("
+csv written to {}", path);
             }
         }
         other => panic!("unknown command {} (try gencheck, screen, quick, full)", other),

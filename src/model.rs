@@ -1,48 +1,68 @@
 //! The tick loop.
 //!
-//! One tick is one bounded reaction: advance the background, advance the
-//! particles by one evidence increment, emit. When the world speaks, the code
-//! standing on the output is settled first and only then is anything written --
-//! predict, be charged, then write, with no example ever scored after it has
-//! been trained on.
+//! One tick is one bounded reaction, and it is three things: **one read, one
+//! emission, one write slot** (A1). The read is a single hop through the memory
+//! graph; the emission is the distribution the response currently stands on; the
+//! write slot is the identity at baseline and a real write when the world speaks.
 //!
-//! Two facts about this loop are worth stating because they are what make the
-//! accounting event-driven rather than per-tick. A baseline tick performs no
-//! content write at all, because the token's operator is the identity and the
-//! write gate reads its norm; and a baseline tick is not charged, because there
-//! is nothing there to encode. Those are the same fact seen from the write side
-//! and the ledger side, which is why the design has one axiom where it used to
-//! have three.
+//! # The response is a walk, not a lookup
+//!
+//! A challenge does not select a place in memory and read it. It starts a
+//! trajectory, and the trajectory keeps moving for as long as the world gives it
+//! ticks. The prior is what the walk has touched -- a mixture, not a choice -- so
+//! there is no commitment to be wrong about, and a wrong hop is one term among
+//! several rather than the whole answer.
+//!
+//! This is what the gap is *for*. Previously the payload took its hops in the
+//! first two ticks and then froze, so after tick two the response state was
+//! constant and the only thing still moving was a tree descent that measurement
+//! showed was harmful. The response unfolding through the gap had never actually
+//! been implemented.
+//!
+//! # The three streams are the drive
+//!
+//! A walk on a decaying background is autonomous: it reaches a fixed point or a
+//! short cycle and stops being informative. What keeps it moving is that the
+//! system hears itself. Each tick feeds back, into the fastest rung only (A5):
+//!
+//! * **Covert** -- what it currently thinks the answer is, emitted every tick,
+//!   because the system is always outputting.
+//! * **Overt** -- what it has said out loud, once the evidence stops moving.
+//! * **Write** -- which memory it is touching, i.e. where the walk now is.
+//!
+//! The write channel is not bookkeeping here. It is the drive: visiting a node
+//! pushes the next query away from that node, so inhibition of return falls out
+//! rather than being added, and "the update is itself part of the context" is
+//! load-bearing rather than philosophical. If ablating it changes nothing, the
+//! walk was never being driven and this design is wrong.
 
-use crate::code::{self};
-use crate::config::Config;
-use crate::descent::{rung_for_level, Swarm};
-use crate::config::BindMode;
+use crate::code::{self, Visit};
+use crate::config::{BindMode, Config};
 use crate::embed::{Channel, Embeddings};
 use crate::graph::Graph;
 use crate::ladder::Ladder;
-use crate::num::{argmax, normalize};
-use crate::tree::Tree;
+use crate::num::normalize;
+use crate::store::Store;
 
 const KEY_NEG: u64 = 0x0000_0000_0000_0031;
 
 pub struct TickOutcome {
-    /// Ticks after the last event at which the correct answer first appeared in
-    /// inner speech, and at which it was first said out loud. Two different
-    /// reaction times: having the idea and committing to it are separate events
-    /// here, and the gap between them is what a commitment rule costs.
+    /// Ticks after the last event at which the right answer first appeared in
+    /// inner speech, and at which it was first said out loud. Two reaction
+    /// times: having the idea and committing to it are separate events.
     pub idea_onset: Option<u32>,
     pub speech_onset: Option<u32>,
     /// Whether the world spoke on this tick, and was therefore charged.
     pub charged: bool,
     pub bits: f64,
-    /// Entropy of the emitted distribution, on the ticks where it is evaluated.
     pub entropy_bits: Option<f64>,
     pub ticks_since_event: u32,
-    pub depth: f32,
+    /// How many hops this response has taken, and how spread its visit
+    /// distribution is.
+    pub hops: u32,
+    pub visit_entropy: f64,
     pub top1: Option<usize>,
     pub correct: bool,
-    /// The token spoken out loud, if the leader was confident enough.
     pub overt: Option<usize>,
     /// Whether any content write happened. Must be false on baseline ticks.
     pub wrote: bool,
@@ -50,19 +70,21 @@ pub struct TickOutcome {
 
 /// Everything a probe displaces and has to give back.
 ///
-/// The memory itself -- the tree, its rows, the edge transforms -- is not in
-/// here: a probe runs frozen, so nothing in the memory may change. What a probe
-/// unavoidably disturbs is the *situation*: the background, the cue it composed,
-/// the bound traces, and the live particles. Those are saved and restored, which
-/// is what makes a retention number a statement about what was stored rather
-/// than about what the probe happened to leave behind.
+/// The memory itself is not here: a probe runs frozen, so nothing stored may
+/// change. What a probe unavoidably disturbs is the *situation* -- the
+/// background, the state the response has composed, the bound traces, and where
+/// the walk is -- and that is saved and restored, which is what makes a
+/// retention number a statement about what was stored rather than about what the
+/// probe left behind.
 #[derive(Clone)]
 pub struct Volatile {
-    ladder: crate::ladder::Ladder,
-    cue: Vec<f32>,
+    ladder: Ladder,
+    p: Vec<f32>,
     binds: Vec<Vec<f32>>,
     event_hist: Vec<usize>,
-    swarm: Swarm,
+    gnode: usize,
+    visit: Vec<f32>,
+    hops: u32,
     covert: Option<usize>,
     overt: Option<usize>,
     ticks_since_event: u32,
@@ -71,44 +93,36 @@ pub struct Volatile {
 
 pub struct Model {
     /// While frozen the model reads and emits but stores nothing: no content
-    /// write, no growth, no calibration, no visit counting. A probe that wrote
-    /// would be retraining on the fact it is testing.
+    /// write, no calibration, no counts. A probe that wrote would be retraining
+    /// on the fact it is testing.
     pub frozen: bool,
     pub cfg: Config,
     pub emb: Embeddings,
     pub ladder: Ladder,
     pub graph: Graph,
-    pub tree: Tree,
-    pub swarm: Swarm,
+    pub store: Store,
 
-    /// The payload the current challenge has composed so far. Multiplicative and
-    /// order-sensitive; a baseline tick applies the identity and leaves it be.
-    cue: Vec<f32>,
-    /// The bound traces, one per block the mode carries. Event-lag traces hold
-    /// exact token pairs; band traces hold a band bound with the last token.
+    /// The one state vector. Events fold a token into it; every tick takes one
+    /// hop with it. There is no separate frozen cue: the state *is* the response.
+    p: Vec<f32>,
+    /// Where the walk is, and where it has been.
+    gnode: usize,
+    visit: Vec<f32>,
+    hops: u32,
+
+    /// Bound traces, one per block the mode carries.
     binds: Vec<Vec<f32>>,
-    /// The last few event tokens, most recent first. Only event ids -- binding
-    /// the accumulated payload was the defect this replaces.
     event_hist: Vec<usize>,
+
     covert: Option<usize>,
     overt: Option<usize>,
-    /// The distribution as it stood when this response first spoke. Under
-    /// `commit_locks_charge` this, not the live one, is what gets settled.
-    committed: Option<(usize, Vec<f32>)>,
-    /// The token that was actually said. Accuracy under locking has to score
-    /// this and not the live leader, or the locked arm silently reports the
-    /// unlocked arm's accuracy and the whole comparison is vacuous.
-    committed_token: Option<usize>,
-    /// Confidence in the leading answer on the previous tick, so speaking can
-    /// use the same "evidence has stopped moving" rule the branches use.
-    prev_answer_conf: f32,
-    pub commitments: u64,
-    pub silent_settlements: u64,
-    /// What was thought and what was said during the current response, kept so
-    /// that when the world finally speaks the two onsets can be read off. Never
-    /// consulted by the model itself.
     covert_log: Vec<(u32, usize)>,
     overt_log: Vec<(u32, usize)>,
+    /// The distribution as it stood when this response first spoke.
+    committed: Option<(Visit, Vec<f32>)>,
+    committed_token: Option<usize>,
+    prev_answer_conf: f32,
+
     ticks_since_event: u32,
     tick_index: u64,
 
@@ -117,9 +131,11 @@ pub struct Model {
     pub content_writes: u64,
     pub baseline_ticks: u64,
     pub overt_emissions: u64,
-    /// The leaf the last write landed in. Exposed only so an experiment can ask
+    pub commitments: u64,
+    pub silent_settlements: u64,
+    /// The node the last write landed in. Exposed only so an experiment can ask
     /// whether the address separates regimes; the model never reads it.
-    pub last_write_leaf: usize,
+    pub last_write_node: usize,
     scratch: Vec<f32>,
 }
 
@@ -128,33 +144,32 @@ impl Model {
         let emb = Embeddings::new(&cfg);
         let ladder = Ladder::new(&cfg);
         let graph = Graph::new(&cfg);
-        let tree = Tree::new(&cfg);
-        let swarm = Swarm::new(&cfg);
+        let store = Store::new(&cfg, graph.nodes);
         let d = cfg.d;
-        let mut cue = vec![0.0f32; d];
-        cue[0] = 1.0;
         let blocks = cfg.feature_blocks().saturating_sub(1);
-        let binds = vec![vec![0.0f32; d]; blocks];
+        let mut p = vec![0.0f32; d];
+        p[0] = 1.0;
+        let n = graph.nodes;
         Model {
             frozen: false,
             cfg,
             emb,
             ladder,
             graph,
-            tree,
-            swarm,
-            cue,
-            binds,
+            store,
+            p,
+            gnode: 0,
+            visit: vec![0.0; n],
+            hops: 0,
+            binds: vec![vec![0.0; d]; blocks],
             event_hist: Vec::new(),
             covert: None,
             overt: None,
+            covert_log: Vec::new(),
+            overt_log: Vec::new(),
             committed: None,
             committed_token: None,
             prev_answer_conf: 0.0,
-            commitments: 0,
-            silent_settlements: 0,
-            covert_log: Vec::new(),
-            overt_log: Vec::new(),
             ticks_since_event: 0,
             tick_index: 0,
             events: 0,
@@ -162,18 +177,24 @@ impl Model {
             content_writes: 0,
             baseline_ticks: 0,
             overt_emissions: 0,
-            last_write_leaf: 0,
+            commitments: 0,
+            silent_settlements: 0,
+            last_write_node: 0,
             scratch: vec![0.0; d],
         }
     }
 
+    // ---- state a probe borrows and gives back -------------------------
+
     pub fn volatile(&self) -> Volatile {
         Volatile {
             ladder: self.ladder.clone(),
-            cue: self.cue.clone(),
+            p: self.p.clone(),
             binds: self.binds.clone(),
             event_hist: self.event_hist.clone(),
-            swarm: self.swarm.clone(),
+            gnode: self.gnode,
+            visit: self.visit.clone(),
+            hops: self.hops,
             covert: self.covert,
             overt: self.overt,
             ticks_since_event: self.ticks_since_event,
@@ -183,10 +204,12 @@ impl Model {
 
     pub fn restore(&mut self, v: Volatile) {
         self.ladder = v.ladder;
-        self.cue = v.cue;
+        self.p = v.p;
         self.binds = v.binds;
         self.event_hist = v.event_hist;
-        self.swarm = v.swarm;
+        self.gnode = v.gnode;
+        self.visit = v.visit;
+        self.hops = v.hops;
         self.covert = v.covert;
         self.overt = v.overt;
         self.ticks_since_event = v.ticks_since_event;
@@ -197,20 +220,15 @@ impl Model {
         self.overt_log.clear();
     }
 
-    /// Run one retention probe under frozen memory and return the codelength it
-    /// was charged and whether the top answer was right.
-    ///
-    /// The caller is responsible for nothing: the displaced state is saved and
-    /// put back here, so a probe cannot leak into the stream that follows it.
+    /// One retention probe under frozen memory: the codelength it was charged
+    /// and whether the answer was right. The displaced state is put back here,
+    /// so a probe cannot leak into the stream that follows it.
     pub fn probe(&mut self, spec: &crate::gen::ProbeSpec, answer_gap: u32) -> (f64, bool) {
         let saved = self.volatile();
         let was_frozen = self.frozen;
         self.frozen = true;
         self.graph.frozen = true;
-        // Counters are part of what a probe must not disturb: the report divides
-        // a Model-side count by a Metrics-side one, so a probe-inflated
-        // numerator over a probe-free denominator is a wrong printed number.
-        let saved_counts = (
+        let counts = (
             self.events,
             self.total_bits,
             self.baseline_ticks,
@@ -219,12 +237,10 @@ impl Model {
             self.silent_settlements,
         );
 
-        // Restore the background this regime lived in.
         for &c in spec.context.iter() {
             self.tick(Some(c), false);
             self.tick(None, false);
         }
-        // Present the cue, then the gap, then score the target.
         for (i, &c) in spec.cue.iter().enumerate() {
             self.tick(Some(c), false);
             let gap = if i + 1 == spec.cue.len() { answer_gap } else { 1 };
@@ -236,84 +252,32 @@ impl Model {
 
         self.frozen = was_frozen;
         self.graph.frozen = was_frozen;
-        self.events = saved_counts.0;
-        self.total_bits = saved_counts.1;
-        self.baseline_ticks = saved_counts.2;
-        self.overt_emissions = saved_counts.3;
-        self.commitments = saved_counts.4;
-        self.silent_settlements = saved_counts.5;
+        self.events = counts.0;
+        self.total_bits = counts.1;
+        self.baseline_ticks = counts.2;
+        self.overt_emissions = counts.3;
+        self.commitments = counts.4;
+        self.silent_settlements = counts.5;
         self.restore(saved);
         (out.bits, out.correct)
     }
 
-    /// The deterministic descent the write takes: argmax at every level, one
-    /// pass, no evidence accumulation. Its path is the target the read
-    /// particles' branch predictions are calibrated against -- a prediction made
-    /// before the resolution arrived, scored against the stream itself.
-    fn write_descent(&mut self, p: &[f32], grow: bool) -> (Vec<usize>, Vec<Vec<f32>>) {
-        let mut path = vec![0usize];
-        let mut queries: Vec<Vec<f32>> = Vec::new();
-        let mut u = 0usize;
-        let mut query = vec![0.0f32; self.cfg.d];
-        loop {
-            if self.tree.arena[u].children.is_empty() {
-                break;
-            }
-            let level = self.tree.arena[u].level + 1;
-            if level > self.tree.depth_cap {
-                break;
-            }
-            let k = rung_for_level(self.cfg.rungs, level);
-            query.copy_from_slice(self.ladder.delta(k));
-            for i in 0..self.cfg.d {
-                query[i] += p[i];
-            }
-            normalize(&mut query);
-            if grow && !self.frozen {
-                self.tree.rung_visits[k] += 1;
-                self.tree.place_pending(u, &query);
-            }
-            let mut scores = Vec::new();
-            self.tree.branch_scores(u, &query, 1.0, &mut scores);
-            if scores.is_empty() {
-                break;
-            }
-            let best = argmax(&scores);
-            let winner = self.tree.arena[u].children[best];
-            if grow {
-                // The dispersion criterion reads the *raw* similarity, not a
-                // softmax over siblings: with a single child the softmax is
-                // identically one and its variance identically zero, so a class
-                // could never be found dispersed enough to split.
-                self.tree.observe_and_maybe_grow(u, winner, scores[best], &query);
-            }
-            u = winner;
-            path.push(u);
-            queries.push(query.clone());
-        }
-        if grow {
-            // Deepening is an append like widening, gated by observations, and
-            // it happens where content lands rather than where a particle
-            // happened to wander.
-            let leaf = *path.last().unwrap();
-            if self.tree.arena[leaf].children.is_empty()
-                && self.tree.arena[leaf].level < self.tree.depth_cap
-            {
-                let level = self.tree.arena[leaf].level + 1;
-                let k = rung_for_level(self.cfg.rungs, level);
-                query.copy_from_slice(self.ladder.delta(k));
-                for i in 0..self.cfg.d {
-                    query[i] += p[i];
-                }
-                normalize(&mut query);
-                self.tree.deepen(leaf, &query);
-            }
-        }
-        (path, queries)
+    /// The response's current state vector, for assertions about what a probe
+    /// displaced.
+    pub fn state_now(&self) -> Vec<f32> {
+        self.p.clone()
     }
 
-    /// The feature vector a readout row is scored against: the payload, with the
-    /// bound trace concatenated when binding is on.
+    /// The full emitted distribution as it stands, for the normalisation
+    /// assertion.
+    pub fn spread_now(&self) -> code::Spread {
+        let visit = self.visit_dist();
+        let phi = self.features(&self.p.clone());
+        code::spread(&self.store, &visit, &phi, !self.cfg.no_readout)
+    }
+
+    // ---- features -------------------------------------------------------
+
     fn features(&self, p: &[f32]) -> Vec<f32> {
         let mut f = Vec::with_capacity(self.cfg.feature_blocks() * self.cfg.d);
         f.extend_from_slice(p);
@@ -323,12 +287,10 @@ impl Model {
         f
     }
 
-    /// Refresh the bound traces from the arriving token.
-    ///
-    /// Called after the charge, so what a response is scored against is the
-    /// binding as it stood when the last cue arrived -- at the target of a
-    /// two-cue item that is exactly `E_cueA (*) E_cueB`, with nothing else in
-    /// it.
+    /// Refresh the bound traces from the arriving token. Called after the
+    /// charge, so a response is scored against the binding as it stood when the
+    /// last cue arrived -- at the target of a two-cue item, exactly
+    /// `E_cueA (*) E_cueB` with nothing else in it.
     fn rebind(&mut self, x: usize) {
         if self.binds.is_empty() {
             return;
@@ -362,45 +324,83 @@ impl Model {
         self.event_hist.truncate(self.cfg.bind_lags.max(1));
     }
 
-    fn all_features(&self, payloads: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        payloads.iter().map(|p| self.features(p)).collect()
-    }
+    // ---- the walk --------------------------------------------------------
 
-    fn sample_negatives(&self, leaf: usize, target: u32, k: usize) -> Vec<u32> {
-        let rows = self.tree.emitted(leaf);
-        if rows.is_empty() || k == 0 {
-            return Vec::new();
-        }
-        let mut out = Vec::with_capacity(k);
-        for i in 0..k {
-            let j = crate::num::uniform_below(
-                self.cfg.seed ^ KEY_NEG,
-                self.tick_index.wrapping_mul(97).wrapping_add(i as u64),
-                rows.len() as u64,
-            ) as usize;
-            let t = rows[j];
-            if t != target {
-                out.push(t);
+    /// The query a hop is routed by: the fuzzy multi-level background summed
+    /// with the current state. Both halves matter -- the background is what
+    /// makes the walk depend on the situation, the state is what makes it depend
+    /// on the challenge.
+    fn query(&self, out: &mut Vec<f32>) {
+        out.clear();
+        out.extend_from_slice(self.ladder.delta(0));
+        for k in 1..self.cfg.rungs {
+            let b = self.ladder.delta(k);
+            for i in 0..self.cfg.d {
+                out[i] += b[i];
             }
         }
-        out
+        for i in 0..self.cfg.d {
+            out[i] += self.p[i];
+        }
+        normalize(out);
     }
 
-    /// The leader's current best token and its probability, from the tail
-    /// distribution alone -- cheap enough to run every tick.
-    fn leader_top1(&self) -> Option<(usize, f32)> {
-        if self.swarm.is_empty() {
-            return None;
+    /// One read: a single hop, and the visit accumulator advances.
+    fn step_walk(&mut self) {
+        let mut q = Vec::with_capacity(self.cfg.d);
+        self.query(&mut q);
+        let a = self.graph.select(self.gnode, &q);
+        let cur = self.p.clone();
+        let st = self.graph.hop(a, &cur);
+        self.p = st.p_out.clone();
+        self.gnode = self.graph.head_of(a);
+        self.hops += 1;
+        self.graph.touch_read(&st);
+
+        let lam = self.cfg.visit_decay;
+        for v in self.visit.iter_mut() {
+            *v *= lam;
         }
-        let i = self.swarm.leader();
-        let code = &self.swarm.parts[i].code;
-        let u = code.leaf();
-        let phi = self.features(&self.swarm.parts[i].p);
-        let sc = crate::code::score(&self.tree, u, &phi, !self.cfg.no_readout);
+        self.visit[self.gnode] += 1.0;
+    }
+
+    /// The nodes this response has touched, normalised. Nodes below a hundredth
+    /// of the peak are dropped: they contribute nothing to the prior and each
+    /// one costs a pass over its candidate list.
+    fn visit_dist(&self) -> Visit {
+        let mut peak = 0.0f32;
+        for &v in self.visit.iter() {
+            if v > peak {
+                peak = v;
+            }
+        }
+        if peak <= 0.0 {
+            return Visit::single(self.gnode);
+        }
+        let floor = peak * 0.01;
+        let mut w: Vec<(usize, f32)> = Vec::new();
+        let mut total = 0.0f32;
+        for (u, &v) in self.visit.iter().enumerate() {
+            if v >= floor {
+                w.push((u, v));
+                total += v;
+            }
+        }
+        for e in w.iter_mut() {
+            e.1 /= total;
+        }
+        Visit { w }
+    }
+
+    // ---- emission --------------------------------------------------------
+
+    fn best_answer(&self, visit: &Visit, phi: &[f32]) -> Option<(usize, f32)> {
+        let sc = code::score(&self.store, visit, phi, !self.cfg.no_readout);
         if let Some((t, q)) = sc.top() {
             return Some((t as usize, q));
         }
-        let node = &self.tree.arena[u];
+        let u = visit.argmax();
+        let node = &self.store.nodes[u];
         if node.counts.is_empty() {
             return None;
         }
@@ -411,6 +411,44 @@ impl Model {
             }
         }
         Some((best.0 as usize, best.1 as f32 / node.total.max(1) as f32))
+    }
+
+    /// Decide what to think and what to say, and log both. Runs on every tick,
+    /// driven or not: the system is always outputting.
+    fn emit(&mut self, out: &mut TickOutcome, visit: &Visit, phi: &[f32]) {
+        let (t, q) = match self.best_answer(visit, phi) {
+            None => {
+                self.covert = None;
+                self.overt = None;
+                return;
+            }
+            Some(v) => v,
+        };
+        self.covert = Some(t);
+        out.top1 = Some(t);
+        self.covert_log.push((self.ticks_since_event, t));
+
+        // Speak when the answer has stopped improving. A calibrated-confidence
+        // threshold cannot work here: it pins at its ceiling whenever the model
+        // is over-confident anywhere, and then the channel never fires, never
+        // generates calibration data, and stays shut.
+        let rising = q > self.prev_answer_conf + 1e-4;
+        let settled = !rising && q >= self.cfg.speak_fallback;
+        self.prev_answer_conf = q;
+
+        if settled && self.committed.is_none() {
+            self.overt = Some(t);
+            out.overt = Some(t);
+            self.overt_emissions += 1;
+            self.overt_log.push((self.ticks_since_event, t));
+            if self.cfg.commit_locks_charge {
+                self.committed = Some((visit.clone(), phi.to_vec()));
+                self.committed_token = Some(t);
+                self.commitments += 1;
+            }
+        } else if self.committed.is_none() {
+            self.overt = None;
+        }
     }
 
     /// Feed the self channels back into the fast end of the background.
@@ -430,68 +468,38 @@ impl Model {
                 self.ladder.observe_self(&v);
             }
         }
-        if self.cfg.feedback_write && !self.swarm.is_empty() {
-            // The update reporting on itself: which memory is being touched,
-            // squashed by how much activity there is. During a gap this is the
-            // only thing still moving, and it is what keeps the response
-            // unfolding when the world has gone quiet.
-            let i = self.swarm.leader();
-            let act: f32 = self.graph.trace.iter().sum::<f32>() / self.graph.edges() as f32;
+        if self.cfg.feedback_write {
+            // Where the walk is. This is the drive: it is what keeps the query
+            // moving through a gap, and it is why revisiting a node becomes less
+            // likely without any fatigue term.
+            let key = self.graph.node_key(self.gnode).to_vec();
             let mut v = vec![0.0f32; d];
-            self.emb.rotate_vec(&self.swarm.parts[i].p.clone(), Channel::Write, &mut v);
-            let g = act.tanh();
-            for x in v.iter_mut() {
-                *x *= g;
-            }
+            self.emb.rotate_vec(&key, Channel::Write, &mut v);
             self.ladder.observe_self(&v);
         }
     }
 
-    /// Decide what to think and what to say, and log both.
-    ///
-    /// This runs on every tick, driven or not. The system is always emitting;
-    /// running it only on baselines left the self channels silent for the whole
-    /// of a drive, which contradicts the one thing the architecture is built
-    /// around.
-    fn emit(&mut self, out: &mut TickOutcome) {
-        let (t, q) = match self.leader_top1() {
-            None => {
-                self.covert = None;
-                self.overt = None;
-                return;
-            }
-            Some(v) => v,
-        };
-        self.covert = Some(t);
-        out.top1 = Some(t);
-        self.covert_log.push((self.ticks_since_event, t));
-
-        // Speak when the answer has stopped improving, which is the same
-        // "evidence absorbed" rule the branches use. A calibrated-confidence
-        // threshold cannot work here: it pins at its ceiling whenever the model
-        // is over-confident anywhere, and then the channel never fires, never
-        // generates calibration data, and stays shut.
-        let rising = q > self.prev_answer_conf + 1e-4;
-        let settled = !rising && q >= self.cfg.speak_fallback;
-        self.prev_answer_conf = q;
-
-        if settled && self.committed.is_none() {
-            self.overt = Some(t);
-            out.overt = Some(t);
-            self.overt_emissions += 1;
-            self.overt_log.push((self.ticks_since_event, t));
-            if self.cfg.commit_locks_charge && !self.swarm.is_empty() {
-                let l = self.swarm.leader();
-                let leaf = self.swarm.parts[l].code.leaf();
-                let phi = self.features(&self.swarm.parts[l].p.clone());
-                self.committed = Some((leaf, phi));
-                self.committed_token = Some(t);
-                self.commitments += 1;
-            }
-        } else if self.committed.is_none() {
-            self.overt = None;
+    fn sample_negatives(&self, node: usize, target: u32, k: usize) -> Vec<u32> {
+        let toks = self.store.emitted(node);
+        if toks.is_empty() || k == 0 {
+            return Vec::new();
         }
+        let mut out = Vec::with_capacity(k);
+        for i in 0..k {
+            let j = crate::num::uniform_below(
+                self.cfg.seed ^ KEY_NEG,
+                self.tick_index.wrapping_mul(97).wrapping_add(i as u64),
+                toks.len() as u64,
+            ) as usize;
+            let t = toks[j];
+            if t != target {
+                out.push(t);
+            }
+        }
+        out
     }
+
+    // ---- the tick ---------------------------------------------------------
 
     pub fn tick(&mut self, obs: Option<usize>, want_entropy: bool) -> TickOutcome {
         self.tick_index += 1;
@@ -502,7 +510,8 @@ impl Model {
             bits: 0.0,
             entropy_bits: None,
             ticks_since_event: self.ticks_since_event,
-            depth: self.swarm.mean_depth(),
+            hops: self.hops,
+            visit_entropy: 0.0,
             top1: None,
             correct: false,
             overt: None,
@@ -518,19 +527,26 @@ impl Model {
                 self.feedback();
                 self.ladder.refresh();
                 self.graph.decay_traces(self.cfg.trace_lambda);
-                if !self.swarm.is_empty() {
-                    self.swarm.step(&mut self.tree, &mut self.graph, &self.ladder);
+
+                // The read. The response keeps unfolding for as long as the
+                // world gives it ticks; this is what the gap is for. Switched
+                // off, the response state freezes after the write walk and the
+                // gap does nothing -- which is the control that says whether any
+                // of the gain is the walk.
+                if self.cfg.walk_during_gap {
+                    self.step_walk();
                 }
-                if want_entropy && !self.swarm.is_empty() {
-                    let i = self.swarm.leader();
-                    let phi = self.features(&self.swarm.parts[i].p.clone());
-                    let leaf = self.swarm.parts[i].code.leaf();
-                    let sp =
-                        code::spread(&self.tree, leaf, &phi, !self.cfg.no_readout);
+
+                let visit = self.visit_dist();
+                let p = self.p.clone();
+                let phi = self.features(&p);
+                if want_entropy {
+                    let sp = code::spread(&self.store, &visit, &phi, !self.cfg.no_readout);
                     out.entropy_bits = Some(sp.entropy_bits());
                 }
-                self.emit(&mut out);
-                out.depth = self.swarm.mean_depth();
+                self.emit(&mut out, &visit, &phi);
+                out.hops = self.hops;
+                out.visit_entropy = visit.entropy_bits();
                 out
             }
 
@@ -541,205 +557,120 @@ impl Model {
                 out.ticks_since_event = self.ticks_since_event;
 
                 // 1. Settle the standing code before anything is written.
-                if self.swarm.is_empty() {
-                    let c = self.cue.clone();
-                    let (n, h) = (self.cfg.particles, self.cfg.hops);
-                    self.swarm.seed_response(n, &c, &mut self.graph, h);
-                }
-                let live_payloads = self.swarm.payloads();
-                let live_feats = self.all_features(&live_payloads);
-                let live_leaf = if self.swarm.is_empty() {
-                    0
-                } else {
-                    self.swarm.parts[self.swarm.leader()].code.leaf()
-                };
-                let live_phi = if self.swarm.is_empty() {
-                    self.features(&self.cue.clone())
-                } else {
-                    live_feats[self.swarm.leader()].clone()
-                };
-
-                // Settle what was said, if the rule is in force and something
-                // was said. A response that stayed silent is charged its
-                // background prior alone -- it committed to nothing, so only the
-                // situation it was in stands.
-                let (leaf, phi, silent) = match (
-                    self.cfg.commit_locks_charge,
-                    self.committed.clone(),
-                ) {
-                    (true, Some((l, f))) => (l, f, false),
-                    (true, None) => (live_leaf, live_phi.clone(), true),
-                    (false, _) => (live_leaf, live_phi.clone(), false),
-                };
+                let live_visit = self.visit_dist();
+                let p0 = self.p.clone();
+                let live_phi = self.features(&p0);
+                let (visit, phi, silent) =
+                    match (self.cfg.commit_locks_charge, self.committed.clone()) {
+                        (true, Some((v, f))) => (v, f, false),
+                        (true, None) => (live_visit.clone(), live_phi.clone(), true),
+                        (false, _) => (live_visit.clone(), live_phi.clone(), false),
+                    };
                 if silent {
                     self.silent_settlements += 1;
                 }
                 let prob = code::prob(
-                    &self.tree,
-                    leaf,
+                    &self.store,
+                    &visit,
                     &phi,
                     x as u32,
                     !self.cfg.no_readout && !silent,
                 );
                 out.bits = code::charge_bits(prob);
                 self.total_bits += out.bits;
-                if let Some((t, q)) = self.leader_top1() {
+
+                if let Some((t, q)) = self.best_answer(&live_visit, &live_phi) {
                     out.top1 = Some(t);
                     out.correct = if self.cfg.commit_locks_charge {
-                        // Scored on what was said. A response that never spoke
-                        // committed to no answer and cannot be right.
                         self.committed_token == Some(x)
                     } else {
                         t == x
                     };
-                    // The answer calibration's target is the stream itself: the
-                    // model said t with confidence q before the world said x.
                     if !self.frozen {
-                        self.tree.answer_calib.push(q, t == x);
+                        self.store.answer_calib.push(q, t == x);
                     }
                 }
                 if want_entropy {
-                    let sp = code::spread(
-                        &self.tree,
-                        live_leaf,
-                        &live_phi,
-                        !self.cfg.no_readout,
-                    );
+                    let sp =
+                        code::spread(&self.store, &live_visit, &live_phi, !self.cfg.no_readout);
                     out.entropy_bits = Some(sp.entropy_bits());
                 }
 
-                // Both reaction times, read off the logs now that the world has
-                // said which answer was the right one.
-                out.idea_onset =
-                    self.covert_log.iter().find(|(_, t)| *t == x).map(|(k, _)| *k);
-                out.speech_onset =
-                    self.overt_log.iter().find(|(_, t)| *t == x).map(|(k, _)| *k);
+                out.idea_onset = self.covert_log.iter().find(|(_, t)| *t == x).map(|(k, _)| *k);
+                out.speech_onset = self.overt_log.iter().find(|(_, t)| *t == x).map(|(k, _)| *k);
                 self.covert_log.clear();
                 self.overt_log.clear();
 
-                // 2. Walk the memory, then calibrate.
-                //
-                // The walk has to come first. A read particle navigates the tree
-                // on its *walked* payload, so if the write descends on the
-                // unwalked cue the two are addressing with different vectors and
-                // the calibration is scoring read commitments against a path
-                // that was computed from something else. Same payload, same
-                // query, or the whole per-level signal is noise.
-                let cue = self.cue.clone();
-                let steps = self.graph.write_walk(&cue, &cue, self.cfg.hops);
-                let p_end =
-                    steps.last().map(|s| s.p_out.clone()).unwrap_or_else(|| cue.clone());
-                let grow = !self.frozen;
-                let (truth, truth_queries) = self.write_descent(&p_end, grow);
-                for pc in self.swarm.pending.clone() {
-                    if self.frozen {
-                        break;
-                    }
-                    if pc.level < truth.len() {
-                        let correct = truth[pc.level] == pc.chosen;
-                        let lv = pc.level.min(self.tree.calib.len() - 1);
-                        self.tree.calib[lv].push(pc.confidence, correct);
-                    }
-                }
-                self.swarm.pending.clear();
-
-                // 3. Write. Gated by the operator norm, which is exactly zero at
-                //    baseline and so cannot reach this branch from there.
+                // 2. Write. The write walk is deterministic and content-addressed
+                //    -- a fixed number of hops routed by the state alone -- so it
+                //    keeps the consistency the read path does not need.
                 let gate = if self.frozen { 0.0 } else { self.emb.drive_norm(Some(x)) };
                 if gate > 0.0 {
-                    let leaf = *truth.last().unwrap();
-                    // How surprised the destination was, measured before the
-                    // token is counted into it and through the same tail the
-                    // ledger settles against -- readout included. Using the
-                    // count-only prior here made the split criterion react to
-                    // the failure of a model that is not the one being charged,
-                    // which biases the tree's shape without showing up anywhere
-                    // as a wrong number.
-                    let phi_now = self.features(&p_end);
-                    let leaf_bits = code::charge_bits(code::prob(
-                        &self.tree,
-                        leaf,
-                        &phi_now,
-                        x as u32,
-                        !self.cfg.no_readout,
-                    ));
-                    let negs = self.sample_negatives(leaf, x as u32, self.cfg.neg_samples);
-                    let phi_write = self.features(&p_end);
-                    let _ = &live_payloads;
-                    // Under `no_readout` nothing is learned at all -- not the
-                    // rows, and not the edge transforms, whose only gradient
-                    // source is the rows. Training them while refusing to read
-                    // them left the ablation measuring something else entirely.
+                    let steps = self.graph.write_walk(&p0, &p0, self.cfg.hops);
+                    let node =
+                        steps.last().map(|s| self.graph.head_of(s.edge)).unwrap_or(self.gnode);
+                    let bits_before = code::charge_bits(self.store.prior_of(node, x as u32));
+                    self.store.write_surprise.push(bits_before);
+
+                    let negs = self.sample_negatives(node, x as u32, self.cfg.neg_samples);
+                    // Trained at the features the charge was settled on, so the
+                    // rows are fitted where they will be evaluated.
                     let grad = if self.cfg.no_readout {
-                        vec![0.0f32; self.tree.fw]
+                        vec![0.0f32; self.store.fw]
                     } else {
-                        self.tree.readout_update(
-                            leaf,
-                            &phi_write,
+                        self.store.readout_update(
+                            &live_visit,
+                            &live_phi,
                             x as u32,
                             &negs,
                             self.cfg.eta * gate,
                         )
                     };
-                    // Only the payload half of the gradient has anything
-                    // upstream of it; the bound trace is built from fixed
-                    // embeddings and takes no gradient.
-                    let grad_p: Vec<f32> = grad[..self.cfg.d].to_vec();
                     if !self.cfg.no_readout {
+                        let grad_p: Vec<f32> = grad[..self.cfg.d].to_vec();
                         self.graph.backprop(&steps, &grad_p, self.cfg.eta * gate);
+                        if !self.cfg.no_eligibility {
+                            self.graph.credit_traces(&grad_p, self.cfg.eta * gate * 0.25, 0.05);
+                        }
                     }
 
-                    // Gap-time particle activity gets its share of the
-                    // settlement through the eligibility traces, in O(1) per
-                    // edge and without unrolling the gap.
-                    if !self.cfg.no_eligibility && !self.cfg.no_readout {
-                        self.graph.credit_traces(&grad_p, self.cfg.eta * gate * 0.25, 0.05);
-                    }
-
-                    self.tree.record(leaf, x as u32);
-                    self.last_write_leaf = leaf;
+                    self.store.record(node, x as u32);
+                    self.last_write_node = node;
                     self.content_writes += 1;
-                    if truth.len() >= 2 && !truth_queries.is_empty() {
-                        let parent = truth[truth.len() - 2];
-                        let q = truth_queries[truth_queries.len() - 1].clone();
-                        self.tree.observe_surprise(parent, leaf, leaf_bits, &q);
-                    }
                     out.wrote = true;
                 }
 
-                // 4. Fold the observation into the background and the cue, then
-                //    drive the live particles rather than restarting them.
+                // 3. Fold the observation into the background, the bound traces
+                //    and the state, then take this tick's read.
                 self.emb.rotated(x, Channel::In, &mut self.scratch);
                 let v = self.scratch.clone();
                 self.ladder.observe_world(&v);
                 self.feedback();
                 self.ladder.refresh();
                 self.rebind(x);
-                self.emb.apply_operator(Some(x), &mut self.cue);
+                self.emb.apply_operator(Some(x), &mut self.p);
                 self.graph.decay_traces(self.cfg.trace_lambda);
+                self.step_walk();
 
-                let (n, h) = (self.cfg.particles, self.cfg.hops);
-                if self.swarm.is_empty() {
-                    let c = self.cue.clone();
-                    self.swarm.seed_response(n, &c, &mut self.graph, h);
-                } else {
-                    self.swarm.drive(x, &self.emb, &mut self.graph, h);
-                    self.swarm.recheck(&self.tree, &self.ladder);
-                }
-                self.swarm.step(&mut self.tree, &mut self.graph, &self.ladder);
-
-                // Reset before emitting: the closing emission belongs to the
-                // *new* response, and logging it at the old offset put a stale
-                // entry at the head of every response's log.
                 self.ticks_since_event = 0;
                 self.committed = None;
                 self.committed_token = None;
                 self.prev_answer_conf = 0.0;
+                self.hops = 0;
+
                 let scored = (out.top1, out.correct);
-                self.emit(&mut out);
+                let nv = self.visit_dist();
+                let np = self.p.clone();
+                let nphi = self.features(&np);
+                self.emit(&mut out, &nv, &nphi);
                 out.top1 = scored.0;
                 out.correct = scored.1;
-                out.depth = self.swarm.mean_depth();
+                // out.hops keeps the value captured at entry: the hops this
+                // response had taken when the world spoke. Overwriting it with
+                // zero here filed every charged event in the hops=0 bucket and
+                // left the speed-accuracy curve -- the architecture's reason to
+                // exist -- unmeasured while looking like a flat result.
+                out.visit_entropy = nv.entropy_bits();
                 out
             }
         }

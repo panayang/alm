@@ -1,22 +1,20 @@
 //! Experiment drivers.
 //!
-//! The order is deliberate. The flatten sanity check runs first, because if
-//! capping the tree at depth one does not reproduce the flat-class behaviour of
-//! the reference mechanism then something already established has been broken
-//! and nothing downstream means anything. The generator report runs before every
-//! single one of them, and its load-bearing properties are asserted, so a flat
-//! curve can never be blamed on the mechanism before the source has been
-//! cleared.
+//! The generator self-tests run before any model is built and their
+//! load-bearing properties are asserted, so a flat curve can never be blamed on
+//! the mechanism before the source has been cleared.
 //!
-//! Ablations are deliberately few. Over-ablation kills mechanisms that were
-//! never given anything to do on this source, and each of the three here is
-//! aimed at one claim rather than at a component.
+//! Arms are few and each is aimed at one claim. Everything the old suite swept
+//! -- split criteria, tree depth, rung counts, prototype thresholds -- is gone
+//! because the machinery it swept is gone: depth cost more than it bought on
+//! every axis, and the reason was that a placed prototype had to win a
+//! competition it was in no position to win.
 
 use crate::baseline;
-use crate::config::{BindMode, Config, SplitRule};
-use crate::gen::{GenConfig, Generator, Mode, Stream};
+use crate::config::{BindMode, Config};
+use crate::gen::{GenConfig, Generator, Stream};
 use crate::gencheck;
-use crate::metrics::{run, Metrics};
+use crate::metrics::{run, Bucket, Metrics};
 use crate::model::Model;
 
 pub struct Outcome {
@@ -46,7 +44,7 @@ pub fn run_one(label: &str, cfg: Config, gcfg: &GenConfig, stream: &Stream) -> O
 }
 
 /// Mean over a window's buckets, pooled by count.
-pub fn window_mean(w: &[(u32, crate::metrics::Bucket)]) -> (f64, f64) {
+pub fn window_mean(w: &[(u32, Bucket)]) -> (f64, f64) {
     let (mut n, mut s, mut hits) = (0u64, 0.0f64, 0u64);
     for (_, b) in w.iter() {
         n += b.n;
@@ -60,20 +58,35 @@ pub fn window_mean(w: &[(u32, crate::metrics::Bucket)]) -> (f64, f64) {
     }
 }
 
-/// Width of the second-order plateau: how many separations sit within half a bit
-/// of the best one. The prediction under test is that this grows with the number
-/// of bands, and that is the quantity to watch across the rung sweep.
-pub fn plateau_width(m: &Metrics) -> usize {
-    let best = m
-        .window
+/// Slope of accuracy against hops taken, over the buckets that have data.
+///
+/// This is the architecture's reason to exist: a response that keeps walking
+/// through the gap should answer better than one that has just started. Flat or
+/// negative means the gap is doing nothing and the model is a lookup after all.
+pub fn hop_slope(m: &Metrics) -> (f64, f64, usize) {
+    let pts: Vec<(f64, f64)> = m
+        .by_hops
         .iter()
-        .filter(|(_, b)| b.n > 0)
-        .map(|(_, b)| b.mean())
-        .fold(f64::INFINITY, f64::min);
-    if !best.is_finite() {
-        return 0;
+        .enumerate()
+        .filter(|(_, b)| b.n > 50)
+        .map(|(h, b)| (h as f64, b.accuracy()))
+        .collect();
+    if pts.len() < 3 {
+        return (0.0, 0.0, pts.len());
     }
-    m.window.iter().filter(|(_, b)| b.n > 0 && b.mean() <= best + 0.5).count()
+    let n = pts.len() as f64;
+    let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+    for &(x, y) in pts.iter() {
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    let den = n * sxx - sx * sx;
+    let slope = if den.abs() < 1e-12 { 0.0 } else { (n * sxy - sx * sy) / den };
+    let first = pts.first().unwrap().1;
+    let last = pts.last().unwrap().1;
+    (slope, last - first, pts.len())
 }
 
 pub struct Suite {
@@ -83,10 +96,7 @@ pub struct Suite {
 
 impl Suite {
     fn new() -> Self {
-        Suite {
-            csv: String::from("run,metric,x,n,value,stderr,accuracy\n"),
-            summary: Vec::new(),
-        }
+        Suite { csv: String::from("run,metric,x,n,value,stderr,accuracy\n"), summary: Vec::new() }
     }
     fn note(&mut self, s: String) {
         println!("{}", s);
@@ -94,415 +104,22 @@ impl Suite {
     }
 }
 
-pub fn full(ticks: usize, seed: u64, quick: bool) -> Suite {
+/// The screening suite.
+///
+/// Four questions, in the order in which they can invalidate each other:
+///
+/// 1. Does the response unfolding pay? Accuracy against hops taken.
+/// 2. Is the walk driven, or does it coast? Ablate the write channel -- the one
+///    thing that changes during a gap. If nothing moves, "the update is part of
+///    the context" was decoration and the trajectory is not a process.
+/// 3. Does retention improve now that nothing has to win a competition?
+/// 4. Does the walk diffuse? Visit entropy against hops.
+pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
     let mut suite = Suite::new();
 
     let mut gcfg = GenConfig::local();
     gcfg.seed = seed ^ 0xA11CE;
-    if quick {
-        gcfg.span_ticks = 1500;
-    }
-    let min_per_sep = if quick { 10 } else { 40 };
-
-    println!("building stream: {} ticks", ticks);
-    let stream = build_stream(&gcfg, ticks, min_per_sep, true);
-
-    let mut base = Config::local();
-    base.seed = seed;
-    base.vocab = gcfg.vocab;
-    base.horizon = 256.0;
-    base.derive();
-
-    // ---- 0. sanity: flattening must reproduce the flat-class behaviour ----
-    let mut flat = base.clone();
-    flat.flatten = true;
-    let o_flat = run_one("flatten-L1", flat, &gcfg, &stream);
-    let (f_lat, f_lat_acc) = window_mean(&o_flat.metrics.window);
-    let (f_prod, f_prod_acc) = window_mean(&o_flat.metrics.window_product);
-    suite.note(format!(
-        "[sanity] L=1  {:.3} bits/ev  top-1 {:.3}  Latin {:.3}/{:.3}  product \
-         {:.3}/{:.3}  ({} nodes, depth {})",
-        o_flat.metrics.bits_per_event(),
-        o_flat.metrics.all_events.accuracy(),
-        f_lat,
-        f_lat_acc,
-        f_prod,
-        f_prod_acc,
-        o_flat.model.tree.nodes(),
-        o_flat.model.tree.realised_depth()
-    ));
-    assert_eq!(
-        o_flat.model.tree.realised_depth(),
-        1,
-        "flatten did not actually cap the tree at depth one"
-    );
-
-    // ---- 1. the full mechanism ----
-    let o_full = run_one("full", base.clone(), &gcfg, &stream);
-    o_full.metrics.print(&o_full.model, "full");
-    o_full.metrics.csv_window("full", &mut suite.csv);
-    o_full.metrics.csv_sharpening("full", &mut suite.csv);
-
-    // Sharpening: the first thing that can kill the accounting.
-    let sharp: Vec<(usize, f64)> = o_full
-        .metrics
-        .sharpening
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.n > 32)
-        .map(|(i, b)| (i, b.mean()))
-        .collect();
-    let sharp_verdict = if sharp.len() < 2 {
-        "insufficient data".to_string()
-    } else {
-        let first = sharp.first().unwrap().1;
-        let last = sharp.last().unwrap().1;
-        format!("H(t+{}) {:.3} -> H(t+{}) {:.3}, drop {:.3} bits",
-            sharp.first().unwrap().0, first, sharp.last().unwrap().0, last, first - last)
-    };
-    suite.note(format!("[sharpening] {}", sharp_verdict));
-
-    // ---- 2. the rung sweep ----
-    //
-    // Only comparable between arms whose rung coverage is one. Where the tree
-    // stops short of its depth cap the fastest bands are configured and never
-    // read, and the sweep then varies which bands are used instead of how many
-    // -- which is a different experiment wearing this one's label.
-    for rungs in [2usize, 3, 4, 6] {
-        let mut c = base.clone();
-        c.rungs = rungs;
-        c.derive();
-        let label = format!("rungs-{}", rungs);
-        let o = run_one(&label, c, &gcfg, &stream);
-        o.metrics.csv_window(&label, &mut suite.csv);
-        let (l, la) = window_mean(&o.metrics.window);
-        let (p, pa) = window_mean(&o.metrics.window_product);
-        suite.note(format!(
-            "[window] rungs={} plateau {} | {:.3} bits/ev | depth {} | rung \
-             coverage {:.2} | Latin {:.3}/{:.3} | product {:.3}/{:.3}",
-            rungs,
-            plateau_width(&o.metrics),
-            o.metrics.bits_per_event(),
-            o.model.tree.realised_depth(),
-            o.model.tree.rung_coverage(),
-            l,
-            la,
-            p,
-            pa
-        ));
-        for (s, b) in o.metrics.window.iter() {
-            suite.summary.push(format!(
-                "    rungs={} sep={:<4} n={:<5} bits={:.3} acc={:.3}",
-                rungs, s, b.n, b.mean(), b.accuracy()
-            ));
-        }
-    }
-
-    // ---- 3. the two conjunctions, which is what the whole build is for ----
-    let (lat_bits, lat_acc) = window_mean(&o_full.metrics.window);
-    let (prod_bits, prod_acc) = window_mean(&o_full.metrics.window_product);
-    suite.note(format!(
-        "[conjunction] Latin (not linearly representable) {:.3} bits acc {:.3} | \
-         product (representable) {:.3} bits acc {:.3}",
-        lat_bits, lat_acc, prod_bits, prod_acc
-    ));
-
-    // ---- 4. the split criterion ----
-    //
-    // Surprise is swept rather than tried at one point, because abandoning a
-    // criterion on a single value of its threshold is not a measurement.
-    let mut split_arms: Vec<(String, Config)> = Vec::new();
-    let mut d0 = base.clone();
-    d0.split_rule = SplitRule::Dispersion;
-    split_arms.push(("dispersion".into(), d0));
-    for bits in [4.0f64, 8.0, 12.0, 16.0] {
-        let mut c = base.clone();
-        c.split_rule = SplitRule::Surprise;
-        c.split_bits = bits;
-        split_arms.push((format!("surprise@{}b", bits), c));
-    }
-    for bits in [8.0f64, 12.0] {
-        let mut c = base.clone();
-        c.split_rule = SplitRule::Hybrid;
-        c.split_bits = bits;
-        split_arms.push((format!("hybrid@{}b", bits), c));
-    }
-    for (name, c) in split_arms {
-        let o = run_one(&name, c, &gcfg, &stream);
-        let (l, la) = window_mean(&o.metrics.window);
-        let (p, pa) = window_mean(&o.metrics.window_product);
-        let (pp2, _) = o.metrics.pair_purity();
-        suite.note(format!(
-            "[split] {:<14} {:.3} bits/ev | regime {:.3} | pair {:.3} | Latin \
-             {:.3}/{:.3} | product {:.3}/{:.3} | {} leaves",
-            name,
-            o.metrics.bits_per_event(),
-            o.metrics.leaf_purity(),
-            pp2,
-            l,
-            la,
-            p,
-            pa,
-            o.model.tree.leaves()
-        ));
-    }
-
-    // ---- 5. binding: what should be bound, and is the conjunction
-    //         event-structured or timescale-structured? ----
-    //
-    // EventLag is invariant to how many baseline ticks separated the cues, so a
-    // good Latin accuracy under it with a flat window says the conjunction never
-    // needed the bands. Band carries tick-scale and is the only mode under which
-    // a plateau in separation can appear at all.
-    for (name, mode, on) in [
-        ("off", BindMode::Off, false),
-        ("event-lag", BindMode::EventLag, true),
-        ("band", BindMode::Band, true),
-        ("both", BindMode::Both, true),
-    ] {
-        let mut c = base.clone();
-        c.use_binding = on;
-        c.bind_mode = mode;
-        let o = run_one(&format!("bind-{}", name), c, &gcfg, &stream);
-        let (l, la) = window_mean(&o.metrics.window);
-        let (p, pa) = window_mean(&o.metrics.window_product);
-        let spread: Vec<String> = o
-            .metrics
-            .window
-            .iter()
-            .map(|(s, b)| format!("{}:{:.3}", s, b.accuracy()))
-            .collect();
-        suite.note(format!(
-            "[bind] {:<10} {:.3} bits/ev | Latin {:.3}/{:.3} | product \
-             {:.3}/{:.3} | Latin by sep {}",
-            name,
-            o.metrics.bits_per_event(),
-            l,
-            la,
-            p,
-            pa,
-            spread.join(" ")
-        ));
-    }
-
-    // ---- 6. the two self channels, separately ----
-    let mut no_cov = base.clone();
-    no_cov.feedback_covert = false;
-    let o_no_cov = run_one("no-covert", no_cov, &gcfg, &stream);
-    let mut no_ov = base.clone();
-    no_ov.feedback_overt = false;
-    let o_no_ov = run_one("no-overt", no_ov, &gcfg, &stream);
-    let fastest_read = o_full
-        .model
-        .tree
-        .rung_visits
-        .iter()
-        .enumerate()
-        .filter(|(_, &v)| v > 0)
-        .map(|(k, _)| k)
-        .min()
-        .unwrap_or(usize::MAX);
-    let live = fastest_read <= base.self_max_rung;
-    suite.note(format!(
-        "[poisoning] both on {:.3} | inner speech off {:.3} | spoken off {:.3} \
-         bits/ev; self writes rung {}, descent reaches rung {} -- channel {}",
-        o_full.metrics.bits_per_event(),
-        o_no_cov.metrics.bits_per_event(),
-        o_no_ov.metrics.bits_per_event(),
-        base.self_max_rung,
-        fastest_read,
-        if live { "live" } else { "NEVER READ, control is vacuous" }
-    ));
-
-    // ---- 7. the payload chain, which was silently in its linear regime ----
-    for w_init in [0.05f32, 0.5, 1.5, 3.0] {
-        let mut c = base.clone();
-        c.w_init = w_init;
-        let label = format!("w-init-{}", w_init);
-        let o = run_one(&label, c, &gcfg, &stream);
-        let (l, la) = window_mean(&o.metrics.window);
-        let (p, pa) = window_mean(&o.metrics.window_product);
-        suite.note(format!(
-            "[chain] w_init {:<5} {:.3} bits/event, Latin {:.3}/{:.3}, product \
-             {:.3}/{:.3}",
-            w_init,
-            o.metrics.bits_per_event(),
-            l,
-            la,
-            p,
-            pa
-        ));
-    }
-
-    // ---- 7b. charge what was said ----
-    //
-    // Bits under this rule are not comparable to bits without it, so the two
-    // arms are reported side by side and never mixed into one number.
-    let mut lock = base.clone();
-    lock.commit_locks_charge = true;
-    let o_lock = run_one("commit-locks", lock, &gcfg, &stream);
-    let (lk_l, lk_la) = window_mean(&o_lock.metrics.window);
-    let (lk_p, lk_pa) = window_mean(&o_lock.metrics.window_product);
-    suite.note(format!(
-        "[commit] locking on: {:.3} bits/ev | Latin {:.3}/{:.3} | product \
-         {:.3}/{:.3} | {} commitments, {} silent | speech onset t+{:.2} on {}",
-        o_lock.metrics.bits_per_event(),
-        lk_l,
-        lk_la,
-        lk_p,
-        lk_pa,
-        o_lock.model.commitments,
-        o_lock.model.silent_settlements,
-        o_lock.metrics.speech_onset.mean(),
-        o_lock.metrics.speech_onset.n
-    ));
-    suite.note(format!(
-        "[commit] locking off (bits NOT comparable): {:.3} bits/ev | Latin \
-         {:.3}/{:.3} | product {:.3}/{:.3} | speech onset t+{:.2} on {}",
-        o_full.metrics.bits_per_event(),
-        lat_bits,
-        lat_acc,
-        prod_bits,
-        prod_acc,
-        o_full.metrics.speech_onset.mean(),
-        o_full.metrics.speech_onset.n
-    ));
-
-    // ---- 8. ablations, still few and each aimed at one claim ----
-    let mut a1 = base.clone();
-    a1.no_readout = true;
-    let o_a1 = run_one("no-readout", a1, &gcfg, &stream);
-
-    let mut a2 = base.clone();
-    a2.feedback_write = false;
-    a2.no_eligibility = true;
-    let o_a2 = run_one("no-gap-credit", a2, &gcfg, &stream);
-
-    let mut a3 = base.clone();
-    a3.particles = 1;
-    let o_a3 = run_one("one-particle", a3, &gcfg, &stream);
-    for (name, o) in
-        [("no readout", &o_a1), ("no gap credit", &o_a2), ("one particle", &o_a3)]
-    {
-        let (l, la) = window_mean(&o.metrics.window);
-        let (p, pa) = window_mean(&o.metrics.window_product);
-        suite.note(format!(
-            "[ablation] {:<14} {:.3} bits/ev | Latin {:.3}/{:.3} | product \
-             {:.3}/{:.3} | pair purity {:.3}",
-            name,
-            o.metrics.bits_per_event(),
-            l,
-            la,
-            p,
-            pa,
-            o.metrics.pair_purity().0
-        ));
-    }
-
-    // ---- 5. the baseline that matters ----
-    let like = baseline::run(&stream, 4, false);
-    let upper = baseline::run(&stream, 4, true);
-    suite.note(format!(
-        "[baseline] PPM-C order 4, same stream (silence is a symbol): \
-         {:.3} bits/event, top-1 {:.3}, second-order {:.3} bits",
-        like.ppm.bits_per_event(),
-        like.ppm.accuracy(),
-        like.second.mean()
-    ));
-    suite.note(format!(
-        "[baseline] PPM-C order 4, silence removed (UPPER BOUND, it is handed \
-         the segmentation): {:.3} bits/event, second-order {:.3} bits",
-        upper.ppm.bits_per_event(),
-        upper.second.mean()
-    ));
-    let ppm_second = like.second;
-    let ours_second: f64 = {
-        let mut n = 0u64;
-        let mut s = 0.0;
-        for (_, b) in o_full.metrics.window.iter() {
-            n += b.n;
-            s += b.sum;
-        }
-        if n == 0 {
-            0.0
-        } else {
-            s / n as f64
-        }
-    };
-    suite.note(format!(
-        "[verdict]  Latin items: ours {:.3} bits vs like-for-like PPM {:.3} bits  \
-         ({})",
-        ours_second,
-        ppm_second.mean(),
-        if ours_second < ppm_second.mean() { "ahead" } else { "behind" }
-    ));
-    suite.note(format!("[evidence] {}", o_full.metrics.evidence.verdict()));
-    suite.note(format!(
-        "[onsets]   idea at t+{:.2} ({} events), speech at t+{:.2} ({})",
-        o_full.metrics.idea_onset.mean(),
-        o_full.metrics.idea_onset.n,
-        o_full.metrics.speech_onset.mean(),
-        o_full.metrics.speech_onset.n
-    ));
-    let (pp, per_leaf) = o_full.metrics.pair_purity();
-    suite.note(format!(
-        "[address]  regime purity {:.3} (chance {:.3}) | cue-pair purity {:.3} \
-         (chance {:.3}); tree {} nodes, depth {}, {} leaves",
-        o_full.metrics.leaf_purity(),
-        1.0 / gcfg.domains as f64,
-        pp,
-        if per_leaf > 0.0 { 1.0 / per_leaf } else { 0.0 },
-        o_full.model.tree.nodes(),
-        o_full.model.tree.realised_depth(),
-        o_full.model.tree.leaves()
-    ));
-    suite.note(
-        "[diagnosis] the square is additive modulo m, so the target is not a \
-         linear function of the superposed cue embeddings; a linear readout \
-         cannot represent it and the only route is for the address to isolate \
-         the pair. Read the two purities above in that order."
-            .to_string(),
-    );
-
-    // ---- 6. mode B, the adversarial bound ----
-    let mut gb = gcfg.clone();
-    gb.mode = Mode::B;
-    let stream_b = build_stream(&gb, ticks, min_per_sep, false);
-    let o_b = run_one("mode-b", base.clone(), &gb, &stream_b);
-    suite.note(format!(
-        "[mode B]   entities shared across regimes: {:.3} bits/event (mode A {:.3})",
-        o_b.metrics.bits_per_event(),
-        o_full.metrics.bits_per_event()
-    ));
-
-    suite
-}
-
-/// The screening suite: the smallest set of arms that can decide the question
-/// actually open, and nothing else.
-///
-/// Everything cut from here was cut because it is *downstream* of that question.
-/// The split-rule sweep, the `w_init` sweep, the binding-mode comparison beyond
-/// on/off, commit locking, the poisoning arms and mode B all ask how best to run
-/// a hierarchical address; if depth still costs more than it buys they are asking
-/// about a mechanism that has not earned the right to be tuned. Running them
-/// anyway is how a suite grows to twenty arms and stops being able to answer
-/// anything quickly.
-///
-/// The question: after the scoring rewrite -- the address supplies a prior and a
-/// candidate set instead of a chain of uncalibrated per-level probabilities --
-/// does depth still hurt?
-///
-/// The prediction, stated before the run: the gap between `rungs=2` and
-/// `rungs=6` should close. If it does not, both diagnoses offered for the depth
-/// cost are wrong and the problem is further upstream, most likely in how
-/// prototypes are placed.
-pub fn screen(ticks: usize, seed: u64) -> Suite {
-    let mut suite = Suite::new();
-
-    let mut gcfg = GenConfig::local();
-    gcfg.seed = seed ^ 0xA11CE;
-    println!("screening stream: {} ticks", ticks);
+    println!("stream: {} ticks", ticks);
     let stream = build_stream(&gcfg, ticks, 20, true);
 
     let mut base = Config::local();
@@ -510,24 +127,24 @@ pub fn screen(ticks: usize, seed: u64) -> Suite {
     base.vocab = gcfg.vocab;
     base.derive();
 
-    let mut arms: Vec<(String, Config)> = Vec::new();
+    let mut arms: Vec<(String, Config)> = vec![("full".into(), base.clone())];
 
-    // The reference: no address at all.
-    let mut flat = base.clone();
-    flat.flatten = true;
-    arms.push(("flat L=1".into(), flat));
+    // The decisive one: is the trajectory driven?
+    let mut wo = base.clone();
+    wo.feedback_write = false;
+    arms.push(("write off".into(), wo));
 
-    // The question.
-    for r in [2usize, 3, 6] {
-        let mut c = base.clone();
-        c.rungs = r;
-        c.derive();
-        arms.push((format!("rungs={}", r), c));
-    }
+    // Does the walk do anything, or is the gain the broad prior plus the
+    // readout? These produce the same aggregate numbers and only this separates
+    // them.
+    let mut wg = base.clone();
+    wg.walk_during_gap = false;
+    arms.push(("walk off".into(), wg));
 
     // Is binding still what makes the conjunction learnable at all.
     let mut nb = base.clone();
     nb.use_binding = false;
+    nb.bind_mode = BindMode::Off;
     arms.push(("bind off".into(), nb));
 
     // Is the shared readout doing the work.
@@ -535,71 +152,65 @@ pub fn screen(ticks: usize, seed: u64) -> Suite {
     nr.no_readout = true;
     arms.push(("no readout".into(), nr));
 
-    // Do particles still earn their budget now that nothing mixes over them.
-    let mut op = base.clone();
-    op.particles = 1;
-    arms.push(("one particle".into(), op));
+    if wide {
+        let mut nc = base.clone();
+        nc.feedback_covert = false;
+        arms.push(("covert off".into(), nc));
 
-    let mut depth_curve: Vec<(usize, f64, f64)> = Vec::new();
+        let mut no = base.clone();
+        no.feedback_overt = false;
+        arms.push(("overt off".into(), no));
+
+        // Memory size replaces the depth sweep: more nodes is a finer prior at
+        // the same level of commitment, which is the comparison depth was meant
+        // to make and could not.
+        for n in [16usize, 64, 128] {
+            let mut c = base.clone();
+            c.nodes = n;
+            arms.push((format!("nodes={}", n), c));
+        }
+    }
 
     for (name, c) in arms {
-        let rungs = c.rungs;
-        let is_rung_arm = name.starts_with("rungs=");
         let o = run_one(&name, c, &gcfg, &stream);
-        let (l, la) = window_mean(&o.metrics.window);
-        let (p, pa) = window_mean(&o.metrics.window_product);
-        let ret: (u64, u64) = o
-            .metrics
-            .retention
-            .iter()
-            .fold((0, 0), |acc, b| (acc.0 + b.n, acc.1 + b.hits));
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
         let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        let (slope, delta, npts) = hop_slope(&o.metrics);
         suite.note(format!(
-            "[screen] {:<13} {:.3} bits/ev | Latin {:.3} | product {:.3} |              retention {:.3} (n={}) | pair {:.3} | {} leaves",
+            "[screen] {:<12} {:.3} bits/ev | Latin {:.3} | product {:.3} | \
+             retention {:.3} | hop slope {:+.4} (d {:+.3}, {} pts) | {} live nodes",
             name,
             o.metrics.bits_per_event(),
             la,
             pa,
             ret_acc,
-            ret.0,
-            o.metrics.pair_purity().0,
-            o.model.tree.leaves()
+            slope,
+            delta,
+            npts,
+            o.model.store.live_nodes()
         ));
-        let _ = (l, p);
-        if is_rung_arm {
-            depth_curve.push((rungs, la, pa));
+        if name == "full" {
+            o.metrics.print(&o.model, "full");
+            o.metrics.csv_window("full", &mut suite.csv);
+            o.metrics.csv_sharpening("full", &mut suite.csv);
         }
     }
 
-    // The verdict, stated in the terms the prediction was made in.
-    if depth_curve.len() >= 2 {
-        let (r_lo, lat_lo, prod_lo) = depth_curve[0];
-        let (r_hi, lat_hi, prod_hi) = *depth_curve.last().unwrap();
-        let lat_drop = lat_lo - lat_hi;
-        let prod_drop = prod_lo - prod_hi;
-        suite.note(format!(
-            "[verdict] depth {}->{}: Latin {:.3}->{:.3} ({:+.3}), product              {:.3}->{:.3} ({:+.3}) -- {}",
-            r_lo,
-            r_hi,
-            lat_lo,
-            lat_hi,
-            -lat_drop,
-            prod_lo,
-            prod_hi,
-            -prod_drop,
-            // A slope is only readable where there is a signal to have one.
-            // Comparing two accuracies that are both below chance and calling
-            // the vanishing gap "no cost" is reading the absence of signal as
-            // the absence of an effect.
-            if lat_lo < 0.167 && prod_lo < 0.167 {
-                "UNREADABLE: the shallow arm is already at or below chance, so                  there is no signal whose slope could be measured"
-            } else if lat_drop > 0.03 || prod_drop > 0.05 {
-                "depth STILL costs; both diagnoses were wrong and the problem is upstream"
-            } else {
-                "depth no longer costs; the scoring rewrite was the fix"
-            }
-        ));
-    }
+    // The baseline that matters.
+    let like = baseline::run(&stream, 4, false);
+    let upper = baseline::run(&stream, 4, true);
+    suite.note(format!(
+        "[baseline] PPM-C order 4, same stream: {:.3} bits/ev, second-order {:.3} \
+         bits | silence removed (UPPER BOUND, handed the segmentation): {:.3} \
+         bits/ev, second-order {:.3}",
+        like.ppm.bits_per_event(),
+        like.second.mean(),
+        upper.ppm.bits_per_event(),
+        upper.second.mean()
+    ));
 
     suite
 }

@@ -44,33 +44,6 @@ pub enum BindMode {
     Both,
 }
 
-/// How a node decides it should be split.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SplitRule {
-    /// The reference mechanism's rule: split when the winning similarity is too
-    /// dispersed. It detects *regimes* -- and it detects them well -- but it is
-    /// a statement about the address, not about what the node holds, so nothing
-    /// in it has any reason to carve out a cell for a cue pair inside a regime.
-    Dispersion,
-    /// Split when the node is still surprised by its own content: its mean
-    /// per-write surprise, in bits, stays above a threshold after it has seen
-    /// enough. This is a statement about prediction rather than about
-    /// similarity, so it carves where the content is still unresolved. The
-    /// threshold has units -- two bits means "still four-way confused" -- which
-    /// a dimensionless dispersion ratio does not.
-    Surprise,
-    /// Dispersion at the coarse level, surprise below it.
-    ///
-    /// The two criteria are not competitors so much as answers to different
-    /// questions. Dispersion asks whether the address is stretched, which is the
-    /// right question for "is this one regime or two". Surprise asks whether the
-    /// node still fails to predict what it holds, which is the right question
-    /// for "does this regime need carving inside". Replacing one with the other
-    /// cost the regime separation outright; running each where it belongs is the
-    /// obvious thing to try next.
-    Hybrid,
-}
-
 #[derive(Clone, Debug)]
 pub struct Config {
     // ---- widths -------------------------------------------------------
@@ -80,10 +53,6 @@ pub struct Config {
     pub vocab: usize,
 
     // ---- the one free knob --------------------------------------------
-    /// FREE. Per-tick compute budget, expressed as the number of read
-    /// particles. Everything else that could have been a search knob (beam
-    /// width, top-k, scheduler slots) is folded into this.
-    pub particles: usize,
 
     // ---- ladder --------------------------------------------------------
     /// CEILING. Number of ladder rungs, which is also the ceiling on tree
@@ -107,40 +76,6 @@ pub struct Config {
     pub hops: usize,
 
     // ---- allocation ------------------------------------------------------
-    /// INHERITED in form, rescaled in value. The criterion is the reference
-    /// mechanism's sigma/|mu| on the winning similarity, but here the query and
-    /// the prototypes are both unit vectors, so the similarity lives in [-1,1]
-    /// with a relative dispersion around 0.3-0.5 even for a well-matched class.
-    /// The reference value of 0.05 splits everything in sight.
-    pub grow_theta: f64,
-    /// Which criterion decides a split. The comparison between them is the
-    /// experiment, not a preference.
-    pub split_rule: SplitRule,
-    /// Under `Hybrid`, the deepest level still judged by dispersion. Fixed at
-    /// one by principle rather than swept: level 1 reads the slowest rung and is
-    /// the regime level, and everything below it is content.
-    pub hybrid_coarse_levels: usize,
-    /// Mean per-write surprise, in bits, above which a node is still unresolved
-    /// and should be split. Replaces `grow_theta` under `SplitRule::Surprise`,
-    /// so the parameter count does not change.
-    pub split_bits: f64,
-    /// INHERITED. Consecutive steps the criterion must hold.
-    pub grow_hold: u32,
-    /// INHERITED. Minimum observations before a node may split.
-    pub grow_min_obs: u64,
-    /// CEILING. Maximum children per node.
-    pub max_children: usize,
-    /// CEILING. Maximum nodes in the tree.
-    pub max_nodes: usize,
-    /// INHERITED. Observations before a node may deepen (gain its first child).
-    ///
-    /// This has to be low enough that the tree reaches its depth cap. Level l
-    /// reads rung `rungs - l`, so a tree that stops at depth 3 under a
-    /// six-rung ladder never consults the three fastest bands at all: they are
-    /// configured and unread, and a sweep over the rung count then varies which
-    /// bands are used rather than how many. `rung_visits` is the instrument for
-    /// that and is reported on every run.
-    pub deepen_min_obs: u64,
 
     // ---- learning ---------------------------------------------------------
     /// INHERITED. Learning rate.
@@ -150,20 +85,16 @@ pub struct Config {
     pub neg_samples: usize,
     /// DERIVED. Eligibility decay, matched to the mean inter-event interval.
     pub trace_lambda: f32,
+    /// DERIVED. Decay of the visit accumulator, the same time constant: a
+    /// response's prior is what it touched during *this* response, not what it
+    /// touched two challenges ago.
+    pub visit_decay: f32,
 
     // ---- descent ----------------------------------------------------------
-    /// CEILING. Maximum ticks a particle may spend accumulating evidence at one
-    /// level before it is forced to commit. It has to leave room for the whole
-    /// descent inside a typical response window: with a gap of g ticks and a
-    /// tree of depth L, a level cannot afford more than about g/L of them.
-    pub max_ticks_per_level: u32,
     /// INHERITED. Confidence bins for the reliability curve. Tagged DERIVED
     /// once, which was wrong -- nothing computes it -- and the point of these
     /// tags is that they are checkable claims rather than decoration.
     pub calib_bins: usize,
-    /// INHERITED. Minimum observations in a bin before calibration is trusted;
-    /// below it the fallback threshold is used.
-    pub calib_min_obs: u64,
     /// Charge what was said, not what was being thought.
     ///
     /// Without this the overt channel serves no objective at all: the ledger
@@ -188,8 +119,6 @@ pub struct Config {
     /// posterior over a handful of children, and gating one by the other is
     /// what silenced the overt channel entirely.
     pub speak_fallback: f32,
-    /// INHERITED. Inverse temperature on branch scores.
-    pub branch_temp: f32,
 
     // ---- channels ----------------------------------------------------------
     /// A5. The highest ladder rung that self-generated content may write to.
@@ -203,6 +132,14 @@ pub struct Config {
     pub feedback_covert: bool,
     /// Feed the write/activity channel back into the context at all.
     pub feedback_write: bool,
+
+    /// Whether the response keeps walking during the gap.
+    ///
+    /// Off, the state freezes after the event's own hop and every later gap tick
+    /// changes nothing. This is the control that separates "the response unfolds"
+    /// from "the prior is a broad mixture and the readout does the rest" -- two
+    /// explanations that produce the same aggregate numbers.
+    pub walk_during_gap: bool,
 
     /// What the bound trace binds. See `BindMode`.
     pub bind_mode: BindMode,
@@ -237,9 +174,6 @@ pub struct Config {
     pub op_mix: f32,
 
     // ---- ablations ---------------------------------------------------------
-    /// Cap the tree at depth 1, recovering the reference mechanism's flat class
-    /// scheme. The sanity check, not an experiment.
-    pub flatten: bool,
     /// Disable the learned leaf readout, leaving pure count-based backoff. The
     /// difference between this and the full model is what the readout buys.
     pub no_readout: bool,
@@ -263,7 +197,6 @@ impl Config {
         let mut c = Config {
             d: 64,
             vocab: 4096,
-            particles: 8,
             rungs,
             rho0,
             beta: 1.0,
@@ -271,34 +204,18 @@ impl Config {
             nodes: 32,
             shortcuts: 2,
             hops: 2,
-            grow_theta: 0.45,
-            // Dispersion, because it measurably beat surprise on every axis --
-            // bits, regime purity, pair purity and both conjunctions -- when the
-            // two were compared. Leaving a known-worse default in place would
-            // make every later run quietly wrong.
-            split_rule: SplitRule::Dispersion,
-            // On the observed scale: mean per-write leaf surprise runs around
-            // eight bits, and a threshold of two would split always.
-            split_bits: 8.0,
-            hybrid_coarse_levels: 1,
-            grow_hold: 8,
-            grow_min_obs: 200,
-            max_children: 8,
-            max_nodes: 512,
-            deepen_min_obs: 80,
             eta: 0.5,
             neg_samples: 16,
             trace_lambda: 0.9,
-            max_ticks_per_level: 5,
+            visit_decay: 0.9,
             calib_bins: 10,
-            calib_min_obs: 32,
             commit_locks_charge: false,
             speak_fallback: 0.25,
-            branch_temp: 4.0,
             self_max_rung: 0,
             feedback_overt: true,
             feedback_covert: true,
             feedback_write: true,
+            walk_during_gap: true,
             use_binding: true,
             bind_mode: BindMode::Both,
             bind_lags: 2,
@@ -309,7 +226,6 @@ impl Config {
             w_init: 1.5,
             op_gain: 1.0,
             op_mix: 0.5,
-            flatten: false,
             no_readout: false,
             no_eligibility: false,
             seed: 0x5EED_1234,
@@ -332,6 +248,7 @@ impl Config {
         // A trace should still be alive across a typical inter-event gap.
         let mean_gap = (self.horizon / 8.0).max(2.0);
         self.trace_lambda = (-1.0f32 / mean_gap).exp();
+        self.visit_decay = self.trace_lambda;
     }
 
     /// Number of `d`-wide blocks in a readout row: the payload, plus one per
@@ -345,14 +262,6 @@ impl Config {
             BindMode::EventLag => self.bind_lags,
             BindMode::Band => self.rungs,
             BindMode::Both => self.bind_lags + self.rungs,
-        }
-    }
-
-    pub fn effective_depth_cap(&self) -> usize {
-        if self.flatten {
-            1
-        } else {
-            self.rungs
         }
     }
 
