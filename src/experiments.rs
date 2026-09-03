@@ -251,11 +251,24 @@ pub fn load_sweep(base_ticks: usize, seed: u64) -> Suite {
         gcfg.domains = domains;
         let ticks = base_ticks * domains / 12;
         let stream = build_stream(&gcfg, ticks, 20, false);
+        // Node count, and -- at the heavy load only -- readout width at a fixed
+        // node count. The nodes curve saturates at the same knee under both
+        // loads while the ceiling falls, so the binding constraint is not the
+        // number of addresses. The readout is the half of the architecture that
+        // was never extended: one global table, all rows in one phi. Widening it
+        // separates "the readout is out of capacity" from "the readout is out of
+        // room to keep rows apart", and only the second argues for banking it.
+        let widths: &[usize] = if domains > 12 { &[64, 128] } else { &[64] };
+        for &wd in widths {
         for n in [1usize, 16, 64, 256] {
+            if wd != 64 && n != 64 {
+                continue;
+            }
             let mut c = Config::local();
             c.seed = seed;
             c.vocab = gcfg.vocab;
             c.nodes = n;
+            c.d = wd;
             c.derive();
             let o = run_one("load", c, &gcfg, &stream);
             let (_, la) = window_mean(&o.metrics.window);
@@ -264,15 +277,69 @@ pub fn load_sweep(base_ticks: usize, seed: u64) -> Suite {
                 o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
             let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
             suite.note(format!(
-                "[load] domains={:<3} ticks={:<7} nodes={:<4} {:.3} bits/ev |                  Latin {:.3} | product {:.3} | retention {:.3} | {} rows",
+                "[load] domains={:<3} ticks={:<7} nodes={:<4} d={:<4} {:.3} bits/ev | Latin {:.3} | product {:.3} | retention {:.3} | {} rows",
                 domains,
                 ticks,
                 n,
+                wd,
                 o.metrics.bits_per_event(),
                 la,
                 pa,
                 ret_acc,
                 o.model.store.occupied_rows()
+            ));
+        }
+        }
+    }
+    suite
+}
+
+/// Widening `d` at heavy load recovered more than quadrupling the nodes did.
+/// But `d` is not a readout knob: it widens every row *and* squares up every
+/// operator matrix, so that arm cannot say which half paid.
+///
+/// This separates them by holding the operator budget fixed and moving only the
+/// readout. `nodes=16, d=128` has 59 edges x 128^2 = 0.97M operator parameters,
+/// against `nodes=64, d=64`'s 250 x 64^2 = 1.02M -- near enough the same -- while
+/// the readout doubles. If the recovery survives, it was readout width; if it
+/// falls back, it was operator capacity.
+///
+/// The low-load arm is the other missing cell: width was only ever swept on the
+/// monolith, whose bottleneck was the absence of addressing, so it could not
+/// show a width effect even if one existed.
+pub fn width(base_ticks: usize, seed: u64) -> Suite {
+    let mut suite = Suite::new();
+    for (domains, arms) in [
+        (12usize, vec![(64usize, 64usize), (64, 128)]),
+        (36, vec![(16, 128), (64, 128)]),
+    ] {
+        let mut gcfg = GenConfig::fast();
+        gcfg.seed = seed ^ 0xA11CE;
+        gcfg.domains = domains;
+        let ticks = base_ticks * domains / 12;
+        let stream = build_stream(&gcfg, ticks, 20, false);
+        for (n, dd) in arms {
+            let mut c = Config::local();
+            c.seed = seed;
+            c.vocab = gcfg.vocab;
+            c.nodes = n;
+            c.d = dd;
+            c.derive();
+            let rw = c.feature_blocks() * c.d;
+            let o = run_one("width", c, &gcfg, &stream);
+            let (_, la) = window_mean(&o.metrics.window);
+            let (_, pa) = window_mean(&o.metrics.window_product);
+            let ret: (u64, u64) =
+                o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+            let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+            let rows = o.model.store.occupied_rows();
+            let edges = o.model.graph.edges();
+            suite.note(format!(
+                "[width] domains={:<3} nodes={:<4} d={:<4} {:.3} bits/ev | Latin {:.3} |                  product {:.3} | retention {:.3} | readout {:.2}M | operator {:.2}M",
+                domains, n, dd,
+                o.metrics.bits_per_event(), la, pa, ret_acc,
+                (rows * rw) as f64 / 1e6,
+                (edges * dd * dd) as f64 / 1e6
             ));
         }
     }

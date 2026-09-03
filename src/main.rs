@@ -68,6 +68,13 @@ fn main() {
                 );
             }
         }
+        "width" => {
+            let suite = experiments::width(ticks, seed);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "load" => {
             let suite = experiments::load_sweep(ticks, seed);
             println!();
