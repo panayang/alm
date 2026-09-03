@@ -101,9 +101,21 @@ impl Ladder {
                 self.world[k][i] = cur + rk * (prev - cur);
             }
         }
+        // The self cascade ages the same way the world's does. Decaying only
+        // rung zero left the higher self rungs stale between emissions -- an
+        // asymmetry that is invisible while `self_max_rung` is zero and wrong
+        // the moment the ablation raises it.
         if !self.selfc.is_empty() {
             for i in 0..self.d {
                 self.selfc[0][i] *= 1.0 - r0;
+            }
+            for k in 1..self.selfc.len() {
+                let rk = self.rho[k];
+                for i in 0..self.d {
+                    let prev = self.selfc[k - 1][i];
+                    let cur = self.selfc[k][i];
+                    self.selfc[k][i] = cur + rk * (prev - cur);
+                }
             }
         }
     }

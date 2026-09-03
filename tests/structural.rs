@@ -243,6 +243,11 @@ fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
     let nodes_before = m.tree.nodes();
     let writes_before = m.content_writes;
     let sit_before = bits_of(&m.swarm.payloads().concat());
+    // The eligibility trace is not part of the memory but it steers it: the
+    // next real settlement credits every traced edge, so footprints a probe
+    // leaves behind would end up driving real weight updates.
+    let trace_before = bits_of(&m.graph.trace);
+    let counters_before = (m.events, m.commitments, m.silent_settlements, m.baseline_ticks);
 
     let (bits, _) = m.probe(&spec, 6);
     assert!(bits.is_finite() && bits > 0.0, "the probe was not charged anything");
@@ -257,5 +262,15 @@ fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
         sit_before,
         bits_of(&m.swarm.payloads().concat()),
         "a probe left its own context behind instead of restoring the displaced state"
+    );
+    assert_eq!(
+        trace_before,
+        bits_of(&m.graph.trace),
+        "a probe left eligibility trace behind, which the next real settlement          would have credited into the edge transforms"
+    );
+    assert_eq!(
+        counters_before,
+        (m.events, m.commitments, m.silent_settlements, m.baseline_ticks),
+        "a probe moved counters that a printed statistic divides against a          probe-free denominator"
     );
 }

@@ -9,11 +9,14 @@
 //! backtracks to its deepest still-supported ancestor rather than dying, which
 //! turns "spread the bets" into "take a bad bet back".
 //!
-//! The commit rule is the same machinery in both of its jobs: a level keeps
-//! accumulating evidence until its branch distribution is confident enough by
-//! the level's own calibration counters, and the same counters decide whether to
-//! speak. Difficulty therefore shows up as time -- a hard discrimination is a
-//! wide step, not a wrong answer.
+//! A level matures when accumulating another tick stops raising its confidence
+//! in the leading branch, or when the tick budget runs out. Difficulty therefore
+//! shows up as time -- a hard discrimination is a wide step, not a wrong answer.
+//!
+//! It is deliberately not a calibrated-confidence threshold. That form pins at
+//! its ceiling the moment the model is over-confident in any bin, which is
+//! always, so every level then commits on the budget and the whole variable-tick
+//! mechanism stops operating without changing a single printed number.
 
 use crate::code::PathCode;
 use crate::config::Config;
@@ -333,13 +336,19 @@ impl Swarm {
         let mut query = Vec::with_capacity(self.d);
         for i in 0..self.parts.len() {
             let p = self.parts[i].p.clone();
+            // Mean per level, not sum. Summing one term per committed level
+            // makes a deeper particle score higher for having more terms, quite
+            // apart from whether those commitments are supported, and that bias
+            // then decides which particle leads and which paths get resampled
+            // away.
             let mut lw = 0.0f32;
+            let depth = self.parts[i].code.path.len().saturating_sub(1);
             for j in 1..self.parts[i].code.path.len() {
                 let node = self.parts[i].code.path[j];
                 self.query_for(j, &p, ladder, &mut query);
                 lw += self.temp * crate::num::dot(&tree.arena[node].proto, &query);
             }
-            self.parts[i].logw = lw;
+            self.parts[i].logw = if depth > 0 { lw / depth as f32 } else { 0.0 };
         }
         let n = self.parts.len();
         if n == 0 {

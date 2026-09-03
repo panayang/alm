@@ -157,16 +157,13 @@ pub struct Config {
     /// descent inside a typical response window: with a gap of g ticks and a
     /// tree of depth L, a level cannot afford more than about g/L of them.
     pub max_ticks_per_level: u32,
-    /// DERIVED. Confidence bins for the per-level calibration counters. The
-    /// commit threshold is read out of these, not set.
+    /// INHERITED. Confidence bins for the reliability curve. Tagged DERIVED
+    /// once, which was wrong -- nothing computes it -- and the point of these
+    /// tags is that they are checkable claims rather than decoration.
     pub calib_bins: usize,
     /// INHERITED. Minimum observations in a bin before calibration is trusted;
     /// below it the fallback threshold is used.
     pub calib_min_obs: u64,
-    /// Floor on the *branch* commit threshold. Calibration may raise it and
-    /// never lower it. Gap ticks cost nothing, so waiting is close to free and
-    /// the bar should be high.
-    pub commit_fallback_slack: f32,
     /// Charge what was said, not what was being thought.
     ///
     /// Without this the overt channel serves no objective at all: the ledger
@@ -280,7 +277,9 @@ impl Config {
             // two were compared. Leaving a known-worse default in place would
             // make every later run quietly wrong.
             split_rule: SplitRule::Dispersion,
-            split_bits: 2.0,
+            // On the observed scale: mean per-write leaf surprise runs around
+            // eight bits, and a threshold of two would split always.
+            split_bits: 8.0,
             hybrid_coarse_levels: 1,
             grow_hold: 8,
             grow_min_obs: 200,
@@ -293,7 +292,6 @@ impl Config {
             max_ticks_per_level: 5,
             calib_bins: 10,
             calib_min_obs: 32,
-            commit_fallback_slack: 0.7,
             commit_locks_charge: false,
             speak_fallback: 0.25,
             branch_temp: 4.0,

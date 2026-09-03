@@ -206,6 +206,18 @@ impl Model {
         let saved = self.volatile();
         let was_frozen = self.frozen;
         self.frozen = true;
+        self.graph.frozen = true;
+        // Counters are part of what a probe must not disturb: the report divides
+        // a Model-side count by a Metrics-side one, so a probe-inflated
+        // numerator over a probe-free denominator is a wrong printed number.
+        let saved_counts = (
+            self.events,
+            self.total_bits,
+            self.baseline_ticks,
+            self.overt_emissions,
+            self.commitments,
+            self.silent_settlements,
+        );
 
         // Restore the background this regime lived in.
         for &c in spec.context.iter() {
@@ -223,6 +235,13 @@ impl Model {
         let out = self.tick(Some(spec.target), false);
 
         self.frozen = was_frozen;
+        self.graph.frozen = was_frozen;
+        self.events = saved_counts.0;
+        self.total_bits = saved_counts.1;
+        self.baseline_ticks = saved_counts.2;
+        self.overt_emissions = saved_counts.3;
+        self.commitments = saved_counts.4;
+        self.silent_settlements = saved_counts.5;
         self.restore(saved);
         (out.bits, out.correct)
     }
@@ -385,7 +404,14 @@ impl Model {
                     best = (t, q);
                 }
             }
-            return Some((best.0 as usize, best.1));
+            // Scaled by the node's own escape mass. A softmax over one row is
+            // identically 1.0 however little is behind it, and a leaf has
+            // exactly one row the moment it takes its first write -- so without
+            // this the model reports certainty precisely where it knows least,
+            // and that number goes straight into the calibration counters and
+            // the decision to speak.
+            let conf = (1.0 - self.tree.arena[u].escape()) * best.1;
+            return Some((best.0 as usize, conf));
         }
         let node = &self.tree.arena[u];
         if node.counts.is_empty() {
@@ -550,13 +576,17 @@ impl Model {
                 ) {
                     (true, Some((c, f, w))) => (c, f, w, false),
                     (true, None) => {
-                        let leader = if self.swarm.is_empty() { 0 } else { self.swarm.leader() };
-                        let code = if self.swarm.is_empty() {
-                            PathCode::root()
+                        // The code and the features have to come from the same
+                        // particle. Taking the code from the leader and the
+                        // features from slot zero scores a leaf's rows against
+                        // a payload that never visited it.
+                        let (code, feat) = if self.swarm.is_empty() {
+                            (PathCode::root(), live_feats[0].clone())
                         } else {
-                            self.swarm.parts[leader].code.clone()
+                            let l = self.swarm.leader();
+                            (self.swarm.parts[l].code.clone(), live_feats[l].clone())
                         };
-                        (vec![code], vec![live_feats[0].clone()], vec![1.0], true)
+                        (vec![code], vec![feat], vec![1.0], true)
                     }
                     (false, _) => (
                         live_codes.clone(),
@@ -647,31 +677,50 @@ impl Model {
                 if gate > 0.0 {
                     let leaf = *truth.last().unwrap();
                     // How surprised the destination was, measured before the
-                    // token is counted into it. This is the predictive split
-                    // criterion's statistic, and it is the same number the
-                    // ledger charges -- the objective decides what gets written
-                    // and, now, where the storage divides.
-                    let leaf_bits = code::charge_bits(self.tree.prior_of(leaf, x as u32));
+                    // token is counted into it and through the same tail the
+                    // ledger settles against -- readout included. Using the
+                    // count-only prior here made the split criterion react to
+                    // the failure of a model that is not the one being charged,
+                    // which biases the tree's shape without showing up anywhere
+                    // as a wrong number.
+                    let phi_now = self.features(&p_end);
+                    let leaf_bits = code::charge_bits(code::tail_prob(
+                        &self.tree,
+                        leaf,
+                        &phi_now,
+                        x as u32,
+                        !self.cfg.no_readout,
+                    ));
                     let negs = self.sample_negatives(leaf, x as u32, self.cfg.neg_samples);
                     let phi_write = self.features(&p_end);
                     let _ = &live_payloads;
-                    let grad = self.tree.readout_update(
-                        leaf,
-                        &phi_write,
-                        x as u32,
-                        &negs,
-                        self.cfg.eta * gate,
-                    );
+                    // Under `no_readout` nothing is learned at all -- not the
+                    // rows, and not the edge transforms, whose only gradient
+                    // source is the rows. Training them while refusing to read
+                    // them left the ablation measuring something else entirely.
+                    let grad = if self.cfg.no_readout {
+                        vec![0.0f32; self.tree.fw]
+                    } else {
+                        self.tree.readout_update(
+                            leaf,
+                            &phi_write,
+                            x as u32,
+                            &negs,
+                            self.cfg.eta * gate,
+                        )
+                    };
                     // Only the payload half of the gradient has anything
                     // upstream of it; the bound trace is built from fixed
                     // embeddings and takes no gradient.
                     let grad_p: Vec<f32> = grad[..self.cfg.d].to_vec();
-                    self.graph.backprop(&steps, &grad_p, self.cfg.eta * gate);
+                    if !self.cfg.no_readout {
+                        self.graph.backprop(&steps, &grad_p, self.cfg.eta * gate);
+                    }
 
                     // Gap-time particle activity gets its share of the
                     // settlement through the eligibility traces, in O(1) per
                     // edge and without unrolling the gap.
-                    if !self.cfg.no_eligibility {
+                    if !self.cfg.no_eligibility && !self.cfg.no_readout {
                         self.graph.credit_traces(&grad_p, self.cfg.eta * gate * 0.25, 0.05);
                     }
 

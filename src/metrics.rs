@@ -116,8 +116,11 @@ impl Bucket {
             return 0.0;
         }
         let m = self.mean();
-        let var = (self.sum_sq / self.n as f64 - m * m).max(0.0);
-        (var / self.n as f64).sqrt()
+        // Unbiased: dividing by n understates the error, and several buckets
+        // in the sweeps are small enough for the difference to matter.
+        let n = self.n as f64;
+        let var = ((self.sum_sq - n * m * m) / (n - 1.0)).max(0.0);
+        (var / n).sqrt()
     }
     pub fn accuracy(&self) -> f64 {
         if self.n == 0 {
@@ -257,7 +260,9 @@ impl Metrics {
         let mut den = 0.0;
         let mut distinct = 0.0;
         let mut leaves = 0.0;
-        for m in self.leaf_pair.values() {
+        let mut pkeys: Vec<&usize> = self.leaf_pair.keys().collect();
+        pkeys.sort_unstable();
+        for m in pkeys.into_iter().map(|k| &self.leaf_pair[k]) {
             let total: u64 = m.values().sum();
             if total == 0 {
                 continue;
@@ -280,6 +285,10 @@ impl Metrics {
         } else {
             self.silent_ticks += 1;
         }
+        // Bucket against what preceded this tick; folding the tick's own
+        // overt-ness into the figure that classifies it makes the predictor
+        // partly the thing being predicted.
+        let self_fraction_before = self.self_fraction();
         if self.overt_window.len() == OVERT_WINDOW {
             self.overt_window.pop_front();
         }
@@ -307,7 +316,7 @@ impl Metrics {
             self.speech_onset.push(k as f64, true);
         }
 
-        let sf = self.self_fraction();
+        let sf = self_fraction_before;
         let pb = ((sf * POISON_BINS as f64) as usize).min(POISON_BINS - 1);
         self.poisoning[pb].push(out.bits, out.correct);
 
@@ -347,7 +356,9 @@ impl Metrics {
     pub fn leaf_purity(&self) -> f64 {
         let mut num = 0.0;
         let mut den = 0.0;
-        for counts in self.leaf_domain.values() {
+        let mut keys: Vec<&usize> = self.leaf_domain.keys().collect();
+        keys.sort_unstable();
+        for counts in keys.into_iter().map(|k| &self.leaf_domain[k]) {
             let total: u64 = counts.iter().sum();
             if total == 0 {
                 continue;
@@ -496,13 +507,7 @@ impl Metrics {
             if c.observations() == 0 {
                 continue;
             }
-            println!(
-                "     level {}  n={:<7} ECE={:.3}  commit threshold {:.2}",
-                l,
-                c.observations(),
-                c.ece(),
-                c.crossing(model.cfg.calib_min_obs, model.cfg.commit_fallback_slack)
-            );
+            println!("     level {}  n={:<7} ECE={:.3}", l, c.observations(), c.ece());
         }
 
         println!("  -- self-poisoning (by fraction of recent ticks spoken)");

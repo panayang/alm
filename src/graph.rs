@@ -48,6 +48,11 @@ pub struct Graph {
     /// Eligibility trace per edge.
     pub trace: Vec<f32>,
     read_cache: Vec<Option<ReadCache>>,
+    /// While frozen the graph records nothing. A probe still walks the memory
+    /// to be scored, but the trace it would leave must not survive it: the next
+    /// real settlement credits every traced edge, so a probe's footprints would
+    /// end up steering real weight updates.
+    pub frozen: bool,
 }
 
 const KEY_SHORTCUT: u64 = 0x0000_0000_0000_0021;
@@ -88,7 +93,17 @@ impl Graph {
         // the identity. It is a config field so that it is swept rather than
         // silently chosen.
         let w = (0..m).map(|a| Mat::random(key ^ KEY_WMAT, a as u64, d, d, cfg.w_init)).collect();
-        Graph { d, nodes: n, out, head, keys, w, trace: vec![0.0; m], read_cache: vec![None; m] }
+        Graph {
+            d,
+            nodes: n,
+            out,
+            head,
+            keys,
+            w,
+            trace: vec![0.0; m],
+            read_cache: vec![None; m],
+            frozen: false,
+        }
     }
 
     pub fn edges(&self) -> usize {
@@ -207,6 +222,9 @@ impl Graph {
     // ---- eligibility ---------------------------------------------------
 
     pub fn decay_traces(&mut self, lambda: f32) {
+        if self.frozen {
+            return;
+        }
         for t in self.trace.iter_mut() {
             *t *= lambda;
         }
@@ -215,6 +233,9 @@ impl Graph {
     /// A read particle crossed this edge: leave a trace and remember the state,
     /// so a settlement arriving later can credit it in O(1).
     pub fn touch_read(&mut self, st: &WalkStep) {
+        if self.frozen {
+            return;
+        }
         self.trace[st.edge] = (self.trace[st.edge] + 1.0).min(4.0);
         self.read_cache[st.edge] = Some(ReadCache {
             p_in: st.p_in.clone(),

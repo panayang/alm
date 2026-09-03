@@ -171,56 +171,16 @@ impl Calibration {
         }
         e
     }
-    /// The confidence at which this model is as sure as it ever gets: the
-    /// centre of the highest bin that has enough observations to speak for
-    /// itself.
-    ///
-    /// The commit rule cannot be reused for speaking. "Calibration may only
-    /// raise the bar" is right for a branch -- committing on noise is worse than
-    /// waiting -- but applied to speech it deadlocks: a model that is
-    /// over-confident anywhere has its bar raised to the top, never speaks,
-    /// never generates the data that would calibrate it, and stays silent
-    /// forever. Speaking asks a different question -- am I at the top of my own
-    /// reliability range -- and this is that question's answer, still read out
-    /// of counters and still without a free parameter.
-    pub fn top_bin_centre(&self, min_obs: u64, fallback: f32) -> f32 {
-        let n = self.bins.len();
-        let need = (min_obs / (n as u64)).max(4);
-        for b in (0..n).rev() {
-            if self.bins[b].0 >= need {
-                return ((b as f32 + 0.5) / n as f32).max(fallback);
-            }
-        }
-        fallback
-    }
-
-    /// The confidence a branch must reach before this level commits to it.
-    ///
-    /// Calibration may only *raise* the bar, never lower it. The lowest bin
-    /// whose accuracy happens to match its own centre is not a reason to commit
-    /// at fifteen per cent confidence -- a badly calibrated level would then
-    /// commit instantly on no evidence, which is exactly the failure that made
-    /// the evidence accumulation inert the first time this ran.
-    ///
-    /// This stands in for the optimal-stopping rule, which is not closed. It is
-    /// read out of counters rather than set, so it adds no free parameter, but
-    /// it is provisional and is labelled as such in the design note.
-    pub fn crossing(&self, min_obs: u64, fallback: f32) -> f32 {
-        if self.observations() < min_obs {
-            return fallback;
-        }
-        let n = self.bins.len();
-        let mut needed = fallback;
-        for b in 0..n {
-            let centre = (b as f32 + 0.5) / n as f32;
-            if self.bins[b].0 > 0 && self.accuracy(b) < centre {
-                // Over-confident here: do not trust this level at this level of
-                // confidence, and require more.
-                needed = needed.max(centre);
-            }
-        }
-        needed.min(0.95)
-    }
+    // Note on what is *not* here. Both the branch commit threshold and the
+    // speak threshold were once read out of these counters, under a rule that
+    // could only raise the bar. Both deadlocked: a model over-confident in any
+    // bin had its bar pinned at the ceiling, so a level never matured on
+    // confidence and the channel never spoke, and neither then generated the
+    // data that would have calibrated it. Both are now "the evidence has
+    // stopped moving", in `descent.rs::step` and `model.rs::emit`. These
+    // counters remain because the reliability curve is one of the reported
+    // measurements -- they no longer gate anything, and the module docs should
+    // not claim they do.
 }
 
 pub struct Tree {
@@ -598,16 +558,18 @@ impl Tree {
         for &t in touched.iter() {
             let q = *prob.get(&t).unwrap_or(&0.0);
             let err = if t == target { 1.0 - q } else { -q };
+            // The gradient with respect to the payload is -sum_t err_t * R_t
+            // evaluated at the rows that *produced* the forward probabilities.
+            // Reading the row back after updating it adds
+            // -eta * phi * sum_t err_t^2, which is not a rounding error: eta is
+            // the learning rate itself, so the spurious term is the same order
+            // as the real one, and it went into every edge on the write path.
             {
                 let fw = self.fw;
                 let row = self.arena[u].row_mut_or_insert(t, fw);
                 for i in 0..d {
-                    row[i] += eta * err * phi[i];
-                }
-            }
-            if let Some(row) = self.arena[u].row_of(t) {
-                for i in 0..d {
                     grad[i] -= err * row[i];
+                    row[i] += eta * err * phi[i];
                 }
             }
         }

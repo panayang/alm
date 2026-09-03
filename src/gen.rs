@@ -336,9 +336,7 @@ impl Generator {
                 let a = ents[free_ent + 3 * k];
                 let b = ents[free_ent + 3 * k + 1];
                 let c = tgts[free_tgt + k];
-                if a != b {
-                    chains.push((a, b, c));
-                }
+                chains.push((a, b, c));
             }
 
             domains.push(Domain {

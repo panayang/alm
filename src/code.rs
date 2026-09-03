@@ -61,7 +61,7 @@ impl PathCode {
 /// replaced by the readout softmax, keeping the same escape structure. Turning
 /// the readout off recovers pure count-based backoff, which is exactly the
 /// ablation that says what the learned rows buy.
-fn tail_prob(tree: &Tree, u: usize, p: &[f32], tok: u32, use_readout: bool) -> f32 {
+pub fn tail_prob(tree: &Tree, u: usize, p: &[f32], tok: u32, use_readout: bool) -> f32 {
     let node = &tree.arena[u];
     if !use_readout || node.rows.is_empty() {
         return tree.prior_of(u, tok);

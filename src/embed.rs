@@ -123,9 +123,12 @@ impl Embeddings {
         };
         let u = &self.op_u[t * self.d..(t + 1) * self.d];
         let v = &self.op_v[t * self.d..(t + 1) * self.d];
+        // One normalisation, at the end. Normalising the operator term first
+        // and then mixing gives nu((1-m) nu(U p) + m E), not the documented
+        // nu((1-m) U p + m E), so the mixing ratio was not the one `op_mix`
+        // claims to set.
         let c = self.op_gain * crate::num::dot(v, p);
         crate::num::axpy(c, u, p);
-        normalize(p);
         let e = self.row(t);
         let m = self.mix;
         for i in 0..self.d {
