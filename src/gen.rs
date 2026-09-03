@@ -208,6 +208,23 @@ pub struct GenConfig {
 }
 
 impl GenConfig {
+    /// A shorter curriculum for screening.
+    ///
+    /// The tick floor is set by the data check, not by preference: the
+    /// conjunction estimate needs comfortably more second-order items per regime
+    /// than the square has cells, and spreading the same stream over
+    /// thirty-two regimes pushes that past two hundred thousand ticks. Fewer
+    /// regimes concentrates the items, so the same assertion passes at a third
+    /// of the length while the curriculum keeps its shape -- regimes still
+    /// arrive, run and depart for good, which is the property that makes this a
+    /// continual source at all.
+    pub fn fast() -> Self {
+        let mut g = GenConfig::local();
+        g.domains = 12;
+        g.span_ticks = 2000;
+        g
+    }
+
     pub fn local() -> Self {
         GenConfig {
             vocab: 4096,

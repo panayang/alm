@@ -117,7 +117,7 @@ impl Suite {
 pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
     let mut suite = Suite::new();
 
-    let mut gcfg = GenConfig::local();
+    let mut gcfg = if wide { GenConfig::local() } else { GenConfig::fast() };
     gcfg.seed = seed ^ 0xA11CE;
     println!("stream: {} ticks", ticks);
     let stream = build_stream(&gcfg, ticks, 20, true);

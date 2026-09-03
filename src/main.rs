@@ -17,8 +17,8 @@ fn main() {
 
     let mut ticks: usize = match cmd {
         "full" => 600_000,
-        "screen" => 300_000,
-        _ => 250_000,
+        "screen" => 90_000,
+        _ => 90_000,
     };
     let mut seed: u64 = 0x5EED_1234;
     let mut out: Option<String> = None;
