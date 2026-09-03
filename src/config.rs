@@ -183,6 +183,16 @@ pub struct Config {
     /// multi-body extension buys capacity with addressing error, so comparing it
     /// to a monolith that is not yet capacity-bound charges it the whole price
     /// of scale and credits it none of the benefit.
+    /// FREE. Route reads to a uniformly random out-edge instead of the argmax.
+    ///
+    /// The sharp form of the near-miss control. `route_perturb` takes the
+    /// runner-up edge, which on a small-world graph is a *neighbouring* address;
+    /// this takes any edge at all. If the walk's value were "some learned
+    /// operator sits on the state", both would be free. If the value is
+    /// addressed content, the near miss should stay cheap -- neighbours hold
+    /// related content -- while random routing collapses. The two controls only
+    /// mean something as a pair.
+    pub route_random: bool,
     pub bypass_graph: bool,
     pub walk_during_gap: bool,
 
@@ -260,6 +270,7 @@ impl Config {
             feedback_overt: true,
             feedback_covert: true,
             feedback_write: true,
+            route_random: false,
             bypass_graph: false,
             walk_during_gap: true,
             anchor: 0.35,

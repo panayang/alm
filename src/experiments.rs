@@ -245,7 +245,7 @@ pub fn scale(ticks: usize, seed: u64) -> Suite {
 /// remember" with "less chance to learn it".
 pub fn load_sweep(base_ticks: usize, seed: u64) -> Suite {
     let mut suite = Suite::new();
-    for domains in [12usize, 24, 48] {
+    for domains in [12usize, 36] {
         let mut gcfg = GenConfig::fast();
         gcfg.seed = seed ^ 0xA11CE;
         gcfg.domains = domains;
@@ -341,6 +341,18 @@ pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
         c.route_perturb = r;
         arms.push((format!("near-miss {}", r), c));
     }
+
+    // The sharp form of the near-miss control: any edge, not the neighbouring
+    // one. Only meaningful as a pair with the near-miss arms above.
+    let mut rr = base.clone();
+    rr.route_random = true;
+    arms.push(("route random".into(), rr));
+
+    // The single body: no routing, no hop, no operator write. The suite had no
+    // such arm at all, which is why the routed arms read as dead weight.
+    let mut mo = base.clone();
+    mo.bypass_graph = true;
+    arms.push(("monolith".into(), mo));
 
     // Does the anchor do the converging?
     let mut na = base.clone();

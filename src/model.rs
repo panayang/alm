@@ -420,7 +420,11 @@ impl Model {
         }
         let mut q = Vec::with_capacity(self.cfg.d);
         self.query(&mut q);
-        let a = self.graph.select_rank(self.gnode, &q, self.cfg.route_perturb);
+        let a = if self.cfg.route_random {
+            self.graph.select_random(self.gnode, self.tick_index as u64)
+        } else {
+            self.graph.select_rank(self.gnode, &q, self.cfg.route_perturb)
+        };
         let cur = self.p.clone();
         let st = self.graph.hop(a, &cur);
         self.p = st.p_out.clone();
@@ -707,9 +711,15 @@ impl Model {
                         // charged, so the rows are fitted against the
                         // distribution that was actually settled.
                         let negs = self.sample_negatives(x as u32, self.cfg.neg_samples);
-                        let sc_live =
-                            code::score(&self.store, &live_phi, !self.cfg.no_readout);
-                        self.store.write(&sc_live, &live_phi, x as u32, &negs, eta);
+                        // The settled features, not the live ones. Under
+                        // `commit_locks_charge` these differ: the charge came
+                        // from the committed snapshot while the write used the
+                        // live state, so the rows were fitted against a
+                        // distribution the ledger never charged -- exactly what
+                        // `code.rs` says must not happen. Identical when the
+                        // flag is off, which is why it stayed hidden.
+                        let sc_write = code::score(&self.store, &phi, !self.cfg.no_readout);
+                        self.store.write(&sc_write, &phi, x as u32, &negs, eta);
                     }
                     if !self.cfg.no_eligibility {
                         // Gap-time reads get their share of the settlement

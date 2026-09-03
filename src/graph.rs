@@ -54,6 +54,7 @@ pub struct Graph {
     /// real settlement credits every traced edge, so a probe's footprints would
     /// end up steering real weight updates.
     pub frozen: bool,
+    key: u64,
     rank_clamped: std::cell::Cell<u64>,
     rank_selected: std::cell::Cell<u64>,
 }
@@ -106,6 +107,7 @@ impl Graph {
             trace: vec![0.0; m],
             read_cache: vec![None; m],
             frozen: false,
+            key,
             rank_clamped: std::cell::Cell::new(0),
             rank_selected: std::cell::Cell::new(0),
         }
@@ -169,6 +171,14 @@ impl Graph {
     pub fn clamp_rate(&self) -> f64 {
         let n = self.rank_selected.get();
         if n == 0 { 0.0 } else { self.rank_clamped.get() as f64 / n as f64 }
+    }
+
+    /// A uniformly random out-edge, keyed by a counter so the run stays
+    /// bit-reproducible.
+    pub fn select_random(&self, u: usize, nonce: u64) -> usize {
+        let outs = &self.out[u];
+        let i = crate::num::uniform_below(self.key ^ 0x5A17_D0E5, nonce, outs.len() as u64) as usize;
+        outs[i]
     }
 
     #[inline]
