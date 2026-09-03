@@ -235,7 +235,7 @@ impl Config {
             eta: 0.5,
             neg_samples: 16,
             trace_lambda: 0.9,
-            max_ticks_per_level: 2,
+            max_ticks_per_level: 5,
             calib_bins: 10,
             calib_min_obs: 32,
             commit_fallback_slack: 0.7,

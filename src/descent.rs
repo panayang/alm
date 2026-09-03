@@ -34,6 +34,9 @@ pub fn rung_for_level(rungs: usize, level: usize) -> usize {
 
 pub struct Particle {
     pub code: PathCode,
+    /// Confidence in the leading branch on the previous tick at this level.
+    /// A level is mature when accumulating another tick stops raising it.
+    pub prev_conf: f32,
     pub p: Vec<f32>,
     /// The payload the walk is *routed* by, held fixed for the whole response.
     ///
@@ -63,6 +66,11 @@ pub struct PendingCommit {
 
 pub struct Swarm {
     pub parts: Vec<Particle>,
+    /// Index of the particle that exploits and whose commitments are
+    /// calibrated. Recomputed from the weights whenever they change, because
+    /// resampling moves particles between slots and an index chosen once stops
+    /// meaning "the leader" the moment it does.
+    lead: usize,
     pub weights: Vec<f32>,
     pub pending: Vec<PendingCommit>,
     pub resamples: u64,
@@ -76,8 +84,6 @@ pub struct Swarm {
     hops: usize,
     temp: f32,
     max_ticks: u32,
-    calib_min_obs: u64,
-    fallback: f32,
     step_counter: u64,
     seed: u64,
 }
@@ -87,6 +93,7 @@ impl Swarm {
         let cap = cfg.effective_depth_cap();
         Swarm {
             parts: Vec::new(),
+            lead: 0,
             weights: Vec::new(),
             pending: Vec::new(),
             resamples: 0,
@@ -99,8 +106,6 @@ impl Swarm {
             hops: cfg.hops,
             temp: cfg.branch_temp,
             max_ticks: cfg.max_ticks_per_level,
-            calib_min_obs: cfg.calib_min_obs,
-            fallback: cfg.commit_fallback_slack,
             step_counter: 0,
             seed: cfg.seed ^ 0x7A17,
         }
@@ -133,6 +138,7 @@ impl Swarm {
         self.parts.clear();
         self.weights.clear();
         self.pending.clear();
+        self.lead = 0;
         for _ in 0..n {
             self.parts.push(Particle {
                 code: PathCode::root(),
@@ -142,6 +148,7 @@ impl Swarm {
                 gnode: gn,
                 logw: 0.0,
                 ticks_here: 0,
+                prev_conf: 0.0,
                 evidence: Vec::new(),
             });
             self.weights.push(1.0 / n as f32);
@@ -180,6 +187,17 @@ impl Swarm {
             self.parts[i].hops_taken += 1;
             graph.touch_read(&st);
         }
+    }
+
+    /// Mean ticks a level took to mature, by level. Flat at the cap means the
+    /// maturity rule is inert and every discrimination is costing the same time
+    /// regardless of how hard it is.
+    pub fn ticks_per_level(&self) -> Vec<f32> {
+        self.level_commits
+            .iter()
+            .zip(self.level_ticks.iter())
+            .map(|(&c, &t)| if c == 0 { 0.0 } else { t as f32 / c as f32 })
+            .collect()
     }
 
     /// Mean hops taken, so the depth a response actually reached is reported
@@ -241,17 +259,25 @@ impl Swarm {
             let best = argmax(&q);
             let conf = q[best];
 
-            let threshold = tree.calib[level.min(tree.calib.len() - 1)]
-                .crossing(self.calib_min_obs, self.fallback);
-            let mature = conf >= threshold || self.parts[i].ticks_here >= self.max_ticks;
+            // Mature when the evidence has stopped moving, or when the budget
+            // runs out. Not when a calibrated confidence is reached: that
+            // threshold pins at its ceiling the moment the model is
+            // over-confident anywhere, which is always, so every level then
+            // commits on the cap and the whole variable-tick mechanism -- the
+            // one that makes a hard discrimination cost time rather than
+            // accuracy -- silently stops operating.
+            let rising = conf > self.parts[i].prev_conf + 1e-4;
+            self.parts[i].prev_conf = conf;
+            let mature = (!rising && self.parts[i].ticks_here > 1)
+                || self.parts[i].ticks_here >= self.max_ticks;
 
             if !mature {
                 continue;
             }
 
-            // Particle 0 exploits; the rest sample, which is what keeps the
+            // The leader exploits; the rest sample, which is what keeps the
             // posterior covered when the coarse decision is wrong.
-            let pick = if i == 0 {
+            let pick = if i == self.lead {
                 best
             } else {
                 let u = crate::num::uniform(
@@ -281,13 +307,14 @@ impl Swarm {
 
             self.parts[i].code.push(chosen, q[pick], others);
             self.parts[i].ticks_here = 0;
+            self.parts[i].prev_conf = 0.0;
             self.parts[i].evidence.clear();
             self.commits += 1;
             let lv = (level + 1).min(self.level_commits.len() - 1);
             self.level_commits[lv] += 1;
             self.level_ticks[lv] += ticks as u64;
 
-            if i == 0 {
+            if i == self.lead {
                 self.pending.push(PendingCommit { level: level + 1, confidence: conf, chosen });
             }
 
@@ -318,6 +345,7 @@ impl Swarm {
         }
         let mut w: Vec<f32> = self.parts.iter().map(|p| p.logw).collect();
         softmax(&mut w);
+        self.lead = argmax(&w);
         self.weights = w;
     }
 
@@ -365,6 +393,7 @@ impl Swarm {
                 gnode: self.parts[src].gnode,
                 logw: self.parts[src].logw,
                 ticks_here: 0,
+                prev_conf: 0.0,
                 evidence: Vec::new(),
             };
             // A duplicate that keeps the whole path adds nothing. Each copy
@@ -378,6 +407,9 @@ impl Swarm {
             next.push(part);
         }
         self.parts = next;
+        // Slot zero is the un-backtracked copy of the highest-weight ancestry,
+        // so it is the leader until the next rescore says otherwise.
+        self.lead = 0;
         let w = 1.0 / n as f32;
         for x in self.weights.iter_mut() {
             *x = w;
@@ -429,6 +461,7 @@ impl Swarm {
         }
         if popped > 0 {
             part.ticks_here = 0;
+            part.prev_conf = 0.0;
             part.evidence.clear();
         }
         popped
@@ -456,8 +489,11 @@ impl Swarm {
         self.parts.iter().map(|p| p.code.clone()).collect()
     }
 
+    /// The particle that speaks for the swarm. The same one that exploits and
+    /// whose commitments are calibrated -- if these ever diverge the calibration
+    /// describes a different particle from the answer.
     pub fn leader(&self) -> usize {
-        argmax(&self.weights)
+        self.lead.min(self.parts.len().saturating_sub(1))
     }
 
     pub fn mean_depth(&self) -> f32 {

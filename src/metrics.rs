@@ -401,6 +401,17 @@ impl Metrics {
             model.swarm.spread_at_root()
         );
 
+        print!("  -- ticks to mature, by level ");
+        for (l, t) in model.swarm.ticks_per_level().iter().enumerate() {
+            if *t > 0.0 {
+                print!("L{}:{:.2} ", l, t);
+            }
+        }
+        println!(
+            " (cap {}; flat at the cap means the maturity rule is inert)",
+            model.cfg.max_ticks_per_level
+        );
+
         println!("  -- sharpening (entropy bits by ticks since event)");
         for (i, b) in self.sharpening.iter().enumerate() {
             if b.n > 0 {

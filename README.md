@@ -237,11 +237,46 @@ events, so the speech reaction time is not yet a measurement.
 
 ## What would have to change
 
-1. **Stop fragmenting the readout.** The split table above says the address and
-   the data density fight each other. Sharing readout rows across siblings
-   within a regime would let depth refine the address without splitting the
-   evidence — which is the reference mechanism's own split (share the transform,
-   privatise the readout) applied one level down.
+1. **Stop *choosing* a partition.** ~~Share readout rows across siblings.~~
+   Retracted: the reference mechanism tested exactly that — §sharing confirms
+   the split "share the transform, privatise the readout" *from both
+   directions*, including by testing the opposite one — and sharing the readout
+   lost. Targets are what regimes disagree about, so sharing rows across units
+   that were split because they disagree re-merges precisely what allocation
+   exists to separate.
+
+   Both horns are blocked: partitioning costs data, sharing costs
+   discrimination. The way out is that conditioning does not have to be
+   realised as a partition at all, and this design already contains the
+   demonstration. The PPM-C escape chain blends every node's *counts* up the
+   ancestor path — the priors refuse to choose a depth. The learned rows do not:
+   they live at exactly one node. That inconsistency is where the tradeoff
+   bites.
+
+   Two forms of the same fix, in increasing order of commitment:
+
+   * **Hierarchical shrinkage.** A node holds a *residual* row and the score
+     sums along the path. A leaf with little data contributes nothing and the
+     answer is the coarse one; a leaf with plenty develops its own correction.
+     Private rows are kept, so discrimination is kept; every write informs every
+     ancestor, so the evidence is not divided. Deletion stays local, and
+     appending a zero residual leaves predictions bit-identical, so the
+     exactness property survives.
+   * **Weighting over prunings.** Maintain, per node, the evidence for "stop
+     here" against "split here" and emit the evidence-weighted mixture over all
+     prunings — context-tree weighting proper, whose whole point is that it is
+     competitive with the best pruning without ever selecting one. This removes
+     the split criterion outright: `split_rule`, `grow_theta`, `split_bits` and
+     `hybrid_coarse_levels` all leave the config together. It costs the
+     bit-identical expansion property, because appending a node changes the
+     mixture.
+
+   Neither touches the addressing: prototypes stay placed, keys stay fixed,
+   routing consistency stays one. The change is in how stored evidence is
+   *combined*, which is the half of the design that was never given the
+   treatment the priors already get. In one sentence: the address is currently
+   doing two jobs — selecting which evidence is relevant, and deciding where
+   evidence is stored — and only the first of them needs it.
 2. **A 2-D sweep over `rungs` × `w_init`**, with more than one seed. Three
    conclusions in this file reversed under a change of one other setting; none
    of the single-knob sweeps here should be trusted to name an optimum.
