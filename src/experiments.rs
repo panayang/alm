@@ -477,3 +477,129 @@ pub fn full(ticks: usize, seed: u64, quick: bool) -> Suite {
 
     suite
 }
+
+/// The screening suite: the smallest set of arms that can decide the question
+/// actually open, and nothing else.
+///
+/// Everything cut from here was cut because it is *downstream* of that question.
+/// The split-rule sweep, the `w_init` sweep, the binding-mode comparison beyond
+/// on/off, commit locking, the poisoning arms and mode B all ask how best to run
+/// a hierarchical address; if depth still costs more than it buys they are asking
+/// about a mechanism that has not earned the right to be tuned. Running them
+/// anyway is how a suite grows to twenty arms and stops being able to answer
+/// anything quickly.
+///
+/// The question: after the scoring rewrite -- the address supplies a prior and a
+/// candidate set instead of a chain of uncalibrated per-level probabilities --
+/// does depth still hurt?
+///
+/// The prediction, stated before the run: the gap between `rungs=2` and
+/// `rungs=6` should close. If it does not, both diagnoses offered for the depth
+/// cost are wrong and the problem is further upstream, most likely in how
+/// prototypes are placed.
+pub fn screen(ticks: usize, seed: u64) -> Suite {
+    let mut suite = Suite::new();
+
+    let mut gcfg = GenConfig::local();
+    gcfg.seed = seed ^ 0xA11CE;
+    println!("screening stream: {} ticks", ticks);
+    let stream = build_stream(&gcfg, ticks, 20, true);
+
+    let mut base = Config::local();
+    base.seed = seed;
+    base.vocab = gcfg.vocab;
+    base.derive();
+
+    let mut arms: Vec<(String, Config)> = Vec::new();
+
+    // The reference: no address at all.
+    let mut flat = base.clone();
+    flat.flatten = true;
+    arms.push(("flat L=1".into(), flat));
+
+    // The question.
+    for r in [2usize, 3, 6] {
+        let mut c = base.clone();
+        c.rungs = r;
+        c.derive();
+        arms.push((format!("rungs={}", r), c));
+    }
+
+    // Is binding still what makes the conjunction learnable at all.
+    let mut nb = base.clone();
+    nb.use_binding = false;
+    arms.push(("bind off".into(), nb));
+
+    // Is the shared readout doing the work.
+    let mut nr = base.clone();
+    nr.no_readout = true;
+    arms.push(("no readout".into(), nr));
+
+    // Do particles still earn their budget now that nothing mixes over them.
+    let mut op = base.clone();
+    op.particles = 1;
+    arms.push(("one particle".into(), op));
+
+    let mut depth_curve: Vec<(usize, f64, f64)> = Vec::new();
+
+    for (name, c) in arms {
+        let rungs = c.rungs;
+        let is_rung_arm = name.starts_with("rungs=");
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (l, la) = window_mean(&o.metrics.window);
+        let (p, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) = o
+            .metrics
+            .retention
+            .iter()
+            .fold((0, 0), |acc, b| (acc.0 + b.n, acc.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(format!(
+            "[screen] {:<13} {:.3} bits/ev | Latin {:.3} | product {:.3} |              retention {:.3} (n={}) | pair {:.3} | {} leaves",
+            name,
+            o.metrics.bits_per_event(),
+            la,
+            pa,
+            ret_acc,
+            ret.0,
+            o.metrics.pair_purity().0,
+            o.model.tree.leaves()
+        ));
+        let _ = (l, p);
+        if is_rung_arm {
+            depth_curve.push((rungs, la, pa));
+        }
+    }
+
+    // The verdict, stated in the terms the prediction was made in.
+    if depth_curve.len() >= 2 {
+        let (r_lo, lat_lo, prod_lo) = depth_curve[0];
+        let (r_hi, lat_hi, prod_hi) = *depth_curve.last().unwrap();
+        let lat_drop = lat_lo - lat_hi;
+        let prod_drop = prod_lo - prod_hi;
+        suite.note(format!(
+            "[verdict] depth {}->{}: Latin {:.3}->{:.3} ({:+.3}), product              {:.3}->{:.3} ({:+.3}) -- {}",
+            r_lo,
+            r_hi,
+            lat_lo,
+            lat_hi,
+            -lat_drop,
+            prod_lo,
+            prod_hi,
+            -prod_drop,
+            // A slope is only readable where there is a signal to have one.
+            // Comparing two accuracies that are both below chance and calling
+            // the vanishing gap "no cost" is reading the absence of signal as
+            // the absence of an effect.
+            if lat_lo < 0.167 && prod_lo < 0.167 {
+                "UNREADABLE: the shallow arm is already at or below chance, so                  there is no signal whose slope could be measured"
+            } else if lat_drop > 0.03 || prod_drop > 0.05 {
+                "depth STILL costs; both diagnoses were wrong and the problem is upstream"
+            } else {
+                "depth no longer costs; the scoring rewrite was the fix"
+            }
+        ));
+    }
+
+    suite
+}

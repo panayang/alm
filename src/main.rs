@@ -15,7 +15,11 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("quick");
 
-    let mut ticks: usize = if cmd == "full" { 400_000 } else { 80_000 };
+    let mut ticks: usize = match cmd {
+        "full" => 600_000,
+        "screen" => 300_000,
+        _ => 80_000,
+    };
     let mut seed: u64 = 0x5EED_1234;
     let mut out: Option<String> = None;
 
@@ -45,6 +49,17 @@ fn main() {
             let stream = experiments::build_stream(&g, ticks, 20, true);
             println!("stream ok: {} ticks, {} episodes", stream.len(), stream.episodes.len());
         }
+        "screen" => {
+            let suite = experiments::screen(ticks, seed);
+            println!();
+            println!("== summary ====================================================");
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+            if let Some(path) = out {
+                fs::write(&path, &suite.csv).expect("could not write csv");
+            }
+        }
         "quick" | "full" => {
             let suite = experiments::full(ticks, seed, cmd == "quick");
             println!();
@@ -57,6 +72,6 @@ fn main() {
                 println!("\ncsv written to {}", path);
             }
         }
-        other => panic!("unknown command {} (try gencheck, quick, full)", other),
+        other => panic!("unknown command {} (try gencheck, screen, quick, full)", other),
     }
 }

@@ -303,14 +303,10 @@ impl Swarm {
 
             let children = tree.arena[node].children.clone();
             let chosen = children[pick];
-            let others: Vec<(usize, f32)> = children
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != pick)
-                .map(|(j, &c)| (c, q[j]))
-                .collect();
-
-            self.parts[i].code.push(chosen, q[pick], others);
+            // The branch probability is not stored: it is not part of the code
+            // any more. Its only job is deciding where to walk, which is the
+            // one thing an untrained placed prototype can do honestly.
+            self.parts[i].code.push(chosen);
             self.parts[i].ticks_here = 0;
             self.parts[i].prev_conf = 0.0;
             self.parts[i].evidence.clear();

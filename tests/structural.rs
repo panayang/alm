@@ -20,11 +20,9 @@ fn weight_fingerprint(m: &Model) -> Vec<u32> {
     for w in m.graph.w.iter() {
         out.extend(bits_of(&w.a));
     }
-    for n in m.tree.arena.iter() {
-        for (t, row) in n.rows.iter() {
-            out.push(*t);
-            out.extend(bits_of(row));
-        }
+    for (t, row) in m.tree.rows.iter() {
+        out.push(*t);
+        out.extend(bits_of(row));
     }
     out
 }
@@ -125,13 +123,10 @@ fn emitted_distribution_is_normalised_at_every_depth() {
         if m.swarm.is_empty() {
             continue;
         }
-        let sp = code::spread(
-            &m.tree,
-            &m.swarm.codes(),
-            &m.swarm.payloads(),
-            &m.swarm.weights,
-            true,
-        );
+        let i = m.swarm.leader();
+        let phi = m.swarm.payloads()[i].clone();
+        let leaf = m.swarm.parts[i].code.leaf();
+        let sp = code::spread(&m.tree, leaf, &phi, true);
         let mass = sp.mass();
         assert!(
             (mass - 1.0).abs() < 1e-3,

@@ -30,11 +30,6 @@ pub struct Node {
     index: HashMap<u32, usize>,
     pub total: u64,
 
-    /// Sparse readout rows, one per token this node has actually emitted. The
-    /// candidate set at retrieval is therefore the emitted content, not the
-    /// vocabulary.
-    pub rows: Vec<(u32, Vec<f32>)>,
-    row_index: HashMap<u32, usize>,
 
     /// Dispersion statistics for the widen criterion.
     pub sim: Running,
@@ -57,8 +52,6 @@ impl Node {
             counts: Vec::new(),
             index: HashMap::new(),
             total: 0,
-            rows: Vec::new(),
-            row_index: HashMap::new(),
             sim: Running::default(),
             surprise: Running::default(),
             hold: 0,
@@ -76,7 +69,20 @@ impl Node {
 
     fn bump(&mut self, tok: u32) {
         match self.index.get(&tok) {
-            Some(&i) => self.counts[i].1 += 1,
+            Some(&i) => {
+                self.counts[i].1 += 1;
+                // One swap forward if this token has overtaken its neighbour.
+                // Over many writes the vector becomes approximately ordered by
+                // frequency, which is all the scored-set cap needs, and it costs
+                // O(1) rather than a sort.
+                if i > 0 && self.counts[i].1 > self.counts[i - 1].1 {
+                    self.counts.swap(i - 1, i);
+                    let a = self.counts[i - 1].0;
+                    let b = self.counts[i].0;
+                    self.index.insert(a, i - 1);
+                    self.index.insert(b, i);
+                }
+            }
             None => {
                 self.index.insert(tok, self.counts.len());
                 self.counts.push((tok, 1));
@@ -103,20 +109,6 @@ impl Node {
         }
     }
 
-    #[inline]
-    pub fn row_of(&self, tok: u32) -> Option<&[f32]> {
-        self.row_index.get(&tok).map(|&i| self.rows[i].1.as_slice())
-    }
-
-    fn row_mut_or_insert(&mut self, tok: u32, d: usize) -> &mut Vec<f32> {
-        if let Some(&i) = self.row_index.get(&tok) {
-            return &mut self.rows[i].1;
-        }
-        self.row_index.insert(tok, self.rows.len());
-        self.rows.push((tok, vec![0.0; d]));
-        let i = self.rows.len() - 1;
-        &mut self.rows[i].1
-    }
 }
 
 /// Per-level reliability counters: (observations, correct) per confidence bin.
@@ -184,6 +176,17 @@ impl Calibration {
 }
 
 pub struct Tree {
+    /// One readout row per token, shared by every node.
+    ///
+    /// The map from a feature vector to a token is the same function in every
+    /// regime -- "if the bound trace is E_a (*) E_b the answer is T[a][b]" does
+    /// not depend on which regime is live. Giving each node its own rows made
+    /// the system relearn that one function independently in every cell, from
+    /// that cell's fraction of the evidence. What genuinely differs between
+    /// regimes is *which* tokens they emit and how often, and that is the
+    /// counts, which stay private and exact.
+    pub rows: Vec<(u32, Vec<f32>)>,
+    row_index: HashMap<u32, usize>,
     /// Reliability of the *answer*, as distinct from the reliability of a
     /// branch. Speaking is gated by this one.
     pub answer_calib: Calibration,
@@ -232,6 +235,8 @@ impl Tree {
         arena.push(first);
         arena[0].children.push(1);
         Tree {
+            rows: Vec::new(),
+            row_index: HashMap::new(),
             answer_calib: Calibration::new(cfg.calib_bins),
             d,
             fw: cfg.feature_blocks() * d,
@@ -283,7 +288,35 @@ impl Tree {
     }
 
     pub fn occupied_rows(&self) -> usize {
-        self.arena.iter().map(|n| n.rows.len()).sum()
+        self.rows.len()
+    }
+
+    #[inline]
+    pub fn row_of(&self, tok: u32) -> Option<&[f32]> {
+        self.row_index.get(&tok).map(|&i| self.rows[i].1.as_slice())
+    }
+
+    fn row_mut_or_insert(&mut self, tok: u32) -> &mut Vec<f32> {
+        if let Some(&i) = self.row_index.get(&tok) {
+            return &mut self.rows[i].1;
+        }
+        let fw = self.fw;
+        self.row_index.insert(tok, self.rows.len());
+        self.rows.push((tok, vec![0.0; fw]));
+        let i = self.rows.len() - 1;
+        &mut self.rows[i].1
+    }
+
+    /// Probability the escape chain gives a token no node has ever emitted.
+    /// Identical for all of them, which is what makes the spread computable in
+    /// O(support) rather than O(V).
+    pub fn prior_unseen(&self, u: usize) -> f32 {
+        let node = &self.arena[u];
+        let base = match node.parent {
+            None => 1.0 / self.vocab as f32,
+            Some(p) => self.prior_unseen(p),
+        };
+        node.escape() * base
     }
 
     /// Place any unplaced child of `u` at the current query, so the first class
@@ -515,24 +548,15 @@ impl Tree {
 
     /// Softmax over the node's own emitted rows. Returns the (token, prob)
     /// pairs; tokens outside the row set are covered by the escape mass.
-    /// `phi` is the feature vector: the payload, followed by the bound trace
-    /// when binding is on. Its length must be `self.fw`.
-    pub fn readout_dist(&self, u: usize, phi: &[f32]) -> Vec<(u32, f32)> {
-        let node = &self.arena[u];
-        if node.rows.is_empty() {
-            return Vec::new();
-        }
-        let w = self.fw.min(phi.len());
-        let mut s: Vec<f32> = node.rows.iter().map(|(_, r)| dot(&r[..w], &phi[..w])).collect();
-        softmax(&mut s);
-        node.rows.iter().map(|(t, _)| *t).zip(s).collect()
-    }
-
-    /// The delta-rule step, restricted to a touched set: the observed token plus
-    /// negatives sampled from this node's own emitted targets. Rows outside the
-    /// touched set are left exactly zero rather than nearly zero, which is what
-    /// makes occupancy a measure of stored content.
-    pub fn readout_update(
+    /// The delta-rule step, against the *same* distribution the ledger charges.
+    ///
+    /// The count prior enters as a fixed offset inside the softmax, so what the
+    /// rows learn is the residual on top of it. That is the offset trick from
+    /// generalised linear models and it is the whole reason a count prior and a
+    /// learned likelihood can be multiplied without using the evidence twice --
+    /// but only if the offset is present *during training*. Scoring with the
+    /// prior after fitting without it would double-count.
+pub fn readout_update(
         &mut self,
         u: usize,
         phi: &[f32],
@@ -541,13 +565,8 @@ impl Tree {
         eta: f32,
     ) -> Vec<f32> {
         let d = self.fw.min(phi.len());
-        let dist = self.readout_dist(u, phi);
-        let mut prob: HashMap<u32, f32> = HashMap::new();
-        for (t, q) in dist.iter() {
-            prob.insert(*t, *q);
-        }
-        // grad wrt payload, accumulated over the touched rows only.
-        let mut grad = vec![0.0f32; d];
+        let sc = crate::code::score(self, u, phi, true);
+
         let mut touched: Vec<u32> = Vec::with_capacity(negatives.len() + 1);
         touched.push(target);
         for &n in negatives {
@@ -555,18 +574,15 @@ impl Tree {
                 touched.push(n);
             }
         }
+
+        let mut grad = vec![0.0f32; d];
         for &t in touched.iter() {
-            let q = *prob.get(&t).unwrap_or(&0.0);
+            let q = sc.prob_of(self, u, t);
             let err = if t == target { 1.0 - q } else { -q };
-            // The gradient with respect to the payload is -sum_t err_t * R_t
-            // evaluated at the rows that *produced* the forward probabilities.
-            // Reading the row back after updating it adds
-            // -eta * phi * sum_t err_t^2, which is not a rounding error: eta is
-            // the learning rate itself, so the spurious term is the same order
-            // as the real one, and it went into every edge on the write path.
+            // Read the row before updating it: taking it back afterwards adds
+            // -eta * phi * sum(err^2), which is the same order as the gradient.
             {
-                let fw = self.fw;
-                let row = self.arena[u].row_mut_or_insert(t, fw);
+                let row = self.row_mut_or_insert(t);
                 for i in 0..d {
                     grad[i] -= err * row[i];
                     row[i] += eta * err * phi[i];
@@ -574,5 +590,11 @@ impl Tree {
             }
         }
         grad
+    }
+
+    /// Tokens this node has emitted, which is the set a write samples its
+    /// negatives from.
+    pub fn emitted(&self, u: usize) -> Vec<u32> {
+        self.arena[u].counts.iter().map(|(t, _)| *t).collect()
     }
 }

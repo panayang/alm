@@ -14,7 +14,7 @@
 //! and the ledger side, which is why the design has one axiom where it used to
 //! have three.
 
-use crate::code::{self, PathCode};
+use crate::code::{self};
 use crate::config::Config;
 use crate::descent::{rung_for_level, Swarm};
 use crate::config::BindMode;
@@ -94,7 +94,7 @@ pub struct Model {
     overt: Option<usize>,
     /// The distribution as it stood when this response first spoke. Under
     /// `commit_locks_charge` this, not the live one, is what gets settled.
-    committed: Option<(Vec<PathCode>, Vec<Vec<f32>>, Vec<f32>)>,
+    committed: Option<(usize, Vec<f32>)>,
     /// The token that was actually said. Accuracy under locking has to score
     /// this and not the live leader, or the locked arm silently reports the
     /// unlocked arm's accuracy and the whole comparison is vacuous.
@@ -367,7 +367,7 @@ impl Model {
     }
 
     fn sample_negatives(&self, leaf: usize, target: u32, k: usize) -> Vec<u32> {
-        let rows = &self.tree.arena[leaf].rows;
+        let rows = self.tree.emitted(leaf);
         if rows.is_empty() || k == 0 {
             return Vec::new();
         }
@@ -378,7 +378,7 @@ impl Model {
                 self.tick_index.wrapping_mul(97).wrapping_add(i as u64),
                 rows.len() as u64,
             ) as usize;
-            let t = rows[j].0;
+            let t = rows[j];
             if t != target {
                 out.push(t);
             }
@@ -396,22 +396,9 @@ impl Model {
         let code = &self.swarm.parts[i].code;
         let u = code.leaf();
         let phi = self.features(&self.swarm.parts[i].p);
-        let dist = self.tree.readout_dist(u, &phi);
-        if !dist.is_empty() && !self.cfg.no_readout {
-            let mut best = dist[0];
-            for &(t, q) in dist.iter() {
-                if q > best.1 {
-                    best = (t, q);
-                }
-            }
-            // Scaled by the node's own escape mass. A softmax over one row is
-            // identically 1.0 however little is behind it, and a leaf has
-            // exactly one row the moment it takes its first write -- so without
-            // this the model reports certainty precisely where it knows least,
-            // and that number goes straight into the calibration counters and
-            // the decision to speak.
-            let conf = (1.0 - self.tree.arena[u].escape()) * best.1;
-            return Some((best.0 as usize, conf));
+        let sc = crate::code::score(&self.tree, u, &phi, !self.cfg.no_readout);
+        if let Some((t, q)) = sc.top() {
+            return Some((t as usize, q));
         }
         let node = &self.tree.arena[u];
         if node.counts.is_empty() {
@@ -494,10 +481,10 @@ impl Model {
             self.overt_emissions += 1;
             self.overt_log.push((self.ticks_since_event, t));
             if self.cfg.commit_locks_charge && !self.swarm.is_empty() {
-                let payloads = self.swarm.payloads();
-                let feats = self.all_features(&payloads);
-                self.committed =
-                    Some((self.swarm.codes(), feats, self.swarm.weights.clone()));
+                let l = self.swarm.leader();
+                let leaf = self.swarm.parts[l].code.leaf();
+                let phi = self.features(&self.swarm.parts[l].p.clone());
+                self.committed = Some((leaf, phi));
                 self.committed_token = Some(t);
                 self.commitments += 1;
             }
@@ -535,14 +522,11 @@ impl Model {
                     self.swarm.step(&mut self.tree, &mut self.graph, &self.ladder);
                 }
                 if want_entropy && !self.swarm.is_empty() {
-                    let feats = self.all_features(&self.swarm.payloads());
-                    let sp = code::spread(
-                        &self.tree,
-                        &self.swarm.codes(),
-                        &feats,
-                        &self.swarm.weights,
-                        !self.cfg.no_readout,
-                    );
+                    let i = self.swarm.leader();
+                    let phi = self.features(&self.swarm.parts[i].p.clone());
+                    let leaf = self.swarm.parts[i].code.leaf();
+                    let sp =
+                        code::spread(&self.tree, leaf, &phi, !self.cfg.no_readout);
                     out.entropy_bits = Some(sp.entropy_bits());
                 }
                 self.emit(&mut out);
@@ -562,50 +546,39 @@ impl Model {
                     let (n, h) = (self.cfg.particles, self.cfg.hops);
                     self.swarm.seed_response(n, &c, &mut self.graph, h);
                 }
-                let live_codes: Vec<PathCode> = self.swarm.codes();
                 let live_payloads = self.swarm.payloads();
                 let live_feats = self.all_features(&live_payloads);
+                let live_leaf = if self.swarm.is_empty() {
+                    0
+                } else {
+                    self.swarm.parts[self.swarm.leader()].code.leaf()
+                };
+                let live_phi = if self.swarm.is_empty() {
+                    self.features(&self.cue.clone())
+                } else {
+                    live_feats[self.swarm.leader()].clone()
+                };
 
                 // Settle what was said, if the rule is in force and something
                 // was said. A response that stayed silent is charged its
-                // background prior -- it committed to nothing, so it predicted
-                // nothing beyond the situation it was in.
-                let (codes, feats, weights, silent) = match (
+                // background prior alone -- it committed to nothing, so only the
+                // situation it was in stands.
+                let (leaf, phi, silent) = match (
                     self.cfg.commit_locks_charge,
                     self.committed.clone(),
                 ) {
-                    (true, Some((c, f, w))) => (c, f, w, false),
-                    (true, None) => {
-                        // The code and the features have to come from the same
-                        // particle. Taking the code from the leader and the
-                        // features from slot zero scores a leaf's rows against
-                        // a payload that never visited it.
-                        let (code, feat) = if self.swarm.is_empty() {
-                            (PathCode::root(), live_feats[0].clone())
-                        } else {
-                            let l = self.swarm.leader();
-                            (self.swarm.parts[l].code.clone(), live_feats[l].clone())
-                        };
-                        (vec![code], vec![feat], vec![1.0], true)
-                    }
-                    (false, _) => (
-                        live_codes.clone(),
-                        live_feats.clone(),
-                        self.swarm.weights.clone(),
-                        false,
-                    ),
+                    (true, Some((l, f))) => (l, f, false),
+                    (true, None) => (live_leaf, live_phi.clone(), true),
+                    (false, _) => (live_leaf, live_phi.clone(), false),
                 };
                 if silent {
                     self.silent_settlements += 1;
                 }
-                let prob = code::mixture_prob(
+                let prob = code::prob(
                     &self.tree,
-                    &codes,
-                    &feats,
-                    &weights,
+                    leaf,
+                    &phi,
                     x as u32,
-                    // A silent response gets no readout: it never committed to
-                    // an answer, so only the background prior stands.
                     !self.cfg.no_readout && !silent,
                 );
                 out.bits = code::charge_bits(prob);
@@ -628,9 +601,8 @@ impl Model {
                 if want_entropy {
                     let sp = code::spread(
                         &self.tree,
-                        &live_codes,
-                        &live_feats,
-                        &self.swarm.weights,
+                        live_leaf,
+                        &live_phi,
                         !self.cfg.no_readout,
                     );
                     out.entropy_bits = Some(sp.entropy_bits());
@@ -684,7 +656,7 @@ impl Model {
                     // which biases the tree's shape without showing up anywhere
                     // as a wrong number.
                     let phi_now = self.features(&p_end);
-                    let leaf_bits = code::charge_bits(code::tail_prob(
+                    let leaf_bits = code::charge_bits(code::prob(
                         &self.tree,
                         leaf,
                         &phi_now,

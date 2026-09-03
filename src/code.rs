@@ -1,37 +1,61 @@
 //! The emitted distribution and the charge.
 //!
-//! After committing `l` factors, the system's output is
+//! One expression:
 //!
-//!   q_l(o) = prod_{j<=j*(o)} q(u_j | u_{j-1}) . prior(o | u_{j*})
+//! ```text
+//! q(o) = P(o) . exp(s(o)) / Z ,      P = prior_of(u, .),  s(o) = <W(o), phi>
+//! Z    = 1 + sum over rows of  P(o) . (exp(s(o)) - 1)
+//! ```
 //!
-//! where j*(o) is the deepest level at which o's ancestor is still on the walked
-//! path. Mass that went to branches the walk did not enter is filled by those
-//! branches' own priors. Summing over the vocabulary telescopes to one, so this
-//! is a proper normalised distribution at *every* l -- which is the whole point:
-//! the code can be settled at any moment, and stopping early costs exactly the
-//! prior entropy of the subtree that was never descended.
+//! A product of experts. The address supplies a prior over what this regime
+//! emits -- private, exact, counted, never trained. The features supply a
+//! likelihood over what the current situation looks like -- global, shared,
+//! learned from every write anywhere. `Z` telescopes because `s(o)` is zero
+//! wherever there is no row, so the normaliser costs O(rows), not O(V), and the
+//! sum is exact rather than truncated.
 //!
-//! A particle set is a bounded posterior over paths, so the emitted
-//! distribution is the weight-mixture of the particles' own distributions. With
-//! one particle it reduces to the single-path formula.
+//! # What this replaced, and why
+//!
+//! The previous form was a per-level factorisation: one branch probability per
+//! tree level, multiplied together, with a mixture over the siblings the walk
+//! did not enter at every level and a separate combination rule at the tail. It
+//! was elegant -- the code was a product of factors, one committed per tick, and
+//! it telescoped to one at every depth.
+//!
+//! It was also the reason depth hurt. Those branch probabilities are softmaxes
+//! over inner products against *placed* prototypes, at an inherited constant
+//! temperature, with nothing anywhere calibrating them; measured, their expected
+//! calibration error ran 0.415 at level one, 0.291 at level two, 0.151 at level
+//! three. The code multiplied one such number in per level, so error compounded
+//! with depth. The address was being asked to supply probabilities and it
+//! structurally cannot: nothing in the design fits it to produce them.
+//!
+//! So the address no longer supplies probabilities. It supplies a prior and a
+//! candidate set, which is what a placed, untrained structure can honestly
+//! provide, and the branch scores go back to their one competent job -- deciding
+//! where to walk.
+//!
+//! The cost is stated where it belongs: sharing `W` means a departed regime's
+//! *function* keeps being rewritten by everything that arrives after it, which
+//! is interference, the failure the reference mechanism's allocation exists to
+//! convert away. The claim here is not that the trade was wrong but that it was
+//! applied to the wrong object: allocate what differs between regimes -- the
+//! counts -- and share what does not -- the map from features to tokens.
 
 use crate::tree::Tree;
 
-/// One particle's committed factorisation of the address.
+/// The path a particle has committed to. Only the path: the per-level branch
+/// probabilities it used to carry are no longer part of the code, because they
+/// were never probabilities.
 #[derive(Clone)]
 pub struct PathCode {
     /// Node ids from the root, inclusive. `path[0]` is the root.
     pub path: Vec<usize>,
-    /// `taken[j]` is q(path[j+1] | path[j]).
-    pub taken: Vec<f32>,
-    /// `others[j]` holds the siblings the walk did not enter at level j, with
-    /// their branch probabilities.
-    pub others: Vec<Vec<(usize, f32)>>,
 }
 
 impl PathCode {
     pub fn root() -> Self {
-        PathCode { path: vec![0], taken: Vec::new(), others: Vec::new() }
+        PathCode { path: vec![0] }
     }
     pub fn leaf(&self) -> usize {
         *self.path.last().unwrap()
@@ -39,104 +63,122 @@ impl PathCode {
     pub fn depth(&self) -> usize {
         self.path.len() - 1
     }
-    pub fn push(&mut self, child: usize, q_taken: f32, others: Vec<(usize, f32)>) {
+    pub fn push(&mut self, child: usize) {
         self.path.push(child);
-        self.taken.push(q_taken);
-        self.others.push(others);
     }
     /// Drop the deepest commitment. Used when a particle backtracks rather than
     /// dying.
     pub fn pop(&mut self) {
         if self.path.len() > 1 {
             self.path.pop();
-            self.taken.pop();
-            self.others.pop();
         }
     }
 }
 
-/// Probability the tail node assigns to one token, given the payload.
+/// exp(s(o)) for every row, and the normaliser, in one pass over the rows.
 ///
-/// If the node has emitted rows and the readout is enabled, the count term is
-/// replaced by the readout softmax, keeping the same escape structure. Turning
-/// the readout off recovers pure count-based backoff, which is exactly the
-/// ablation that says what the learned rows buy.
-pub fn tail_prob(tree: &Tree, u: usize, p: &[f32], tok: u32, use_readout: bool) -> f32 {
+/// Returned rather than recomputed per token so that the charge, the argmax and
+/// the entropy all see the same numbers.
+pub struct Scored {
+    /// (token, P(o), exp(s(o))) for every token that has a row.
+    pub rows: Vec<(u32, f32, f32)>,
+    pub z: f32,
+}
+
+/// The candidate set is the node's *own* emitted tokens, not the whole shared
+/// table.
+///
+/// Sharing `W` shares the function, not the candidates: what the address
+/// contributes is precisely which tokens are in play here, and scoring every
+/// token the system has ever emitted anywhere would throw that away -- along
+/// with the property that retrieval cost follows the content stored at a node
+/// rather than the content stored anywhere. It is also what keeps the
+/// normaliser O(tokens at this node) instead of O(everything).
+pub fn score(tree: &Tree, u: usize, phi: &[f32], use_readout: bool) -> Scored {
     let node = &tree.arena[u];
-    if !use_readout || node.rows.is_empty() {
-        return tree.prior_of(u, tok);
-    }
-    let e = node.escape();
-    let base = match node.parent {
-        None => 1.0 / tree.vocab as f32,
-        Some(par) => tree.prior_of(par, tok),
-    };
-    let mut own = 0.0f32;
-    for (t, q) in tree.readout_dist(u, p) {
-        if t == tok {
-            own = q;
-            break;
+    let mut rows = Vec::with_capacity(node.counts.len());
+    let mut z = 1.0f32;
+    if use_readout {
+        let w = tree.fw.min(phi.len());
+        // Every token this node has emitted, uncapped.
+        //
+        // A positional cap looks like the reference mechanism's "bound the
+        // scored set" and is not: the scored set has to be a function of the
+        // node and the features alone, never of the token being asked about, or
+        // the distribution stops being normalised. Cap it and a target outside
+        // the cap gets no boost, its error stays at one forever, and its row
+        // grows in one direction without ever converging -- which took every
+        // accuracy in this suite below chance. If a shallow node's candidate set
+        // is large, that is a cost to measure, not to truncate away.
+        for &(tok, _) in node.counts.iter() {
+            let row = match tree.row_of(tok) {
+                None => continue,
+                Some(r) => r,
+            };
+            let s = crate::num::dot(&row[..w], &phi[..w]);
+            // Clamped so a large score cannot overflow the normaliser. The
+            // bound is generous relative to any score the delta rule produces.
+            let e = s.clamp(-30.0, 30.0).exp();
+            let p = tree.prior_of(u, tok);
+            z += p * (e - 1.0);
+            rows.push((tok, p, e));
         }
     }
-    e * base + (1.0 - e) * own
-}
-
-/// q_l(o) for one particle.
-pub fn path_prob(tree: &Tree, code: &PathCode, p: &[f32], tok: u32, use_readout: bool) -> f32 {
-    let mut acc = 0.0f32;
-    let mut prefix = 1.0f32;
-    for j in 0..code.taken.len() {
-        for &(v, qv) in code.others[j].iter() {
-            acc += prefix * qv * tree.prior_of(v, tok);
-        }
-        prefix *= code.taken[j];
+    if z < 1e-20 {
+        z = 1e-20;
     }
-    acc + prefix * tail_prob(tree, code.leaf(), p, tok, use_readout)
+    Scored { rows, z }
 }
 
-/// The mixture over particles. `weights` must sum to one.
-pub fn mixture_prob(
-    tree: &Tree,
-    codes: &[PathCode],
-    payloads: &[Vec<f32>],
-    weights: &[f32],
-    tok: u32,
-    use_readout: bool,
-) -> f32 {
-    let mut acc = 0.0f32;
-    for i in 0..codes.len() {
-        if weights[i] <= 0.0 {
-            continue;
+impl Scored {
+    #[inline]
+    pub fn prob_of(&self, tree: &Tree, u: usize, tok: u32) -> f32 {
+        for &(t, p, e) in self.rows.iter() {
+            if t == tok {
+                return p * e / self.z;
+            }
         }
-        acc += weights[i] * path_prob(tree, &codes[i], &payloads[i], tok, use_readout);
+        // No row: the likelihood term is one, so the prior stands.
+        tree.prior_of(u, tok) / self.z
     }
-    acc
+
+    /// The most probable token among those with rows, and its probability.
+    pub fn top(&self) -> Option<(u32, f32)> {
+        let mut best: Option<(u32, f32)> = None;
+        for &(t, p, e) in self.rows.iter() {
+            let q = p * e / self.z;
+            match best {
+                Some((bt, bq)) if bq > q || (bq == q && bt < t) => {}
+                _ => best = Some((t, q)),
+            }
+        }
+        best
+    }
 }
 
-/// Codelength in bits of the observed token under the emitted distribution.
-/// Always finite: the escape chain terminates in a uniform over the vocabulary.
+/// q(o) for one token at one node.
+pub fn prob(tree: &Tree, u: usize, phi: &[f32], tok: u32, use_readout: bool) -> f32 {
+    score(tree, u, phi, use_readout).prob_of(tree, u, tok)
+}
+
+/// Codelength in bits of the observed token. Always finite: the escape chain
+/// terminates in a uniform over the vocabulary and `Z` is bounded below.
 pub fn charge_bits(prob: f32) -> f64 {
     let p = prob.max(1e-30) as f64;
     -p.log2()
 }
 
 // ---------------------------------------------------------------------------
-// Full distribution, for the sharpening curve.
+// The full distribution, for the sharpening curve.
 //
-// Materialising V floats every tick would dominate the run, and it is also
-// unnecessary: every token the system has never seen anywhere receives exactly
-// the same probability, because its path through the escape chain is identical.
-// So the distribution is computed exactly over the observed support plus one
-// constant covering the rest.
+// Every token never seen anywhere receives the same probability, because its
+// path through the escape chain is identical and it has no row. So the spread is
+// computed exactly over the observed support plus one constant.
 // ---------------------------------------------------------------------------
 
 pub struct Spread {
-    /// Probability of each token in the observed support, in the root's
-    /// insertion order.
     pub support: Vec<f32>,
-    /// Probability of any single token never observed anywhere.
     pub unseen_each: f32,
-    /// How many such tokens there are.
     pub unseen_count: usize,
 }
 
@@ -164,107 +206,23 @@ impl Spread {
     }
 }
 
-/// prior(. | u) restricted to the support, plus the unseen constant.
-fn prior_spread(tree: &Tree, u: usize, pos: &std::collections::HashMap<u32, usize>, out: &mut Vec<f32>, unseen: &mut f32) {
-    let node = &tree.arena[u];
-    match node.parent {
-        None => {
-            let p = 1.0 / tree.vocab as f32;
-            for v in out.iter_mut() {
-                *v = p;
-            }
-            *unseen = p;
-        }
-        Some(par) => prior_spread(tree, par, pos, out, unseen),
-    }
-    let e = node.escape();
-    for v in out.iter_mut() {
-        *v *= e;
-    }
-    *unseen *= e;
-    if node.total > 0 {
-        let inv = (1.0 - e) / node.total as f32;
-        for &(tok, c) in node.counts.iter() {
-            if let Some(&i) = pos.get(&tok) {
-                out[i] += inv * c as f32;
-            }
-        }
-    }
-}
-
-pub fn spread(
-    tree: &Tree,
-    codes: &[PathCode],
-    payloads: &[Vec<f32>],
-    weights: &[f32],
-    use_readout: bool,
-) -> Spread {
+pub fn spread(tree: &Tree, u: usize, phi: &[f32], use_readout: bool) -> Spread {
     let root = &tree.arena[0];
     let n = root.counts.len();
-    let mut pos = std::collections::HashMap::with_capacity(n);
-    for (i, &(tok, _)) in root.counts.iter().enumerate() {
-        pos.insert(tok, i);
+    let sc = score(tree, u, phi, use_readout);
+    let mut boost: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+    for &(t, _, e) in sc.rows.iter() {
+        boost.insert(t, e);
     }
-    let mut acc = vec![0.0f32; n];
-    let mut acc_unseen = 0.0f32;
-    let mut buf = vec![0.0f32; n];
-    let mut buf_unseen;
-
-    for i in 0..codes.len() {
-        let w = weights[i];
-        if w <= 0.0 {
-            continue;
-        }
-        let code = &codes[i];
-        let mut prefix = 1.0f32;
-        for j in 0..code.taken.len() {
-            for &(v, qv) in code.others[j].iter() {
-                buf_unseen = 0.0;
-                prior_spread(tree, v, &pos, &mut buf, &mut buf_unseen);
-                let s = w * prefix * qv;
-                for k in 0..n {
-                    acc[k] += s * buf[k];
-                }
-                acc_unseen += s * buf_unseen;
-            }
-            prefix *= code.taken[j];
-        }
-        // Tail.
-        let u = code.leaf();
-        buf_unseen = 0.0;
-        let node = &tree.arena[u];
-        if use_readout && !node.rows.is_empty() {
-            let e = node.escape();
-            match node.parent {
-                None => {
-                    let p = 1.0 / tree.vocab as f32;
-                    for v in buf.iter_mut() {
-                        *v = p * e;
-                    }
-                    buf_unseen = p * e;
-                }
-                Some(par) => {
-                    prior_spread(tree, par, &pos, &mut buf, &mut buf_unseen);
-                    for v in buf.iter_mut() {
-                        *v *= e;
-                    }
-                    buf_unseen *= e;
-                }
-            }
-            for (t, q) in tree.readout_dist(u, &payloads[i]) {
-                if let Some(&k) = pos.get(&t) {
-                    buf[k] += (1.0 - e) * q;
-                }
-            }
-        } else {
-            prior_spread(tree, u, &pos, &mut buf, &mut buf_unseen);
-        }
-        let s = w * prefix;
-        for k in 0..n {
-            acc[k] += s * buf[k];
-        }
-        acc_unseen += s * buf_unseen;
+    let mut support = Vec::with_capacity(n);
+    for &(tok, _) in root.counts.iter() {
+        let p = tree.prior_of(u, tok);
+        let e = *boost.get(&tok).unwrap_or(&1.0);
+        support.push(p * e / sc.z);
     }
-
-    Spread { support: acc, unseen_each: acc_unseen, unseen_count: tree.vocab.saturating_sub(n) }
+    // A token never emitted anywhere has no row and no count at any node, so its
+    // prior is the escape product down to the uniform, identical for all of
+    // them.
+    let unseen_each = tree.prior_unseen(u) / sc.z;
+    Spread { support, unseen_each, unseen_count: tree.vocab.saturating_sub(n) }
 }
