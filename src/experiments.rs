@@ -13,7 +13,7 @@
 //! aimed at one claim rather than at a component.
 
 use crate::baseline;
-use crate::config::{Config, SplitRule};
+use crate::config::{BindMode, Config, SplitRule};
 use crate::gen::{GenConfig, Generator, Mode, Stream};
 use crate::gencheck;
 use crate::metrics::{run, Metrics};
@@ -247,17 +247,43 @@ pub fn full(ticks: usize, seed: u64, quick: bool) -> Suite {
         ));
     }
 
-    // ---- 5. binding: the falsification test for the "combine" half ----
-    let mut nb = base.clone();
-    nb.use_binding = false;
-    let o_nb = run_one("no-binding", nb, &gcfg, &stream);
-    let (nb_lat, nb_lat_acc) = window_mean(&o_nb.metrics.window);
-    suite.note(format!(
-        "[binding] on: Latin {:.3} bits acc {:.3} | off: Latin {:.3} bits acc \
-         {:.3}  (a Latin square is linear in the tensor features of the two \
-         cues and not in their sum, so this is where it should show)",
-        lat_bits, lat_acc, nb_lat, nb_lat_acc
-    ));
+    // ---- 5. binding: what should be bound, and is the conjunction
+    //         event-structured or timescale-structured? ----
+    //
+    // EventLag is invariant to how many baseline ticks separated the cues, so a
+    // good Latin accuracy under it with a flat window says the conjunction never
+    // needed the bands. Band carries tick-scale and is the only mode under which
+    // a plateau in separation can appear at all.
+    for (name, mode, on) in [
+        ("off", BindMode::Off, false),
+        ("event-lag", BindMode::EventLag, true),
+        ("band", BindMode::Band, true),
+        ("both", BindMode::Both, true),
+    ] {
+        let mut c = base.clone();
+        c.use_binding = on;
+        c.bind_mode = mode;
+        let o = run_one(&format!("bind-{}", name), c, &gcfg, &stream);
+        let (l, la) = window_mean(&o.metrics.window);
+        let (p, pa) = window_mean(&o.metrics.window_product);
+        let spread: Vec<String> = o
+            .metrics
+            .window
+            .iter()
+            .map(|(s, b)| format!("{}:{:.3}", s, b.accuracy()))
+            .collect();
+        suite.note(format!(
+            "[bind] {:<10} {:.3} bits/ev | Latin {:.3}/{:.3} | product \
+             {:.3}/{:.3} | Latin by sep {}",
+            name,
+            o.metrics.bits_per_event(),
+            l,
+            la,
+            p,
+            pa,
+            spread.join(" ")
+        ));
+    }
 
     // ---- 6. the two self channels, separately ----
     let mut no_cov = base.clone();
@@ -307,6 +333,40 @@ pub fn full(ticks: usize, seed: u64, quick: bool) -> Suite {
             pa
         ));
     }
+
+    // ---- 7b. charge what was said ----
+    //
+    // Bits under this rule are not comparable to bits without it, so the two
+    // arms are reported side by side and never mixed into one number.
+    let mut lock = base.clone();
+    lock.commit_locks_charge = true;
+    let o_lock = run_one("commit-locks", lock, &gcfg, &stream);
+    let (lk_l, lk_la) = window_mean(&o_lock.metrics.window);
+    let (lk_p, lk_pa) = window_mean(&o_lock.metrics.window_product);
+    suite.note(format!(
+        "[commit] locking on: {:.3} bits/ev | Latin {:.3}/{:.3} | product \
+         {:.3}/{:.3} | {} commitments, {} silent | speech onset t+{:.2} on {}",
+        o_lock.metrics.bits_per_event(),
+        lk_l,
+        lk_la,
+        lk_p,
+        lk_pa,
+        o_lock.model.commitments,
+        o_lock.model.silent_settlements,
+        o_lock.metrics.speech_onset.mean(),
+        o_lock.metrics.speech_onset.n
+    ));
+    suite.note(format!(
+        "[commit] locking off (bits NOT comparable): {:.3} bits/ev | Latin \
+         {:.3}/{:.3} | product {:.3}/{:.3} | speech onset t+{:.2} on {}",
+        o_full.metrics.bits_per_event(),
+        lat_bits,
+        lat_acc,
+        prod_bits,
+        prod_acc,
+        o_full.metrics.speech_onset.mean(),
+        o_full.metrics.speech_onset.n
+    ));
 
     // ---- 8. ablations, still few and each aimed at one claim ----
     let mut a1 = base.clone();

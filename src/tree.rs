@@ -274,7 +274,7 @@ impl Tree {
         Tree {
             answer_calib: Calibration::new(cfg.calib_bins),
             d,
-            fw: if cfg.use_binding { 2 * d } else { d },
+            fw: cfg.feature_blocks() * d,
             vocab: cfg.vocab,
             arena,
             calib: (0..cap + 1).map(|_| Calibration::new(cfg.calib_bins)).collect(),

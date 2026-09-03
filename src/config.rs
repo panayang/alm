@@ -11,6 +11,39 @@
 //!   CEILING   -- a reservation, not a setting; growth happens below it.
 //!   INHERITED -- carried over from the reference mechanism unchanged.
 
+/// What the bound trace binds.
+///
+/// The first version bound the *accumulated payload* with the arriving token.
+/// By bilinearity that spreads the pair term over cross-terms with everything
+/// else in the payload -- including tokens from previous episodes -- and the
+/// payload has been through the operator's rank-one rotations besides, so it is
+/// not even a clean sum of embeddings. Roughly half the mass was the pair and
+/// the rest was noise, which is what a 1.7x effect on the Latin square looks
+/// like.
+///
+/// The two clean alternatives answer different questions, so both are here:
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BindMode {
+    Off,
+    /// `E_prev_event (*) E_now`, at event lags 1..bind_lags. Exact: at the
+    /// moment the second cue arrives this is precisely the cue pair, with no
+    /// cross-terms at all.
+    ///
+    /// It is invariant to how many baseline ticks separated the cues, so it
+    /// makes the second-order window flat in separation *by construction*. That
+    /// is not a defect -- it is the hypothesis that the conjunction is
+    /// event-structured rather than timescale-structured, and a flat window
+    /// under this mode alongside a good Latin accuracy would settle it.
+    EventLag,
+    /// `Delta^k (*) E_now`, one per ladder band. This is the cross-band
+    /// conjunction the design originally predicted: it carries tick-scale, so
+    /// it is the mode under which a plateau in separation could appear at all.
+    /// Noisier, because a band is a smoothed average rather than one embedding.
+    Band,
+    /// Both, so the readout can use whichever carries the signal.
+    Both,
+}
+
 /// How a node decides it should be split.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SplitRule {
@@ -134,6 +167,24 @@ pub struct Config {
     /// never lower it. Gap ticks cost nothing, so waiting is close to free and
     /// the bar should be high.
     pub commit_fallback_slack: f32,
+    /// Charge what was said, not what was being thought.
+    ///
+    /// Without this the overt channel serves no objective at all: the ledger
+    /// scores the emitted *distribution*, so speaking costs nothing and buys
+    /// nothing, and any threshold on it is arbitrary -- which is the real reason
+    /// the channel fired four times in a run, not the threshold rule.
+    ///
+    /// With it, the distribution standing when the system first spoke is frozen
+    /// and that is what the settlement scores; a response that never spoke is
+    /// charged its background prior. Speaking early risks locking a worse
+    /// distribution, speaking late risks the world resolving first. The
+    /// speed-accuracy tradeoff stops being imposed and starts being derived,
+    /// and the optimal-stopping question becomes answerable because a payoff
+    /// structure finally exists.
+    ///
+    /// Costs comparability: bits under this rule mean something different from
+    /// bits without it, and no number across the switch is comparable.
+    pub commit_locks_charge: bool,
     /// Floor on the threshold for saying something out loud. Lower than the
     /// branch floor because it gates a different quantity: a readout maximum
     /// over a few dozen emitted rows lives on a different scale from a branch
@@ -156,6 +207,10 @@ pub struct Config {
     /// Feed the write/activity channel back into the context at all.
     pub feedback_write: bool,
 
+    /// What the bound trace binds. See `BindMode`.
+    pub bind_mode: BindMode,
+    /// Event lags carried under `EventLag`.
+    pub bind_lags: usize,
     /// Bind consecutive cues by circular convolution and give the readout the
     /// bound trace alongside the payload.
     ///
@@ -239,6 +294,7 @@ impl Config {
             calib_bins: 10,
             calib_min_obs: 32,
             commit_fallback_slack: 0.7,
+            commit_locks_charge: false,
             speak_fallback: 0.25,
             branch_temp: 4.0,
             self_max_rung: 0,
@@ -246,6 +302,8 @@ impl Config {
             feedback_covert: true,
             feedback_write: true,
             use_binding: true,
+            bind_mode: BindMode::Both,
+            bind_lags: 2,
             bind_decay: 0.5,
             // 1.5, because the sweep measured it: the payload chain needs to
             // be out of the tanh's linear regime before it transforms
@@ -276,6 +334,20 @@ impl Config {
         // A trace should still be alive across a typical inter-event gap.
         let mean_gap = (self.horizon / 8.0).max(2.0);
         self.trace_lambda = (-1.0f32 / mean_gap).exp();
+    }
+
+    /// Number of `d`-wide blocks in a readout row: the payload, plus one per
+    /// bound trace the mode carries.
+    pub fn feature_blocks(&self) -> usize {
+        if !self.use_binding {
+            return 1;
+        }
+        1 + match self.bind_mode {
+            BindMode::Off => 0,
+            BindMode::EventLag => self.bind_lags,
+            BindMode::Band => self.rungs,
+            BindMode::Both => self.bind_lags + self.rungs,
+        }
     }
 
     pub fn effective_depth_cap(&self) -> usize {

@@ -17,6 +17,7 @@
 use crate::code::{self, PathCode};
 use crate::config::Config;
 use crate::descent::{rung_for_level, Swarm};
+use crate::config::BindMode;
 use crate::embed::{Channel, Embeddings};
 use crate::graph::Graph;
 use crate::ladder::Ladder;
@@ -58,11 +59,26 @@ pub struct Model {
     /// The payload the current challenge has composed so far. Multiplicative and
     /// order-sensitive; a baseline tick applies the identity and leaves it be.
     cue: Vec<f32>,
-    /// The bound trace: consecutive cues combined by circular convolution rather
-    /// than superposed, so the pair is a distinct vector and not a sum.
-    bind: Vec<f32>,
+    /// The bound traces, one per block the mode carries. Event-lag traces hold
+    /// exact token pairs; band traces hold a band bound with the last token.
+    binds: Vec<Vec<f32>>,
+    /// The last few event tokens, most recent first. Only event ids -- binding
+    /// the accumulated payload was the defect this replaces.
+    event_hist: Vec<usize>,
     covert: Option<usize>,
     overt: Option<usize>,
+    /// The distribution as it stood when this response first spoke. Under
+    /// `commit_locks_charge` this, not the live one, is what gets settled.
+    committed: Option<(Vec<PathCode>, Vec<Vec<f32>>, Vec<f32>)>,
+    /// The token that was actually said. Accuracy under locking has to score
+    /// this and not the live leader, or the locked arm silently reports the
+    /// unlocked arm's accuracy and the whole comparison is vacuous.
+    committed_token: Option<usize>,
+    /// Confidence in the leading answer on the previous tick, so speaking can
+    /// use the same "evidence has stopped moving" rule the branches use.
+    prev_answer_conf: f32,
+    pub commitments: u64,
+    pub silent_settlements: u64,
     /// What was thought and what was said during the current response, kept so
     /// that when the world finally speaks the two onsets can be read off. Never
     /// consulted by the model itself.
@@ -92,7 +108,8 @@ impl Model {
         let d = cfg.d;
         let mut cue = vec![0.0f32; d];
         cue[0] = 1.0;
-        let bind = vec![0.0f32; d];
+        let blocks = cfg.feature_blocks().saturating_sub(1);
+        let binds = vec![vec![0.0f32; d]; blocks];
         Model {
             cfg,
             emb,
@@ -101,9 +118,15 @@ impl Model {
             tree,
             swarm,
             cue,
-            bind,
+            binds,
+            event_hist: Vec::new(),
             covert: None,
             overt: None,
+            committed: None,
+            committed_token: None,
+            prev_answer_conf: 0.0,
+            commitments: 0,
+            silent_settlements: 0,
             covert_log: Vec::new(),
             overt_log: Vec::new(),
             ticks_since_event: 0,
@@ -187,13 +210,51 @@ impl Model {
     /// The feature vector a readout row is scored against: the payload, with the
     /// bound trace concatenated when binding is on.
     fn features(&self, p: &[f32]) -> Vec<f32> {
-        if !self.cfg.use_binding {
-            return p.to_vec();
-        }
-        let mut f = Vec::with_capacity(2 * self.cfg.d);
+        let mut f = Vec::with_capacity(self.cfg.feature_blocks() * self.cfg.d);
         f.extend_from_slice(p);
-        f.extend_from_slice(&self.bind);
+        for b in self.binds.iter() {
+            f.extend_from_slice(b);
+        }
         f
+    }
+
+    /// Refresh the bound traces from the arriving token.
+    ///
+    /// Called after the charge, so what a response is scored against is the
+    /// binding as it stood when the last cue arrived -- at the target of a
+    /// two-cue item that is exactly `E_cueA (*) E_cueB`, with nothing else in
+    /// it.
+    fn rebind(&mut self, x: usize) {
+        if self.binds.is_empty() {
+            return;
+        }
+        let d = self.cfg.d;
+        let ex = self.emb.row(x).to_vec();
+        let mut slot = 0usize;
+        if matches!(self.cfg.bind_mode, BindMode::EventLag | BindMode::Both) {
+            for j in 0..self.cfg.bind_lags {
+                if let Some(&prev) = self.event_hist.get(j) {
+                    let ep = self.emb.row(prev).to_vec();
+                    let mut b = vec![0.0f32; d];
+                    crate::num::circconv(&ep, &ex, &mut b);
+                    normalize(&mut b);
+                    self.binds[slot] = b;
+                }
+                slot += 1;
+            }
+        }
+        if matches!(self.cfg.bind_mode, BindMode::Band | BindMode::Both) {
+            for k in 0..self.cfg.rungs {
+                let band = self.ladder.delta(k).to_vec();
+                let mut b = vec![0.0f32; d];
+                crate::num::circconv(&band, &ex, &mut b);
+                normalize(&mut b);
+                self.binds[slot] = b;
+                slot += 1;
+            }
+        }
+        self.event_hist.insert(0, x);
+        self.event_hist.truncate(self.cfg.bind_lags.max(1));
     }
 
     fn all_features(&self, payloads: &[Vec<f32>]) -> Vec<Vec<f32>> {
@@ -306,18 +367,29 @@ impl Model {
         out.top1 = Some(t);
         self.covert_log.push((self.ticks_since_event, t));
 
-        // Gated by the answer's own reliability, not by a branch's. Same
-        // machinery, right quantity, and still no free parameter.
-        let thr = self
-            .tree
-            .answer_calib
-            .top_bin_centre(self.cfg.calib_min_obs, self.cfg.speak_fallback);
-        if q >= thr {
+        // Speak when the answer has stopped improving, which is the same
+        // "evidence absorbed" rule the branches use. A calibrated-confidence
+        // threshold cannot work here: it pins at its ceiling whenever the model
+        // is over-confident anywhere, and then the channel never fires, never
+        // generates calibration data, and stays shut.
+        let rising = q > self.prev_answer_conf + 1e-4;
+        let settled = !rising && q >= self.cfg.speak_fallback;
+        self.prev_answer_conf = q;
+
+        if settled && self.committed.is_none() {
             self.overt = Some(t);
             out.overt = Some(t);
             self.overt_emissions += 1;
             self.overt_log.push((self.ticks_since_event, t));
-        } else {
+            if self.cfg.commit_locks_charge && !self.swarm.is_empty() {
+                let payloads = self.swarm.payloads();
+                let feats = self.all_features(&payloads);
+                self.committed =
+                    Some((self.swarm.codes(), feats, self.swarm.weights.clone()));
+                self.committed_token = Some(t);
+                self.commitments += 1;
+            }
+        } else if self.committed.is_none() {
             self.overt = None;
         }
     }
@@ -378,22 +450,59 @@ impl Model {
                     let (n, h) = (self.cfg.particles, self.cfg.hops);
                     self.swarm.seed_response(n, &c, &mut self.graph, h);
                 }
-                let codes: Vec<PathCode> = self.swarm.codes();
-                let payloads = self.swarm.payloads();
-                let feats = self.all_features(&payloads);
+                let live_codes: Vec<PathCode> = self.swarm.codes();
+                let live_payloads = self.swarm.payloads();
+                let live_feats = self.all_features(&live_payloads);
+
+                // Settle what was said, if the rule is in force and something
+                // was said. A response that stayed silent is charged its
+                // background prior -- it committed to nothing, so it predicted
+                // nothing beyond the situation it was in.
+                let (codes, feats, weights, silent) = match (
+                    self.cfg.commit_locks_charge,
+                    self.committed.clone(),
+                ) {
+                    (true, Some((c, f, w))) => (c, f, w, false),
+                    (true, None) => {
+                        let leader = if self.swarm.is_empty() { 0 } else { self.swarm.leader() };
+                        let code = if self.swarm.is_empty() {
+                            PathCode::root()
+                        } else {
+                            self.swarm.parts[leader].code.clone()
+                        };
+                        (vec![code], vec![live_feats[0].clone()], vec![1.0], true)
+                    }
+                    (false, _) => (
+                        live_codes.clone(),
+                        live_feats.clone(),
+                        self.swarm.weights.clone(),
+                        false,
+                    ),
+                };
+                if silent {
+                    self.silent_settlements += 1;
+                }
                 let prob = code::mixture_prob(
                     &self.tree,
                     &codes,
                     &feats,
-                    &self.swarm.weights,
+                    &weights,
                     x as u32,
-                    !self.cfg.no_readout,
+                    // A silent response gets no readout: it never committed to
+                    // an answer, so only the background prior stands.
+                    !self.cfg.no_readout && !silent,
                 );
                 out.bits = code::charge_bits(prob);
                 self.total_bits += out.bits;
                 if let Some((t, q)) = self.leader_top1() {
                     out.top1 = Some(t);
-                    out.correct = t == x;
+                    out.correct = if self.cfg.commit_locks_charge {
+                        // Scored on what was said. A response that never spoke
+                        // committed to no answer and cannot be right.
+                        self.committed_token == Some(x)
+                    } else {
+                        t == x
+                    };
                     // The answer calibration's target is the stream itself: the
                     // model said t with confidence q before the world said x.
                     self.tree.answer_calib.push(q, t == x);
@@ -401,8 +510,8 @@ impl Model {
                 if want_entropy {
                     let sp = code::spread(
                         &self.tree,
-                        &codes,
-                        &feats,
+                        &live_codes,
+                        &live_feats,
                         &self.swarm.weights,
                         !self.cfg.no_readout,
                     );
@@ -453,6 +562,7 @@ impl Model {
                     let leaf_bits = code::charge_bits(self.tree.prior_of(leaf, x as u32));
                     let negs = self.sample_negatives(leaf, x as u32, self.cfg.neg_samples);
                     let phi_write = self.features(&p_end);
+                    let _ = &live_payloads;
                     let grad = self.tree.readout_update(
                         leaf,
                         &phi_write,
@@ -491,18 +601,7 @@ impl Model {
                 self.ladder.observe_world(&v);
                 self.feedback();
                 self.ladder.refresh();
-                // Bind before the cue absorbs the new token, so the trace holds
-                // (what was there) (*) (what just arrived) -- the pair, not the
-                // sum.
-                if self.cfg.use_binding {
-                    let mut b = vec![0.0f32; self.cfg.d];
-                    let ex = self.emb.row(x).to_vec();
-                    crate::num::circconv(&self.cue, &ex, &mut b);
-                    for i in 0..self.cfg.d {
-                        self.bind[i] = self.cfg.bind_decay * self.bind[i] + b[i];
-                    }
-                    normalize(&mut self.bind);
-                }
+                self.rebind(x);
                 self.emb.apply_operator(Some(x), &mut self.cue);
                 self.graph.decay_traces(self.cfg.trace_lambda);
 
@@ -520,6 +619,9 @@ impl Model {
                 // *new* response, and logging it at the old offset put a stale
                 // entry at the head of every response's log.
                 self.ticks_since_event = 0;
+                self.committed = None;
+                self.committed_token = None;
+                self.prev_answer_conf = 0.0;
                 let scored = (out.top1, out.correct);
                 self.emit(&mut out);
                 out.top1 = scored.0;

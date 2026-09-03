@@ -374,6 +374,16 @@ impl Metrics {
             self.all_events.accuracy()
         );
         println!("  evidence vs PPM: {}", self.evidence.verdict());
+        if model.cfg.commit_locks_charge {
+            println!(
+                "  charged what was said: {} commitments, {} settled silent \
+                 ({:.1}% of events) -- bits are NOT comparable to runs without \
+                 this rule",
+                model.commitments,
+                model.silent_settlements,
+                100.0 * model.silent_settlements as f64 / self.charged_events.max(1) as f64
+            );
+        }
         println!(
             "  onsets: idea at t+{:.2} on {} events, speech at t+{:.2} on {}",
             self.idea_onset.mean(),
