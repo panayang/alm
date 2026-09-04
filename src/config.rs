@@ -235,6 +235,16 @@ pub struct Config {
     /// Binding writes, unbinding reads, and re-binding checks -- and a near miss
     /// becomes detectable, which it has never been in this project.
     pub verify_sigma: f32,
+    /// Read the most matured response rather than the average of them.
+    ///
+    /// Averaging unit cursors and renormalising divides each by
+    /// sqrt(sum w^2), so the response holding the answer arrives at the readout
+    /// at 0.24-0.28 against a codebook floor of 0.255 -- present and
+    /// indistinguishable. "Several half-formed answers mature together and one of
+    /// them is said" is not "say their average"; taking the strongest is the
+    /// natural readout of parallel responses, not a competition between
+    /// mechanisms.
+    pub emit_strongest: bool,
     pub traj: usize,
     pub mem_banks: usize,
     pub superpose: bool,
@@ -490,6 +500,7 @@ impl Config {
             readout_codebook: 1.0,
             cursor_fade: 0.4,
             verify_sigma: 4.0,
+            emit_strongest: true,
             traj: 4,
             mem_banks: 64,
             superpose: true,

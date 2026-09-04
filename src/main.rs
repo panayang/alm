@@ -83,6 +83,13 @@ fn main() {
                 );
             }
         }
+        "closeout" => {
+            let suite = experiments::closeout(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "unbindtest" => {
             let suite = experiments::unbindtest(ticks, seed, shard, shards);
             println!();

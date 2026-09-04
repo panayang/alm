@@ -104,6 +104,8 @@ pub struct Volatile {
     cursor_w: Vec<f32>,
     cursor_steps: Vec<u32>,
     cursor_tok: Vec<usize>,
+    cursor_hit: Vec<u64>,
+    prev_answer: Option<(Vec<f32>, usize)>,
     last_self_token: Option<usize>,
     prev2: Option<usize>,
 }
@@ -147,6 +149,8 @@ pub struct Model {
     cursor_steps: Vec<u32>,
     /// The token each response has resolved to, which is what names its bank.
     cursor_tok: Vec<usize>,
+    /// Tick of each response's last successful step, to break ties by recency.
+    cursor_hit: Vec<u64>,
     /// The answer standing at the previous tick, so the commit rule can take the
     /// peak rather than the tick after it.
     prev_answer: Option<(Vec<f32>, usize)>,
@@ -251,6 +255,7 @@ impl Model {
             cursor_w: vec![0.0; cfg_traj],
             cursor_steps: vec![0; cfg_traj],
             cursor_tok: vec![usize::MAX; cfg_traj],
+            cursor_hit: vec![0; cfg_traj],
             prev_answer: None,
             bank_planes: (0..24)
                 .map(|j| crate::num::unit_vector(cfg_seed ^ 0xBA_11C5, j as u64, d))
@@ -316,6 +321,8 @@ impl Model {
             cursor_w: self.cursor_w.clone(),
             cursor_steps: self.cursor_steps.clone(),
             cursor_tok: self.cursor_tok.clone(),
+            cursor_hit: self.cursor_hit.clone(),
+            prev_answer: self.prev_answer.clone(),
             last_self_token: self.last_self_token,
             prev2: self.prev2,
         }
@@ -341,6 +348,8 @@ impl Model {
         self.cursor_w = v.cursor_w;
         self.cursor_steps = v.cursor_steps;
         self.cursor_tok = v.cursor_tok;
+        self.cursor_hit = v.cursor_hit;
+        self.prev_answer = v.prev_answer;
         self.last_self_token = v.last_self_token;
         self.prev2 = v.prev2;
         self.covert_log.clear();
@@ -594,7 +603,9 @@ impl Model {
                 let score = crate::num::dot(&self.mem[bank], &back) / mnorm;
                 if score < self.cfg.verify_min() {
                     ok = false;
-                    self.verify_rejects += 1;
+                    if !self.frozen {
+                        self.verify_rejects += 1;
+                    }
                 }
             }
             if !self.frozen {
@@ -609,6 +620,7 @@ impl Model {
                 self.cursor_tok[i] = tok;
                 self.cursor_w[i] = 1.0;
                 self.cursor_steps[i] += 1;
+                self.cursor_hit[i] = self.tick_index;
             } else if self.cursor_steps[i] == 0 {
                 // Never produced anything: this is a response that was seeded on
                 // something with nowhere to go, like a relation token, and it
@@ -620,6 +632,26 @@ impl Model {
             // ended" and "the chain never started" look identical, and the only
             // thing that separates them is whether anything was ever retrieved.
             self.cursor_age[i] += 1;
+        }
+        if self.cfg.emit_strongest {
+            // Several responses sit at weight 1.0 whenever more than one stepped
+            // successfully, and `>` then hands it to index 0 every time -- a
+            // systematic bias toward a slot rather than toward the most matured
+            // answer. Recency of the last successful step is the tie-break that
+            // means what "most matured" is supposed to mean.
+            let mut best = (0.0f32, 0u64, usize::MAX);
+            for i in 0..self.cursors.len() {
+                let (w, h) = (self.cursor_w[i], self.cursor_hit[i]);
+                if w > best.0 + 1e-6 || ((w - best.0).abs() <= 1e-6 && h > best.1) {
+                    best = (w, h, i);
+                }
+            }
+            let best = (best.0, best.2);
+            if best.1 != usize::MAX && best.0 > 1e-3 {
+                self.p.copy_from_slice(&self.cursors[best.1]);
+                normalize(&mut self.p);
+            }
+            return;
         }
         let mut mix = vec![0.0f32; d];
         for (i, c) in self.cursors.iter().enumerate() {

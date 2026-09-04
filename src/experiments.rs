@@ -1345,14 +1345,19 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
     // gives 15.6 per bank and a signal of 0.253 -- just under the threshold, and
     // it is carried as the arm that should fail, because a law that only ever
     // predicts success is not being tested.
+    // Commit-lock is gone: measured, it halved the memorisable families
+    // (Latin 0.578 -> 0.305, answer 3.16 -> 6.62 bits) because their answer is
+    // only readable at the answer tick while a walk's is readable earlier. One
+    // commit rule cannot serve both timings.
     for (sup, banks, dim, traj, lock, label) in [
         (false, 1usize, 256usize, 1usize, false, "superpose OFF (control)"),
-        (true, 4096, 256, 4, false, "4096 banks, no commit-lock"),
-        (true, 4096, 256, 4, true, "4096 banks + COMMIT-LOCK"),
-        (true, 4096, 256, 1, true, "1 response + commit-lock"),
-        (true, 8192, 256, 4, true, "8192 banks + commit-lock"),
-        (true, 4096, 512, 4, true, "d=512 + commit-lock"),
+        (true, 1024, 256, 4, false, "1024 banks (below the line)"),
+        (true, 4096, 256, 4, false, "4096 banks, 4 responses"),
+        (true, 4096, 256, 1, false, "4096 banks, 1 response"),
+        (true, 8192, 256, 4, false, "8192 banks, 4 responses"),
+        (true, 16384, 256, 4, false, "16384 banks, 4 responses"),
     ] {
+
 
         let mix = 1.0f32;
         let mut c = Config::local();
@@ -1397,6 +1402,117 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
                     .join(" ")
             ) + &walk_tail(&o)
                 + &comp_tail(&o),
+        );
+    }
+    suite
+}
+
+/// Re-measure every conclusion the mechanism changes invalidated.
+///
+/// Four findings were taken on a system that no longer exists. Gap walking and
+/// depth-from-time were judged when a silent tick pushed the state through a
+/// random transform rather than unbinding a link. The three streams were judged
+/// when self-output only fed the ladder and took no part in retrieval; it is now
+/// how a chain advances. Addressing was judged against a single global row table,
+/// where a few hundred facts fit with room to spare; it now keeps a superposition
+/// under its capacity. And the background-rungs result was measured with *live*
+/// bands, so more rungs meant more of "how long since the world spoke" in the
+/// retrieval key -- which is very likely the effect itself rather than depth.
+///
+/// Everything here runs on the current mechanism and the current source, one
+/// factor at a time off a fixed baseline.
+pub fn closeout(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let base = |seed: u64, vocab: usize| {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = vocab;
+        c.d = 256;
+        c.mem_banks = 8192;
+        c.traj = 4;
+        c.superpose = true;
+        c.route_query = RouteQuery::Bound;
+        c.read_entry_by_content = true;
+        c.freeze_operator = true;
+        c.bypass_graph = true;
+        c.anchor = 0.0;
+        c
+    };
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    let mut add = |name: &str, mut c: Config, arms: &mut Vec<(String, Config)>| {
+        c.derive();
+        arms.push((name.to_string(), c));
+    };
+
+    add("baseline", base(seed, gcfg.vocab), &mut arms);
+
+    // 1. the background, now that the bands are event-locked
+    for r in [1usize, 2, 5] {
+        let mut c = base(seed, gcfg.vocab);
+        c.rungs = r;
+        add(&format!("rungs={}", r), c, &mut arms);
+    }
+    // and the live-band comparison the old result was actually measuring
+    let mut c = base(seed, gcfg.vocab);
+    c.event_locked_key = false;
+    add("live bands (old key)", c, &mut arms);
+
+    // 2. gap-time computation, which is now unbinding rather than a random hop
+    let mut c = base(seed, gcfg.vocab);
+    c.superpose = false;
+    add("no superposition", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.walk_during_gap = false;
+    add("no gap walk", c, &mut arms);
+
+    // 3. the three streams, which now advance the chain
+    let mut c = base(seed, gcfg.vocab);
+    c.feedback_write = false;
+    c.feedback_covert = false;
+    c.feedback_overt = false;
+    add("all streams off", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.feedback_covert = false;
+    add("covert off", c, &mut arms);
+
+    // 4. addressing, which now keeps a superposition under capacity
+    for b in [1usize, 256, 65536] {
+        let mut c = base(seed, gcfg.vocab);
+        c.mem_banks = b;
+        add(&format!("banks={}", b), c, &mut arms);
+    }
+    let mut c = base(seed, gcfg.vocab);
+    c.bypass_graph = false;
+    c.freeze_operator = false;
+    add("graph back on", c, &mut arms);
+    // 5. and the anchors that must collapse
+    let mut c = base(seed, gcfg.vocab);
+    c.use_binding = false;
+    c.bind_mode = crate::config::BindMode::Off;
+    add("bind off (must collapse)", c, &mut arms);
+
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(
+            format!(
+                "[closeout] {:<26} Latin {:.4} | product {:.4} | retention {:.4} | answer {:.4} bits",
+                name, la, pa, ret_acc, o.metrics.answer.mean()
+            ) + &comp_tail(&o)
+                + &walk_tail(&o)
+                + &interference_tail(&o),
         );
     }
     suite
