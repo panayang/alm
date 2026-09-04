@@ -186,6 +186,16 @@ pub struct Metrics {
     /// a separable problem; near one means the address did its part and the
     /// failure is downstream.
     pub leaf_pair: std::collections::HashMap<usize, std::collections::HashMap<(usize, usize), u64>>,
+    /// The inverse of `leaf_pair`, kept per conjunction family: for one fact,
+    /// which nodes did it land on across its occurrences.
+    ///
+    /// `leaf_pair` asks whether a node holds one fact. This asks whether a fact
+    /// has one address, which is the other half and the one that matters for a
+    /// linearly separable target: the product code can be answered from
+    /// marginals, so what it needs is not that facts be kept apart but that the
+    /// *same* fact present the readout with the same features every time.
+    /// Addressing buys separability by spending exactly that consistency.
+    pub pair_leaf: [std::collections::HashMap<(usize, usize), std::collections::HashMap<usize, u64>>; 2],
 
     /// Ticks after the last event at which the right answer first showed up in
     /// inner speech, and at which it was first said. Two reaction times, and the
@@ -228,6 +238,7 @@ impl Metrics {
             leaf_domain: std::collections::HashMap::new(),
             domains: 0,
             leaf_pair: std::collections::HashMap::new(),
+            pair_leaf: [std::collections::HashMap::new(), std::collections::HashMap::new()],
             idea_onset: Bucket::default(),
             speech_onset: Bucket::default(),
             evidence: EProcess::default(),
@@ -261,7 +272,56 @@ impl Metrics {
                 .or_default()
                 .entry((ep.cues[0], ep.cues[1]))
                 .or_insert(0) += 1;
+            let fam = if matches!(ep.kind, Kind::Product) { 1 } else { 0 };
+            *self.pair_leaf[fam]
+                .entry((ep.cues[0], ep.cues[1]))
+                .or_default()
+                .entry(leaf)
+                .or_insert(0) += 1;
         }
+    }
+
+    /// How concentrated one fact's address is, per family.
+    ///
+    /// Returns (share held by the fact's dominant node, mean distinct nodes per
+    /// fact, facts counted). Chance for the share is about 1/distinct, so the
+    /// two numbers have to be read together: a fact seen twice cannot look
+    /// scattered, and one seen fifty times cannot look pure by accident.
+    pub fn address_consistency(&self, fam: usize) -> (f64, f64, usize) {
+        let (a, b, c, _) = self.address_consistency_full(fam);
+        (a, b, c)
+    }
+
+    /// As above, plus mean occurrences per counted fact and the number of facts
+    /// seen at all. Exposure per fact is what the load sweep's tick scaling is
+    /// supposed to hold constant; if it drifts, the sweep is comparing "more
+    /// facts" with "less practice at each", which is a different experiment.
+    pub fn address_consistency_full(&self, fam: usize) -> (f64, f64, usize, f64) {
+        let mut seen = 0usize;
+        let mut occ = 0.0f64;
+        let mut num = 0.0;
+        let mut den = 0.0;
+        let mut distinct = 0.0;
+        let mut facts = 0.0;
+        let mut keys: Vec<&(usize, usize)> = self.pair_leaf[fam].keys().collect();
+        keys.sort_unstable();
+        for m in keys.into_iter().map(|k| &self.pair_leaf[fam][k]) {
+            let total: u64 = m.values().sum();
+            seen += 1;
+            if total < 4 {
+                continue;
+            }
+            occ += total as f64;
+            num += *m.values().max().unwrap() as f64;
+            den += total as f64;
+            distinct += m.len() as f64;
+            facts += 1.0;
+        }
+        if den == 0.0 {
+            return (0.0, 0.0, 0, 0.0);
+        }
+        let _ = seen;
+        (num / den, distinct / facts, facts as usize, occ / facts)
     }
 
     /// Weighted mean over leaves of the share held by that leaf's dominant cue

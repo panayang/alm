@@ -44,10 +44,17 @@ fn main() {
 
     match cmd {
         "gencheck" => {
-            let mut g = GenConfig::local();
-            g.seed = seed ^ 0xA11CE;
-            let stream = experiments::build_stream(&g, ticks, 20, true);
-            println!("stream ok: {} ticks, {} episodes", stream.len(), stream.episodes.len());
+            // Both rungs of the load sweep, so the manipulation each family
+            // actually received is visible side by side.
+            for domains in [12usize, 36] {
+                let mut g = GenConfig::fast();
+                g.seed = seed ^ 0xA11CE;
+                g.domains = domains;
+                let t = ticks * domains / 12;
+                println!("== domains={} ticks={} ==", domains, t);
+                let stream = experiments::build_stream(&g, t, 20, true);
+                println!("stream ok: {} ticks, {} episodes", stream.len(), stream.episodes.len());
+            }
         }
         // The baseline alone, so a reporting fix does not cost a full suite run.
         "baseline" => {

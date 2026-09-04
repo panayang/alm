@@ -310,8 +310,8 @@ pub fn load_sweep(base_ticks: usize, seed: u64) -> Suite {
 pub fn width(base_ticks: usize, seed: u64) -> Suite {
     let mut suite = Suite::new();
     for (domains, arms) in [
-        (12usize, vec![(64usize, 64usize), (64, 128)]),
-        (36, vec![(16, 128), (64, 128)]),
+        (12usize, vec![(64usize, 64usize)]),
+        (36, vec![(64, 64)]),
     ] {
         let mut gcfg = GenConfig::fast();
         gcfg.seed = seed ^ 0xA11CE;
@@ -334,12 +334,15 @@ pub fn width(base_ticks: usize, seed: u64) -> Suite {
             let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
             let rows = o.model.store.occupied_rows();
             let edges = o.model.graph.edges();
+            let (ls, ln, lf, lo) = o.metrics.address_consistency_full(0);
+            let (ps, pn, pf, po) = o.metrics.address_consistency_full(1);
             suite.note(format!(
-                "[width] domains={:<3} nodes={:<4} d={:<4} {:.3} bits/ev | Latin {:.3} |                  product {:.3} | retention {:.3} | readout {:.2}M | operator {:.2}M",
+                "[width] domains={:<3} nodes={:<4} d={:<4} {:.3} bits/ev | Latin {:.3} |                  product {:.3} | retention {:.3} | readout {:.2}M | operator {:.2}M |                  addr-consistency latin {:.3} over {:.1} nodes ({} facts, {:.1} occ each),                  product {:.3} over {:.1} nodes ({} facts, {:.1} occ each)",
                 domains, n, dd,
                 o.metrics.bits_per_event(), la, pa, ret_acc,
                 (rows * rw) as f64 / 1e6,
-                (edges * dd * dd) as f64 / 1e6
+                (edges * dd * dd) as f64 / 1e6,
+                ls, ln, lf, lo, ps, pn, pf, po
             ));
         }
     }

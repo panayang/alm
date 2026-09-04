@@ -22,6 +22,19 @@ pub struct GenReport {
     pub second_order: usize,
     pub distinct_tokens: usize,
 
+    /// Distinct (cue_a, cue_b) facts actually presented, and presentations per
+    /// fact, per family: [Second (Latin), Product].
+    ///
+    /// A load sweep raises the number of things to remember while holding the
+    /// practice each one gets. Nothing asserted that. Scaling ticks with domains
+    /// keeps each *domain* live for the same time, which is not the same claim,
+    /// and the two conjunction families need not respond to it alike. Without
+    /// these counts a sweep can compare "more facts, same practice" in one
+    /// family against "same facts, more practice" in the other and read the
+    /// difference as a property of the mechanism.
+    pub distinct_facts: [usize; 2],
+    pub presentations_per_fact: [f64; 2],
+
     /// Bits, unconditional. In mode A a cue also names its regime, so these are
     /// dominated by log2(domains) and say nothing about the conjunction. Kept
     /// because reading them as the conjunction test is the exact mistake this
@@ -361,7 +374,32 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
     }
     let comp_query_leaked = queries.iter().filter(|q| support.contains(q)).count();
 
+    // Distinct facts and practice per fact, straight off the stream: no
+    // threshold, so this cannot be biased by looking only at a tail.
+    let mut fact_counts: [std::collections::HashMap<(usize, usize), u64>; 2] =
+        [std::collections::HashMap::new(), std::collections::HashMap::new()];
+    for ep in stream.episodes.iter() {
+        let fam = match ep.kind {
+            crate::gen::Kind::Second => 0,
+            crate::gen::Kind::Product => 1,
+            _ => continue,
+        };
+        if ep.cues.len() >= 2 {
+            *fact_counts[fam].entry((ep.cues[0], ep.cues[1])).or_insert(0) += 1;
+        }
+    }
+    let mut distinct_facts = [0usize; 2];
+    let mut presentations_per_fact = [0.0f64; 2];
+    for f in 0..2 {
+        let n = fact_counts[f].len();
+        let total: u64 = fact_counts[f].values().sum();
+        distinct_facts[f] = n;
+        presentations_per_fact[f] = if n == 0 { 0.0 } else { total as f64 / n as f64 };
+    }
+
     GenReport {
+        distinct_facts,
+        presentations_per_fact,
         ticks: n,
         baseline_fraction: baselines as f64 / n as f64,
         episodes: stream.episodes.len(),
@@ -396,6 +434,13 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
 
 impl GenReport {
     pub fn print(&self) {
+        println!(
+            "  facts presented: latin {} distinct, {:.1} presentations each |              product {} distinct, {:.1} each",
+            self.distinct_facts[0],
+            self.presentations_per_fact[0],
+            self.distinct_facts[1],
+            self.presentations_per_fact[1]
+        );
         println!("-- generator report ------------------------------------------");
         println!("  ticks                {}", self.ticks);
         println!("  baseline fraction    {:.3}", self.baseline_fraction);
