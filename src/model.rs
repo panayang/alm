@@ -244,6 +244,12 @@ impl Model {
     /// One retention probe under frozen memory: the codelength it was charged
     /// and whether the answer was right. The displaced state is put back here,
     /// so a probe cannot leak into the stream that follows it.
+    /// The i-th bound trace, so a test can check that what the readout is handed
+    /// at an answer tick is the conjunction it is supposed to be.
+    pub fn bound_block(&self, i: usize) -> &[f32] {
+        &self.binds[i]
+    }
+
     pub fn probe(&mut self, spec: &crate::gen::ProbeSpec, answer_gap: u32) -> (f64, bool) {
         let saved = self.volatile();
         let was_frozen = self.frozen;
@@ -626,6 +632,18 @@ impl Model {
         }
     }
 
+    /// The `k` tokens the model currently ranks highest, excluding the target:
+    /// the ones actually competing for this answer.
+    fn top_negatives(&self, sc: &code::Scored, target: u32, k: usize) -> Vec<u32> {
+        let mut v: Vec<(u32, f32)> =
+            sc.rows.iter().filter(|(t, _)| *t != target).copied().collect();
+        v.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+        });
+        v.truncate(k);
+        v.into_iter().map(|(t, _)| t).collect()
+    }
+
     fn sample_negatives(&self, target: u32, k: usize) -> Vec<u32> {
         let toks = self.store.known();
         if toks.is_empty() || k == 0 {
@@ -790,7 +808,12 @@ impl Model {
                         // The associative write: the same `Scored` the ledger
                         // charged, so the rows are fitted against the
                         // distribution that was actually settled.
-                        let negs = self.sample_negatives(x as u32, self.cfg.neg_samples);
+                        let sc_neg = code::score(&self.store, &phi, !self.cfg.no_readout);
+                        let negs = if self.cfg.hard_negatives {
+                            self.top_negatives(&sc_neg, x as u32, self.cfg.neg_samples)
+                        } else {
+                            self.sample_negatives(x as u32, self.cfg.neg_samples)
+                        };
                         // The settled features, not the live ones. Under
                         // `commit_locks_charge` these differ: the charge came
                         // from the committed snapshot while the write used the

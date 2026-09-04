@@ -83,6 +83,20 @@ fn main() {
                 );
             }
         }
+        "negatives" => {
+            let suite = experiments::negatives(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
+        "bindprobe" => {
+            let suite = experiments::bindprobe(ticks, seed);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "binddecay" => {
             let suite = experiments::binddecay(ticks, seed, shard, shards);
             println!();

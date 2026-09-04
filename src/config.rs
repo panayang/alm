@@ -97,6 +97,24 @@ pub struct Config {
     pub eta: f32,
     /// INHERITED. Sampled negatives per write, drawn from the leaf's own
     /// emitted targets. Zero recovers the dense update.
+    /// Draw the write's negatives from the top of the current distribution
+    /// instead of uniformly from every known token.
+    ///
+    /// Uniform sampling takes 16 of 685 rows, so the five in-domain rivals that
+    /// share a Latin square's six targets are each drawn about 2.3% of the time.
+    /// A target appears roughly eighteen times in a regime's life, so a rival
+    /// receives a negative gradient on it about 0.4 times: the readout is never
+    /// taught to separate the six candidates and settles at 1/6, which is
+    /// exactly where the Latin family sits. The product code is unaffected
+    /// because it is answerable from marginals, where ranking on positives alone
+    /// suffices.
+    ///
+    /// It also breaks the rule `code.rs` states: the ledger charges an exact
+    /// softmax over every row while the write was fitted against a random
+    /// subset, so the two saw different distributions. Correcting what the model
+    /// would actually have said is both error-driven and the same distribution
+    /// the charge came from.
+    pub hard_negatives: bool,
     pub neg_samples: usize,
     /// DERIVED. Eligibility decay, matched to the mean inter-event interval.
     pub trace_lambda: f32,
@@ -341,6 +359,7 @@ impl Config {
             shortcuts: 2,
             hops: 1,
             eta: 0.5,
+            hard_negatives: true,
             neg_samples: 16,
             trace_lambda: 0.9,
             visit_decay: 0.9,

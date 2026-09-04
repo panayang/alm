@@ -406,3 +406,61 @@ fn the_write_route_is_deterministic_given_its_query() {
     assert_eq!(a, b, "the write route moved without its query moving");
     assert_eq!(a.len(), cfg.hops, "the write walk did not take cfg.hops steps");
 }
+
+
+/// At an answer tick, the first bound block must be the episode's own conjunction.
+///
+/// An offline linear probe on `nu(E_a (*) E_b)` alone reaches 0.41 on the Latin
+/// family at d=64 where the model, holding that same vector in its features,
+/// reaches 0.145. So the information is present and linearly decodable and the
+/// model is not using it. This pins down the first link in that chain: whether
+/// what the readout is handed at the moment of the charge is the conjunction at
+/// all.
+#[test]
+fn the_bound_block_at_an_answer_is_the_episodes_own_conjunction() {
+    let mut g = alm::gen::GenConfig::fast();
+    g.seed = 99;
+    let gen = alm::gen::Generator::new(g.clone());
+    let stream = gen.generate(20_000);
+
+    let mut cfg = alm::config::Config::local();
+    cfg.seed = 99;
+    cfg.vocab = g.vocab;
+    cfg.derive();
+    let emb = alm::embed::Embeddings::new(&cfg);
+    let mut m = alm::model::Model::new(cfg.clone());
+
+    let mut checked = 0usize;
+    let mut worst = 1.0f32;
+    let mut sum = 0.0f64;
+    for t in 0..stream.len() {
+        // Look before the tick is taken: the charge is settled on the features
+        // standing at the top of the tick.
+        if let Some(i) = stream.ep_at[t] {
+            let ep = &stream.episodes[i];
+            if matches!(ep.kind, alm::gen::Kind::Second) && ep.cues.len() >= 2 {
+                let mut want = vec![0.0f32; cfg.d];
+                alm::num::circconv(emb.row(ep.cues[0]), emb.row(ep.cues[1]), &mut want);
+                alm::num::normalize(&mut want);
+                let got = m.bound_block(0);
+                let cos = alm::num::dot(&want, got)
+                    / (alm::num::dot(&want, &want).sqrt() * alm::num::dot(got, got).sqrt()).max(1e-9);
+                sum += cos as f64;
+                if cos < worst {
+                    worst = cos;
+                }
+                checked += 1;
+            }
+        }
+        m.tick(stream.observe(t), false);
+    }
+    assert!(checked > 50, "only {} answer ticks checked", checked);
+    let mean = sum / checked as f64;
+    assert!(
+        mean > 0.95,
+        "mean cosine between the first bound block and the episode's own          conjunction is {:.3} over {} answer ticks (worst {:.3}): the readout is          not being handed the conjunction it is charged on",
+        mean,
+        checked,
+        worst
+    );
+}

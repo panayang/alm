@@ -758,6 +758,166 @@ pub fn binddecay(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite 
     suite
 }
 
+/// Is the conjunction linearly decodable from the binding at all?
+///
+/// The model sits at 0.145 on Latin while the prequential single-cue baseline is
+/// 0.161, and 1/m is 0.167 -- so the single-cue predictor is at chance and so is
+/// the model. But top-1 runs over the whole 4096-token vocabulary, and chance
+/// there is 1/4096, not 1/6. Reaching 1/6 means the model reliably finds the
+/// regime and its six candidate targets and then picks among them at chance:
+/// the domain arrives, the conjunction does not. Meanwhile the product code,
+/// also six cells, reaches 0.69.
+///
+/// This takes the model out of the question entirely. It builds
+/// `nu(E_a (*) E_b)` straight from the embeddings, runs the same prequential
+/// delta rule the readout uses, and asks what that representation alone can do.
+/// If the probe succeeds where the model fails, the fault is between the bound
+/// trace and the decision. If the probe fails too, `d` and the number of
+/// conjunctions are the constraint and no amount of debugging will move it.
+///
+/// The product family is carried alongside as a positive control: same probe,
+/// same code path, and it is known to be solvable.
+pub fn bindprobe(ticks: usize, seed: u64) -> Suite {
+    use crate::gen::Kind;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let mut cfg = Config::local();
+    cfg.seed = seed;
+    cfg.vocab = gcfg.vocab;
+    cfg.derive();
+
+    for &d in [64usize, 128, 256].iter() {
+        let mut c = cfg.clone();
+        c.d = d;
+        c.derive();
+        let emb = crate::embed::Embeddings::new(&c);
+        // One row per token, exactly like the readout, but over the bound vector
+        // alone -- no state, no bands, no graph.
+        let mut rows: std::collections::HashMap<u32, Vec<f32>> = std::collections::HashMap::new();
+        let mut hit = [0u64; 2];
+        let mut tot = [0u64; 2];
+        let mut bound = vec![0.0f32; d];
+        for ep in stream.episodes.iter() {
+            let fam = match ep.kind {
+                Kind::Second => 0usize,
+                Kind::Product => 1,
+                _ => continue,
+            };
+            if ep.cues.len() < 2 {
+                continue;
+            }
+            crate::num::circconv(emb.row(ep.cues[0]), emb.row(ep.cues[1]), &mut bound);
+            crate::num::normalize(&mut bound);
+
+            // Predict before the answer is seen, over every row that exists.
+            let mut best: Option<(f32, u32)> = None;
+            let mut keys: Vec<&u32> = rows.keys().collect();
+            keys.sort_unstable();
+            for &t in keys {
+                let sc = crate::num::dot(&rows[&t], &bound);
+                match best {
+                    Some((bs, bt)) if bs > sc || (bs == sc && bt < t) => {}
+                    _ => best = Some((sc, t)),
+                }
+            }
+            if let Some((_, t)) = best {
+                if t as usize == ep.target {
+                    hit[fam] += 1;
+                }
+            }
+            tot[fam] += 1;
+
+            // Delta rule against the same softmax the readout uses.
+            let mut cand: Vec<u32> = rows.keys().copied().collect();
+            cand.sort_unstable();
+            if !cand.contains(&(ep.target as u32)) {
+                cand.push(ep.target as u32);
+            }
+            let mut z = 0.0f32;
+            let mut sc: Vec<(u32, f32)> = Vec::with_capacity(cand.len());
+            for &t in cand.iter() {
+                let e = rows
+                    .get(&t)
+                    .map(|r| crate::num::dot(r, &bound))
+                    .unwrap_or(0.0)
+                    .clamp(-30.0, 30.0)
+                    .exp();
+                z += e;
+                sc.push((t, e));
+            }
+            z += (c.vocab - cand.len()) as f32;
+            for (t, e) in sc {
+                let q = e / z.max(1e-20);
+                let err = if t as usize == ep.target { 1.0 - q } else { -q };
+                if err.abs() < 1e-4 {
+                    continue;
+                }
+                let r = rows.entry(t).or_insert_with(|| vec![0.0; d]);
+                for i in 0..d {
+                    r[i] += c.eta * err * bound[i];
+                }
+            }
+        }
+        suite.note(format!(
+            "[bindprobe] d={:<4} latin {:.4} over {} items | product {:.4} over {} items",
+            d,
+            if tot[0] == 0 { 0.0 } else { hit[0] as f64 / tot[0] as f64 },
+            tot[0],
+            if tot[1] == 0 { 0.0 } else { hit[1] as f64 / tot[1] as f64 },
+            tot[1]
+        ));
+    }
+    suite
+}
+
+/// Uniform negatives against negatives drawn from the top of the distribution.
+pub fn negatives(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for hard in [false, true] {
+        for k in [16usize, 64] {
+            let mut c = Config::local();
+            c.seed = seed;
+            c.vocab = gcfg.vocab;
+            c.nodes = 64;
+            c.route_query = RouteQuery::Bound;
+            c.read_entry_by_content = true;
+            c.hard_negatives = hard;
+            c.neg_samples = k;
+            c.derive();
+            arms.push((
+                format!("{} k={}", if hard { "TOP" } else { "uniform" }, k),
+                c,
+            ));
+        }
+    }
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(
+            format!(
+                "[neg] {:<14} Latin {:.4} | product {:.4} | retention {:.4} | answer {:.4} bits",
+                name, la, pa, ret_acc, o.metrics.answer.mean()
+            ) + &comp_tail(&o),
+        );
+    }
+    suite
+}
+
 pub struct Suite {
     pub csv: String,
     pub summary: Vec<String>,
