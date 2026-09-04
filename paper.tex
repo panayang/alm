@@ -1,0 +1,1031 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+\usepackage{subcaption}
+\usepackage[hidelinks]{hyperref}
+\usepackage{orcidlink}
+\usepackage{natbib}
+\bibliographystyle{plainnat}
+
+\newcommand{\bind}{\mathbin{\circledast}}
+\newcommand{\unbind}{\mathbin{\oslash}}
+\newcommand{\nrm}[1]{\nu\!\left(#1\right)}
+
+\title{One Tick, One Link:\\
+{\large A Non-Autoregressive Challenge--Response Memory in Which\\
+Depth Is Bought with the World's Silence}}
+
+\author{%
+  Xinyu Yang\,\orcidlink{0009-0007-2600-0948}\\
+  \href{mailto:Pana.Yang@hotmail.com}{\texttt{Pana.Yang@hotmail.com}}\\
+  \href{https://orcid.org/0009-0007-2600-0948}{\texttt{0009-0007-2600-0948}}
+}
+
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Almost every contemporary sequence learner is autoregressive: it consumes a
+prefix and predicts the next symbol, and its computation per symbol is fixed
+regardless of how much time the world allows. We report a system built on a
+different footing. It is \emph{challenge--response} rather than
+next-symbol: one input per tick, one output per tick, and periods in which the
+input is the identity and the model keeps emitting. Its philosophy is that
+intelligence is an emergence of memory rather than a product of reward, so
+there is no reward, no label, and no gradient crossing a memory write; the only
+external signal is the codelength of what the world actually said, charged when
+it says something. Its background is deliberately imprecise --- a fuzzy
+multi-timescale trace rather than an exact context --- and precise context
+association is explicitly \emph{not} a goal.
+
+The mechanism has two halves that are inverses of each other, and the tick
+already says which is called for: when the world speaks there is something to
+combine, so the model \emph{binds} an observation into a superposed memory;
+when the world is silent there is not, so it \emph{unbinds} one link out of that
+memory. Several partial responses run in parallel; each quiet tick advances
+each of them by one link; the answer that has matured is what gets said. Depth
+is therefore not a hyperparameter and not a layer count --- it is how long the
+world stays quiet.
+
+We verify in isolation that the mechanism does what the design says: a walk
+$a_0\!\to\!a_1\!\to\!a_2\!\to\!a_3$ is traversed one link per quiet tick, stops
+at its end rather than wandering past it, and surplus silence is harmless. We
+derive and confirm the operating region of the superposed store,
+$d > 2k\ln V$, and show that binding is only invertible for unitary codebooks
+(reconstruction cosine $0.527$ for Gaussian rows against $1.000$ for unitary
+ones at $k=1$). On a synthetic continual stream the retrieval occurs and holds
+(cursor-to-answer cosine $0.185 \to 0.268$ against a matched control at
+$0.015$), and parallel responses are load-bearing (one trajectory collapses to
+$0.007$ where four hold at $0.268$).
+
+We are explicit about what this does \emph{not} establish. Several components
+measure net-negative on our source, with a single mechanism that explains all of
+them, but that mechanism rests on the source's answers being determined by its
+cues --- exactly the property of a constructed source most open to doubt. We
+therefore rule on none of them. A replayed stream also cannot test the claim the
+architecture exists for: in a file, time is an index; here it is meant to be a
+resource. Deciding these questions needs real language content carrying real,
+non-authored temporal structure, and a compute budget bound to wall-clock rather
+than to ticks. What we claim is feasibility at this scale on this source, for a
+design that is non-autoregressive at its root and aimed at stateful continual
+learning in a world that has a clock.
+\end{abstract}
+
+\section{Introduction}
+
+\subsection{The frame we are not using}
+
+The dominant frame for sequence learning is autoregression: factorise
+$p(x_{1:T})=\prod_t p(x_t \mid x_{<t})$, feed a prefix, predict the next symbol
+\citep{elman1990finding,vaswani2017attention}. It is enormously successful and
+it carries three commitments that are easy to stop noticing.
+
+First, \emph{the objective is next-symbol prediction}, so every metric derived
+from it inherits that shape. Second, \emph{computation per symbol is fixed}: a
+forward pass costs what it costs whether the world gives the model a
+microsecond or an hour. Third, \emph{the context is a prefix}, an exact and
+recent window; long-range association is bought by widening it or by retrieving
+into it \citep{beltagy2020longformer,borgeaud2022improving}.
+
+For a system meant to run in a real temporal world --- embodied, or agentic over
+long horizons --- all three are uncomfortable. There is no prefix boundary in a
+room. Computation that cannot use extra time cannot exploit a lull. And an exact
+window is the wrong idealisation for a background that is, in any organism, a
+fuzzy multi-timescale trace rather than a transcript.
+
+\subsection{What replaces them}
+
+We take challenge--response as the primitive. There is no ``a challenge
+arrives, now respond''; there is a stream, and every tick carries one input and
+produces one output. Some inputs are the world's tokens; in the intervals
+between them the input is the identity and the model still emits, iterating on
+memory. The model's own emissions are part of its context, interleaved with the
+world's --- distinguished from them, but combined with them.
+
+The picture we have kept in view throughout is two people talking. While the
+other is still speaking you have already begun to think; when they stop, or just
+as they stop, you begin to say something. That interval is the gap. And what is
+forming in it is \emph{not one trajectory} --- several half-formed replies mature
+together and one of them is what comes out. Every one of those clauses turned
+out to be load-bearing, and each had to be re-derived after a run in which the
+mechanism looked inert (\S\ref{sec:method}).
+
+The philosophy is that intelligence is an emergence of memory rather than a
+product of reward. This is not a slogan about scale; it is a design constraint
+with teeth. There is no reward signal, no value function, no label. The only
+external quantity is the codelength of what the world actually said, charged
+only when it says something --- prequential accounting in the sense of
+\citet{dawid1984present} and \citet{rissanen1978modeling}, used as a ledger
+rather than as a training loss \citep{blier2018description}. A node performs a
+memory \emph{write}; it does not perform an autoregressive fit, and no gradient
+crosses a write.
+
+We also make a negative commitment that is easy to overlook: \emph{precise
+context association is not a goal}. The background is meant to say ``which
+memories are relevant here'', not to reconstruct what was said. A design that
+tries to make the background exact turns it into a prefix by another name.
+
+\subsection{What we borrow, and from where}
+
+The storage is content-addressed through a fixed map that no later learning can
+move, following the position argued in \citet{yang_2026_22161096}: allocation
+buys freedom from interference and pays for it in retrieval difficulty, and the
+central weakness of the family is that discrimination between addresses decays
+as addresses crowd. That trade is the axis along which our design is organised,
+and one of our results is that half of the crowding penalty, in our
+implementation, was self-inflicted (\S\ref{sec:addressing}).
+
+The representation is holographic \citep{plate1995holographic} in the vector
+symbolic tradition \citep{kanerva1988sparse,kanerva2009hyperdimensional,%
+gayler2003vector}: binding by circular convolution, reading by circular
+correlation. The pairing of an associative store with a small-world routing
+graph follows \citet{watts1998collective}; the readout is a delta rule
+\citep{widrow1960adaptive}. The continual setting --- regimes arriving,
+running, and departing permanently, with no task identifier and no boundary
+signal --- is the one in which catastrophic interference was first characterised
+\citep{mccloskey1989catastrophic,french1999catastrophic} and to which
+complementary-systems accounts respond
+\citep{mcclelland1995complementary,kirkpatrick2017overcoming}.
+
+\subsection{Contributions}
+
+\begin{enumerate}
+\item A tick in which binding and unbinding are the two halves of one loop,
+selected by whether the world spoke, so that gap periods, self-output as
+context, and depth-from-time are consequences of one rule rather than three
+mechanisms (\S\ref{sec:design}).
+
+\item An isolated demonstration that a chain is traversed one link per quiet
+tick, halts at its end, and is unharmed by surplus silence
+(\S\ref{sec:isolated}).
+
+\item The operating region of a superposed store, $d>2k\ln V$, derived and
+confirmed, together with the observation that binding is only invertible for
+unitary codebooks --- a Gaussian codebook loses almost half the signal with a
+single item stored (\S\ref{sec:capacity}).
+
+\item A structural result on addressing: locality-sensitive addressing makes a
+near miss \emph{undetectable by construction}, because the occupants of a bank
+have keys close to the query. Addressing needs same-content-same-bank and gains
+nothing from similar-content-similar-bank (\S\ref{sec:addressing}).
+
+\item An explicit statement of what a constructed source cannot settle, and of
+why a replayed stream cannot test a model for which time is a resource
+(\S\ref{sec:cannot}, \S\ref{sec:limits}).
+\end{enumerate}
+
+\section{Design}
+\label{sec:design}
+
+\subsection{The tick}
+
+Write $\bind$ for circular convolution, $\unbind$ for circular correlation,
+$\nu(\cdot)$ for normalisation, $E_x$ for the fixed codebook vector of token
+$x$, and $M_b$ for the $b$-th superposed store.
+
+\paragraph{Every tick carries an arriving token.} When the world speaks it is
+the world's token. When the world is silent it is the last thing the world said
+--- the relation stays on the table as the operator, and the model's own
+emission is where it has got to. This is what removes the need to know whether a
+challenge is pending: there is no ``locate the question'', only a running state
+and a token per tick.
+
+\paragraph{Speech binds.} On an event tick the standing conjunction of the two
+previous observations is combined with what has just arrived and superposed:
+\begin{equation}
+M_{h(x_{-2},\,x_{-1})} \;\mathrel{+}=\;
+\nrm{\big(E_{x_{-2}} \bind E_{x_{-1}}\big) \bind E_{x}} .
+\label{eq:write}
+\end{equation}
+For a presented link $x \; r \; y$ the triple formed at the $y$ tick is exactly
+$(E_x \bind E_r)\bind E_y$, and no episode boundary was needed to know that.
+
+\paragraph{Silence unbinds.} On every tick, each of $m$ responses in flight
+advances one link:
+\begin{align}
+q_i     &= \nrm{c_i \bind E_{\text{arriving}}}, \label{eq:key}\\
+r_i     &= \nrm{M_{h(\tau_i,\,\tau_{\text{arriving}})} \unbind q_i}, \\
+c_i     &\leftarrow \operatorname{clean}(r_i) \quad\text{if the cleanup clears
+its threshold.} \label{eq:step}
+\end{align}
+Here $\tau_i$ is the token identity the $i$-th response has resolved to and
+$\operatorname{clean}$ is nearest-neighbour cleanup against the codebook.
+Because $\bind$ commutes, a response that has just reached $a_1$ after hearing
+$r$ carries the key for the next link without any bookkeeping.
+
+\paragraph{A response that arrives holds; speech supersedes it.} A step that
+retrieves nothing fades a response \emph{only if it has never advanced}; one
+that has traversed at least one link and then stops has \emph{arrived}, and
+fading it would fade the answer. From inside, ``the chain ended'' and ``the
+chain never started'' are identical, and the only thing separating them is
+whether anything was ever retrieved. Arrival holds through silence; every world
+token decays what is in flight before a new response is seeded. Holding a
+half-formed reply while the other person is quiet, and dropping it when they say
+something new, is the same picture.
+
+\paragraph{The emission reads the most matured response, not their average.}
+Averaging unit cursors and renormalising divides each by
+$\sqrt{\sum_i w_i^2}$, so the response holding the answer arrives at the readout
+diluted to the point of being indistinguishable from noise. ``Several
+half-formed answers mature together and one of them is said'' is not ``say
+their average''.
+
+\paragraph{The readout.} Features are
+$\varphi = [\,c_{\text{best}} \,;\, \text{bound traces} \,;\,
+\text{event-locked bands}\,]$, and
+\begin{equation}
+s(o) \;=\; \langle R_o, \varphi\rangle \;+\; \lambda\,\langle E_o, p\rangle ,
+\label{eq:score}
+\end{equation}
+a learned associative row plus a direct codebook comparison. The second term is
+not learned; it is the cleanup memory that lets a retrieved state be
+\emph{said}. Rows are updated by a delta rule whose negatives are the tokens the
+model currently ranks highest, which is both error-driven and the same
+distribution the ledger charged.
+
+\subsection{Structural constraints}
+
+Five constraints are asserted rather than hoped for, and are checked by unit
+tests that run on every build.
+
+\begin{description}
+\item[A1 Rate limit.] Constant computation per tick. The only way to think
+longer is to occupy more ticks, and ticks are given by the world.
+\item[A2 Event-driven accounting.] Charged only when the world speaks. ``The
+identity input injects no new content'' is then a consequence of the ledger, not
+an added axiom.
+\item[A3 Read/write separation.] The write walk is unperturbed and content
+addressed; reads may wander.
+\item[A4 No content write at baseline.] Identity ticks write nothing, asserted
+bit-for-bit over 500 baseline ticks.
+\item[A5 Timescale reachability asymmetry.] The world writes all rungs; the
+model's own output reaches only the fastest, so self-generated content
+contributes exactly zero to the slow timescales.
+\end{description}
+
+\subsection{The background is deliberately imprecise}
+
+The background is a cascaded band-pass ladder --- one use of a ladder, on the
+time axis only; the memory itself is flat, because a ladder inside the store
+would be an abuse of the device. The bands are \emph{snapshotted at the last
+event}, so the retrieval key stops moving when the world does. Both halves of
+that matter. The bands carry which regime this is, which must hold across a
+silence, and how long the world has been quiet, which changes every tick; with
+both in the key, elapsed time decides whether a memory fires at all. A fact
+learned at six ticks of silence did not answer at one.
+
+\section{Isolated verification of the mechanism}
+\label{sec:isolated}
+
+The evidence in this section is from unit tests on synthetic memories, in which
+every quantity is known. It says what the mechanism does; it says nothing about
+whether the mechanism is useful on any particular data. We keep the two kinds of
+evidence typographically separate throughout, because conflating them is the
+single easiest way to overstate a result of this kind.
+
+\subsection{One link per quiet tick}
+
+Present $a_0 \!\xrightarrow{r}\! a_1 \!\xrightarrow{r}\! a_2
+\!\xrightarrow{r}\! a_3$ forty times each, interleaved with unrelated traffic,
+then ask with the start and the relation and stay quiet.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+tick & response state & note \\
+\midrule
+after $a_0$        & $a_0$ & seeded \\
+after $r$          & $a_1$ & first link, on the relation's own tick \\
+after silence 1    & $a_2$ & \\
+after silence 2    & $a_3$ & end of the walk \\
+after silence 3    & $a_3$, weight $1.00 \to 0.40$ & no next link \\
+after silence 4    & $a_3$, weight $0.16$ & \\
+\bottomrule
+\end{tabular}
+\caption{A walk traversed one link per tick of silence. The end of a chain has
+no outgoing link, so the unbinding returns noise, the cleanup refuses it, and
+the response holds its answer instead of stepping past it: surplus thinking
+time is harmless. The relation's own response fades on the same rule.}
+\label{tab:walk}
+\end{table}
+
+Four things had to be right simultaneously for Table~\ref{tab:walk}, and each
+was found by a test that runs in four seconds rather than by an end-to-end run
+(\S\ref{sec:method}): the relation is the operator and the model's own output
+is the position, not the reverse; seeding must retire the \emph{least live}
+response rather than the oldest, because on ties ``oldest'' is the slot holding
+the response that has just advanced; responses must be weighted by whether they
+are still advancing; and the configuration must lie inside the operating region
+of \S\ref{sec:capacity}.
+
+\subsection{Capacity, and why binding needs a unitary codebook}
+\label{sec:capacity}
+
+A superposition $M=\sum_{i\le k} t_i$ of unit, near-orthogonal triples returns
+$\langle \hat M, t_j\rangle \approx 1/\sqrt{k}$ for a stored triple and
+$\approx 1/\sqrt{d}$ for one that was never written. Cleanup runs against a
+codebook of $V$ entries, and a random vector's best match there is
+$\approx\sqrt{2\ln V / d}$. Retrieval is therefore usable exactly when
+\begin{equation}
+\frac{1}{\sqrt{k}} \;>\; \sqrt{\frac{2\ln V}{d}}
+\qquad\Longleftrightarrow\qquad
+d \;>\; 2k\ln V .
+\label{eq:capacity}
+\end{equation}
+Measured at $d=256$: cosine $0.043$ with $k=401$ against a predicted $0.050$.
+Equation~\eqref{eq:capacity} is what gives content addressing a job that is not
+about accuracy: the address chooses \emph{which} superposition to unbind, each
+bank stays under capacity, and the read stays one unbinding however much has
+been stored.
+
+Equation~\eqref{eq:capacity} holds only for \emph{unitary} codebooks --- vectors
+whose Fourier magnitudes are all one. Correlation is an exact inverse of
+convolution only then; for Gaussian rows the reconstruction is lossy before any
+interference at all.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+codebook & $k=1$ & $k=16$ & $k=64$ \\
+\midrule
+Gaussian, unit norm & 0.527 & 0.205 & 0.120 \\
+Unitary (random phase) & \textbf{1.000} & 0.251 & 0.127 \\
+$1/\sqrt{k}$ & 1.000 & 0.250 & 0.125 \\
+\bottomrule
+\end{tabular}
+\caption{Reconstruction cosine, $d=256$. A Gaussian codebook loses almost half
+the signal with a \emph{single} item stored, and the capacity law is a statement
+about unitary vectors. This had been assumed rather than checked for the life of
+the project.}
+\label{tab:unitary}
+\end{table}
+
+\subsection{Addressing must not preserve locality}
+\label{sec:addressing}
+
+A key nobody wrote still hashes into an occupied bank, and its occupants answer.
+So the end of a chain does not retrieve \emph{nothing}; it retrieves a
+neighbour. No threshold on the retrieval separates the two, because both are
+real stored content of comparable strength. This is address crowding
+\citep{yang_2026_22161096} in its sharpest form.
+
+We built a read-back check for it --- bind the candidate back onto the key and
+ask whether that triple is in the bank at all --- and it failed for an
+instructive reason. Under sign-bit locality-sensitive hashing
+\citep{indyk1998approximate,charikar2002similarity}, the occupants of a bank
+have keys \emph{close to the query}; if cleanup snaps to some occupant's target
+$y_i$, then for unitary vectors
+\begin{equation}
+\big\langle \nrm{p_i \bind y_i},\; \nrm{q \bind y_i} \big\rangle
+= \langle p_i, q\rangle ,
+\end{equation}
+and $\langle p_i,q\rangle$ being large is \emph{precisely why they share a
+bank}. The verification is defeated by the same property it was built to detect.
+
+The resolution is that addressing needs same-content-same-bank and gains nothing
+from similar-content-similar-bank; the second property is pure cost, and it is
+what makes a near miss undetectable. Scrambling the code removes the locality
+but makes the address brittle, since write and read reach the same convolution
+by different floating-point paths and one flipped sign then means an unrelated
+bank. That dilemma is false: cleanup has already resolved the response to an
+exact codebook token and the write holds both identities, so the address can be
+a hash of the \emph{identities}. Vectors carry the superposition; identities
+carry the address. With that in place the read-back check becomes inert --- zero
+rejections --- because an unwritten key now lands among unrelated occupants
+whose contaminated output fails cleanup on its own. We report it as doing
+nothing rather than crediting it.
+
+\section{The source and its instruments}
+\label{sec:source}
+
+Regimes arrive, run for a while, and depart permanently; there is no task
+identifier, no boundary signal, and no reset. Each carries first-order facts, a
+Latin square, a product code, composition chains, and walks. Two families can be
+answered only by computing: composition queries are posed \emph{once} per chain
+and withheld Latin cells are asked once each, so nothing about them can be
+memorised from a previous presentation.
+
+The generator is self-tested before any model is built, because on this project
+the generator produced as many serious defects as the model did. Its properties,
+measured on the emitted stream with no threshold:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+quantity & Latin square & product code \\
+\midrule
+$I(T;A\mid D)$, $I(T;B\mid D)$ (bits) & 0.126 / 0.127 & non-zero by design \\
+prequential single-cue baseline & 0.201 / 0.195 & 0.486 / 0.402 \\
+analytic single-cue value & $1/5 = 0.200$ & $0.500$ \\
+composition leakage & \multicolumn{2}{c}{0} \\
+facts $\times$ / practice per fact $\times$ under $3\times$ load &
+\multicolumn{2}{c}{$2.6$--$3.0$ / $1.00$--$1.14$} \\
+\bottomrule
+\end{tabular}
+\caption{Source self-check. The single-cue baseline is \emph{prequential} ---
+predict from counts so far, then update --- because an in-sample ceiling is an
+oracle no model charged before it sees the answer can reach.}
+\label{tab:source}
+\end{table}
+
+An earlier version of this source drew one Latin cue from a Zipf distribution
+and the other uniformly. For $T=(a+b)\bmod m$, $P(T\mid A)$ is uniform exactly
+when $p_B$ is; so that square was \emph{not} zero-marginal, a predictor using
+cue $B$ alone reached $0.2745$, and every Latin accuracy the project had ever
+reported was at or below that. Both cues are now uniform, and it has to be
+both: no choice of square repairs it, and making both Zipf only makes the leak
+symmetric. The frequency skew now lives outside the square, where it forges no
+single-cue shortcut. Marginal information is estimated with the Miller--Madow
+correction \citep{miller1955note}.
+
+\section{End-to-end measurements}
+\label{sec:endtoend}
+
+The evidence in this section is from the full system on the synthetic stream:
+90k ticks, 12 regimes, one seed unless stated. It is source-dependent, and we
+mark it as such.
+
+\subsection{Retrieval occurs, and holds}
+
+We measure the cosine between the response state and the correct answer at each
+tick of a walk query's silence. A control with the superposed store switched off
+is otherwise identical.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+arm & $t_0$ & $t_1$ & $t_2$ & $t_3$ & $t_4$ & $t_5$ \\
+\midrule
+control (no superposition) & 0.014 & 0.015 & 0.015 & 0.019 & 0.021 & 0.021 \\
+4096 banks, 4 responses & 0.014 & 0.185 & 0.240 & \textbf{0.268} & 0.237 & 0.238 \\
+8192 banks, 4 responses & 0.014 & 0.189 & 0.243 & \textbf{0.275} & 0.248 & 0.250 \\
+4096 banks, \emph{1} response & 0.006 & 0.193 & 0.007 & 0.010 & 0.013 & 0.013 \\
+\bottomrule
+\end{tabular}
+\caption{Response-to-answer cosine by tick of silence. $t_0$ is the relation's
+own tick. Retrieval happens and holds; with a single trajectory it happens and
+then collapses.}
+\label{tab:cursor}
+\end{table}
+
+Table~\ref{tab:cursor} is the closest thing we have to a direct end-to-end
+confirmation, and it is also the cleanest evidence for the ``not just one
+trajectory'' clause: a single response peaks and is gone, while four hold.
+
+\subsection{What the retrieval is worth on the memorisable families}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+arm & Latin & product & retention & answer bits & walk support \\
+\midrule
+no superposition        & 0.5695 & 0.8273 & 0.4187 & 3.141 & 0.517 \\
+baseline                & 0.6090 & 0.8290 & 0.4405 & 3.060 & 0.546 \\
+banks $=1$              & 0.5679 & 0.8282 & 0.4464 & 3.051 & 0.540 \\
+banks $=65536$          & 0.6107 & 0.8290 & 0.4306 & 3.056 & 0.546 \\
+\midrule
+bind off \emph{(must collapse)} & 0.1809 & 0.7029 & 0.2996 & 4.577 & 0.219 \\
+\bottomrule
+\end{tabular}
+\caption{Single seed. Codelength is charged at the answer tick only. The
+single-cue baselines from Table~\ref{tab:source} are $0.20$ for the Latin family
+and $0.49$ for the product code, so both are answered well above a predictor
+that ignores half the challenge. The collapse arm holds, which is what makes the
+rest of the table readable at all.}
+\label{tab:endtoend}
+\end{table}
+
+\subsection{Competitive negatives}
+
+The largest single effect we measured was not a design choice but the repair of
+a defect, and it is worth reporting because it changed what the system could do
+at all. The delta rule drew its negatives uniformly from every known token.
+Discrimination on a Latin item rests entirely on pushing down the five rivals
+that share a square's six targets; each was drawn about 2.3\% of the time
+against a target appearing roughly eighteen times in a regime's life, so a rival
+received a negative gradient about $0.4$ times. The readout was never taught to
+separate the six and settled at $1/6$.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+negatives & Latin & product & one-shot composition & answer bits \\
+\midrule
+uniform, $k=16$ & 0.1448 & 0.6884 & 0.0150 & 6.249 \\
+uniform, $k=64$ & 0.2421 & 0.7612 & 0.0150 & 5.173 \\
+top-$k$, $k=16$ & \textbf{0.4529} & \textbf{0.8426} & \textbf{0.3308} & \textbf{3.970} \\
+top-$k$, $k=64$ & 0.4444 & 0.8426 & 0.3459 & 3.984 \\
+\bottomrule
+\end{tabular}
+\caption{Correcting what the model would actually have said, rather than random
+tokens \citep{mikolov2013distributed}. Raising the uniform count moves in the
+same direction and falls well short, which is the control saying this is about
+\emph{which} negatives and not how many. Composition goes from zero to a third:
+chaining two stored facts was not absent, it was unreachable.}
+\label{tab:negatives}
+\end{table}
+
+\subsection{Exposure, and what it says about any result of this kind}
+
+Every family in a source of this shape is presented as a pair and then asked
+again, so a lookup that memorises the pair scores the same as a mechanism that
+composes. The first exposure is the only column where they differ.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+family & 1st exposure & 2nd & 3rd & 4th+ \\
+\midrule
+Latin ($n=286$ firsts) & 0.000 & 0.03 & 0.33 & 0.87 \\
+product ($n=72$)       & 0.000 & 0.02 & 0.37 & 0.995 \\
+composition ($n=35$)   & 0.000 & 0.00 & 0.23 & 0.95 \\
+\bottomrule
+\end{tabular}
+\caption{Accuracy by how many times a fact had already been charged, measured
+under an earlier configuration. Every family is exactly zero the first time and
+near ceiling by the fourth. This is why the source was changed so that
+composition queries and withheld cells are asked \emph{once}, and why we treat
+any aggregate on a present--repeat--ask source with suspicion.}
+\label{tab:exposure}
+\end{table}
+
+Table~\ref{tab:exposure} also exposes a representational fact. A novel product
+pair scores $0.000$ where cue $A$ alone would give $0.5$: $E_a \bind E_b$ is a
+lookup key, not a decomposable representation, so an unseen combination is a
+fresh random vector uncorrelated with anything stored. We have the
+\emph{combine} half of distinguish-and-combine; the parts are not recoverable
+downstream by the learned readout. That is precisely the gap the unbinding half
+of \S\ref{sec:design} exists to close, and closing it is what moved composition
+from $0.015$ to $0.331$ in Table~\ref{tab:negatives}.
+
+\section{What this source cannot settle}
+\label{sec:cannot}
+
+Three components measure net-negative here: the ladder feedback of the model's
+own channels, the operator graph, and background depth beyond one rung. One
+mechanism explains all three, and the arms order monotonically by it --- and we
+rule on none of them, for a reason we consider more important than the numbers.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccccl}
+\toprule
+arm & Latin & retention & answer bits & walk $d{=}1$ & non-fact content in $\varphi$ \\
+\midrule
+all streams off & 0.6147 & 0.4802 & \textbf{2.943} & [.286 .222 .667 .200] & least \\
+baseline        & 0.6090 & 0.4405 & 3.060 & [.000 .111 .333 .000] & \\
+live bands      & 0.6123 & 0.4008 & 3.138 & [.000 .000 .333 .000] & $+$ a clock \\
+graph re-enabled& 0.5913 & \textbf{0.3413} & \textbf{3.428} & [.000 .000 .333 .000] & most \\
+\midrule
+rungs $=1$      & 0.5751 & \textbf{0.6111} & 3.359 & [.286 .000 .333 .200] & fewest bands \\
+rungs $=5$      & 0.5775 & 0.4702 & \textbf{2.948} & [.000 .222 .333 .200] & most bands \\
+\bottomrule
+\end{tabular}
+\caption{Single seed. Retention age-decay slopes: $-0.023$ at one rung against
+$-0.072$ at the baseline's three. Walk cells hold six to nine events each and
+are not a strong result.}
+\label{tab:cannot}
+\end{table}
+
+\paragraph{The hypothesis.} $\varphi$ is a fixed-width retrieval key. Anything
+added to it that is not a function of the fact being asked about adds variance
+without signal. On this source the answer to a Latin item is determined by its
+two cues, so what the model itself just said carries no information about it,
+while making $\varphi$ differ between two presentations of the same fact. The
+operator graph is near-random for the same reason its learning does nothing:
+each edge receives ten to forty rank-one updates against $4096$ parameters, and
+its drift grows as the square root of the update count, the signature of
+uncorrelated accumulation. Background bands are context, not fact.
+
+\paragraph{Why we do not rule.} Every one of these rests on the source's answers
+being determined by its cues --- the property of a constructed source most open
+to doubt. The hypothesis makes a sign-flip prediction: on a source where the
+answer is \emph{not} cue-determined and the model's own trajectory carries
+necessary information, the sign should reverse. The only family here with that
+property is the walk family, whose cells hold six to nine events.
+
+\paragraph{The three-stream requirement has two implementations with opposite
+signs, and must not be reported as one.} Ladder feedback carries no signal here
+and is net-negative. Cursor advance --- the model's own output as the position a
+chain has reached --- is load-bearing (Table~\ref{tab:cursor}). The founding
+requirement that input and output streams interleave as context is met by the
+second; the first is one way of writing it that happens to hurt here.
+
+\paragraph{A test we abandoned.} We proposed settling this by measuring the
+variance of $\varphi$ across repeated presentations of the same fact. It has
+almost no power: 2304 dimensions, four to nine presentations per fact, and a
+rank correlation between two noisy orderings. Two difference tests replace it
+--- excluding a component from $\varphi$ while leaving it in the dynamics, and
+substituting a noise block of matched width and variability --- but both belong
+on real data (\S\ref{sec:limits}) rather than on a source already known not to
+settle them.
+
+\section{Method: five failures of one shape}
+\label{sec:method}
+
+We report the failure pattern because it dominated the project's cost and
+because we expect it to generalise to any system of this kind.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{4.3cm}p{5.6cm}p{4.2cm}}
+\toprule
+symptom & cause & what found it \\
+\midrule
+self-stream ablation reads zero & feature blocks wider than rows; the three
+background bands were silently truncated & per-block alignment assertion \\
+near-miss curve flat & the write path was dead code; reads and writes landed on
+the same perturbed edge & call-graph grep \\
+every accuracy collapses & \texttt{bind\_decay} applied \emph{per tick}, leaving
+1.6\% of the binding by the time it was read & the mechanism's own off-control \\
+six arms bit-identical & the retrieval never reached the emission & the
+bit-identity itself \\
+cleanup succeeds 97.6\% and is always wrong & the threshold sat \emph{below} the
+codebook's noise floor ($0.25$ against $0.452$) & measuring four numbers
+directly \\
+\bottomrule
+\end{tabular}
+\caption{Each symptom reads as ``a mechanism measures inert''. Each cause is
+that the mechanism's product had no outlet, or was erased downstream.}
+\label{tab:failures}
+\end{table}
+
+The discipline this forces:
+
+\begin{enumerate}
+\item Any change on the path of a load-bearing mechanism gets that mechanism's
+off-control \emph{in the same sitting}. If the full arm and the off arm are
+close, stop.
+\item A terminal metric cannot debug a multi-step chain. An end-to-end zero has
+no power to say which of five steps broke: four-second unit tests found four
+errors where ten-minute end-to-end runs found none.
+\item Bit-identical arms are more alarming than bad numbers.
+\item Any hand-set constant must be back-solved from its own units. Three of our
+failures were constants that had never been checked against the scale they
+operate on.
+\item Suspect the data before the mechanism. The generator produced as many
+serious defects as the model, and each was first read as ``the mechanism does
+not work''.
+\end{enumerate}
+
+Performance work belongs in the same list, because in a design where computation
+is bought with the world's time it is not merely engineering. Replacing an
+address that regenerated 4096 random keys per call with pre-generated sign bits
+took one arm from over twenty-one minutes to $6$m$43$s; the $O(d^2)$ convolution
+became $O(d\log d)$, which is also what makes the unitary codebook affordable.
+
+\section{Limitations, and what a real evaluation requires}
+\label{sec:limits}
+
+\paragraph{A replayed stream cannot test a model for which time is a resource.}
+Our silences are drawn from $\{1,2,4,8\}$ --- authored, not observed. The model
+is never late: it receives exactly the ticks the file specifies regardless of
+how much computation it needed. There is no rate, and in a real continual
+setting the ratio between the world's event rate and the agent's compute rate is
+decisive. Replay can test mechanism; it cannot test the claim this architecture
+exists for, that computation and the world share a clock.
+
+\paragraph{The autoregressive baseline is the wrong yardstick, and the right
+lower bound.} We report PPM \citep{cleary1984data} not as a standard to beat ---
+that would be adopting the next-symbol objective as the measure --- but as a
+control that \emph{cannot accumulate}: a bounded window cannot carry anything
+across itself, so a sustained gap is evidence of accumulation. On charged
+events, order-4 PPM costs $11.80$ bits at accuracy $0.008$ and scores exactly
+$0.000$ on both conjunction families, against $9.17$ bits and $0.206$/$0.732$
+for the mechanism at the time of that comparison. The variant handed the
+segmentation the mechanism refuses to assume reaches $5.60$ bits, and losing to
+that is the comparison worth losing.
+
+\paragraph{Our source has no transferable structure.} Each regime carries its
+own square, its own entities, its own product code, and shares nothing with any
+other. Transfer is therefore impossible by construction, and an
+acquisition-acceleration measurement --- is the $n$-th regime learned faster
+than the first? --- is guaranteed flat. If a constructed source is retained, the
+one change worth making first is shared latent relations across regimes, because
+that is the minimum condition under which organisation has anything to organise.
+
+\paragraph{Attention is empty without laws.} Letting the model's state influence
+which of the concurrently live regimes speaks next --- $P \propto
+\exp(\beta\cdot\text{align})$, with $\beta=0$ recovering the present source
+exactly --- is only meaningful when the same regularity recurs across
+situations, so that attending here teaches you about there. The world's own
+progression must stay exogenous: things happen whether or not the agent attends.
+That single property is what stops the ledger from being gamed by an agent that
+finds a quiet corner, which is the failure mode of a fully closed loop
+\citep{friston2012free}. Real reactions are influenced by the individual without
+being generated by it.
+
+\paragraph{What would settle these questions.} Real language content carrying
+real, non-authored temporal structure: timestamped transcripts, subtitle
+streams, conversation logs --- data in which silences are real silences of real
+duration, and in which the two-people-talking picture is the data rather than an
+analogy. A tick then corresponds to a unit of real time, and the natural next
+step is to bind the compute budget to wall-clock, at which point depth-from-time
+becomes a genuine constraint and the efficiency of an implementation becomes
+part of its capability. This is the direction in which
+\citet{lecun2022path} and the embodied tradition \citep{brooks1991intelligence}
+both point, and it is where a system built on this footing should be judged.
+
+\paragraph{An explicit caution.} We do not know what these mechanisms do on real
+data, and we do not think it can be predicted from here. Intelligence is not a
+quantity our source is capable of putting under strain. The negative results of
+\S\ref{sec:cannot} are consistent with a plausible mechanism; they are not
+verdicts, and we have tried throughout to write them as what they are. Every
+result in this paper is single-seed unless stated, and the families that cannot
+be memorised carry sixty to ninety-six events in total.
+
+\section{Related positioning}
+
+Our store is a superposition read by correlation, in the holographic and vector
+symbolic tradition \citep{plate1995holographic,kanerva2009hyperdimensional},
+addressed the way sparse distributed memory addresses
+\citep{kanerva1988sparse}. Differentiable memories such as the Neural Turing
+Machine and its successors \citep{graves2014neural,graves2016hybrid} and modern
+associative-memory layers \citep{ramsauer2021hopfield} learn their addressing
+end-to-end; ours is fixed by construction, following the argument of
+\citet{yang_2026_22161096} that an address no later learning can move is what
+buys freedom from interference. Fast-weight schemes
+\citep{schmidhuber1992learning,ba2016using} write associations at inference
+time as we do, but within an autoregressive objective.
+
+The random-transform component of our graph turned out to behave as a random
+feature expansion \citep{rahimi2007random} with a linear readout, which is the
+regime reservoir computing occupies deliberately \citep{jaeger2001echo}; we
+report this as a negative structural finding rather than a design.
+
+The continual setting and its interference are the classical ones
+\citep{mccloskey1989catastrophic,french1999catastrophic,kirkpatrick2017overcoming},
+and the two-store intuition behind allocation is the complementary-systems one
+\citep{mcclelland1995complementary}. Our accounting is prequential
+\citep{dawid1984present,rissanen1978modeling,blier2018description}; our stance
+that compression and understanding are the same currency is the one argued at
+length by \citet{hutter2005universal}. What we do not take from the surrounding
+literature is the objective: there is no reward here
+\citep{sutton2018reinforcement}, and the founding position that intelligence
+emerges from the organisation of memory rather than from optimisation against a
+scalar is the one this system was built to take seriously
+\citep{hebb1949organization,tulving1972episodic}. That an autoregressive model
+with a long context can solve retrieval tasks of this shape by induction
+\citep{olsson2022context} is not in dispute; what it cannot do is spend a lull.
+
+\section{Conclusion}
+
+We built a challenge--response memory in which binding and unbinding are the two
+halves of one tick, selected by whether the world spoke, and in which several
+partial responses mature in parallel while the world is quiet. In isolation the
+mechanism does what the design says: one link per quiet tick, a halt at the end
+of a chain, surplus silence harmless. We derived the operating region of its
+store, found that binding is only invertible for unitary codebooks, and found
+that locality-sensitive addressing makes a near miss undetectable by
+construction --- so that half of the crowding penalty this family is known for
+was, in our implementation, self-inflicted.
+
+On a synthetic continual stream the retrieval occurs, holds, and requires
+several trajectories rather than one. Several components measure net-negative,
+with one mechanism that explains them; we rule on none of them, because the
+explanation rests on a property of the source rather than of the world, and
+because a replayed file cannot test a system for which time is a resource. What
+we claim is feasibility at this scale on this source, for a design that is
+non-autoregressive at its root, that treats precise context association as a
+non-goal, and that is aimed at stateful continual learning in a world that has a
+clock. Where it should actually be judged is on real language carrying real
+time, and we expect that judgement to be substantially harder than anything
+reported here.
+
+\subsection*{Reproducibility}
+
+The implementation is 8953 lines of Rust with no dependencies, deterministic
+under a counter-based generator with fixed-order float reductions, and carries
+20 structural assertions and 6 generator self-tests that run on every build.
+Two identical runs agree bit-for-bit. The structural constraints A1--A5 and the
+mechanism claims of \S\ref{sec:isolated} are each asserted by a named test.
+
+\begin{thebibliography}{99}
+
+\bibitem[Ba et al.(2016)]{ba2016using}
+J.~Ba, G.~E. Hinton, V.~Mnih, J.~Z. Leibo, and C.~Ionescu.
+\newblock Using fast weights to attend to the recent past.
+\newblock In \emph{NeurIPS}, 2016.
+
+\bibitem[Beltagy et al.(2020)]{beltagy2020longformer}
+I.~Beltagy, M.~E. Peters, and A.~Cohan.
+\newblock Longformer: The long-document transformer.
+\newblock \emph{arXiv:2004.05150}, 2020.
+
+\bibitem[Blier and Ollivier(2018)]{blier2018description}
+L.~Blier and Y.~Ollivier.
+\newblock The description length of deep learning models.
+\newblock In \emph{NeurIPS}, 2018.
+
+\bibitem[Borgeaud et al.(2022)]{borgeaud2022improving}
+S.~Borgeaud, A.~Mensch, J.~Hoffmann, et~al.
+\newblock Improving language models by retrieving from trillions of tokens.
+\newblock In \emph{ICML}, 2022.
+
+\bibitem[Brooks(1991)]{brooks1991intelligence}
+R.~A. Brooks.
+\newblock Intelligence without representation.
+\newblock \emph{Artificial Intelligence}, 47(1--3):139--159, 1991.
+
+\bibitem[Charikar(2002)]{charikar2002similarity}
+M.~S. Charikar.
+\newblock Similarity estimation techniques from rounding algorithms.
+\newblock In \emph{STOC}, 2002.
+
+\bibitem[Cleary and Witten(1984)]{cleary1984data}
+J.~G. Cleary and I.~H. Witten.
+\newblock Data compression using adaptive coding and partial string matching.
+\newblock \emph{IEEE Transactions on Communications}, 32(4):396--402, 1984.
+
+\bibitem[Dawid(1984)]{dawid1984present}
+A.~P. Dawid.
+\newblock Present position and potential developments: Some personal views.
+Statistical theory: The prequential approach.
+\newblock \emph{Journal of the Royal Statistical Society A}, 147(2):278--292,
+1984.
+
+\bibitem[Elman(1990)]{elman1990finding}
+J.~L. Elman.
+\newblock Finding structure in time.
+\newblock \emph{Cognitive Science}, 14(2):179--211, 1990.
+
+\bibitem[French(1999)]{french1999catastrophic}
+R.~M. French.
+\newblock Catastrophic forgetting in connectionist networks.
+\newblock \emph{Trends in Cognitive Sciences}, 3(4):128--135, 1999.
+
+\bibitem[Friston et al.(2012)]{friston2012free}
+K.~Friston, C.~Thornton, and A.~Clark.
+\newblock Free-energy minimization and the dark-room problem.
+\newblock \emph{Frontiers in Psychology}, 3:130, 2012.
+
+\bibitem[Gayler(2003)]{gayler2003vector}
+R.~W. Gayler.
+\newblock Vector symbolic architectures answer Jackendoff's challenges for
+cognitive neuroscience.
+\newblock In \emph{ICCS/ASCS}, 2003.
+
+\bibitem[Graves et al.(2014)]{graves2014neural}
+A.~Graves, G.~Wayne, and I.~Danihelka.
+\newblock Neural Turing machines.
+\newblock \emph{arXiv:1410.5401}, 2014.
+
+\bibitem[Graves et al.(2016)]{graves2016hybrid}
+A.~Graves, G.~Wayne, M.~Reynolds, et~al.
+\newblock Hybrid computing using a neural network with dynamic external memory.
+\newblock \emph{Nature}, 538:471--476, 2016.
+
+\bibitem[Hebb(1949)]{hebb1949organization}
+D.~O. Hebb.
+\newblock \emph{The Organization of Behavior}.
+\newblock Wiley, 1949.
+
+\bibitem[Hutter(2005)]{hutter2005universal}
+M.~Hutter.
+\newblock \emph{Universal Artificial Intelligence: Sequential Decisions Based on
+Algorithmic Probability}.
+\newblock Springer, 2005.
+
+\bibitem[Indyk and Motwani(1998)]{indyk1998approximate}
+P.~Indyk and R.~Motwani.
+\newblock Approximate nearest neighbors: Towards removing the curse of
+dimensionality.
+\newblock In \emph{STOC}, 1998.
+
+\bibitem[Jaeger(2001)]{jaeger2001echo}
+H.~Jaeger.
+\newblock The ``echo state'' approach to analysing and training recurrent neural
+networks.
+\newblock \emph{GMD Report 148}, German National Research Center for Information
+Technology, 2001.
+
+\bibitem[Kanerva(1988)]{kanerva1988sparse}
+P.~Kanerva.
+\newblock \emph{Sparse Distributed Memory}.
+\newblock MIT Press, 1988.
+
+\bibitem[Kanerva(2009)]{kanerva2009hyperdimensional}
+P.~Kanerva.
+\newblock Hyperdimensional computing: An introduction to computing in
+distributed representation with high-dimensional random vectors.
+\newblock \emph{Cognitive Computation}, 1(2):139--159, 2009.
+
+\bibitem[Kirkpatrick et al.(2017)]{kirkpatrick2017overcoming}
+J.~Kirkpatrick, R.~Pascanu, N.~Rabinowitz, et~al.
+\newblock Overcoming catastrophic forgetting in neural networks.
+\newblock \emph{PNAS}, 114(13):3521--3526, 2017.
+
+\bibitem[LeCun(2022)]{lecun2022path}
+Y.~LeCun.
+\newblock A path towards autonomous machine intelligence.
+\newblock \emph{OpenReview}, 2022.
+
+\bibitem[McClelland et al.(1995)]{mcclelland1995complementary}
+J.~L. McClelland, B.~L. McNaughton, and R.~C. O'Reilly.
+\newblock Why there are complementary learning systems in the hippocampus and
+neocortex.
+\newblock \emph{Psychological Review}, 102(3):419--457, 1995.
+
+\bibitem[McCloskey and Cohen(1989)]{mccloskey1989catastrophic}
+M.~McCloskey and N.~J. Cohen.
+\newblock Catastrophic interference in connectionist networks: The sequential
+learning problem.
+\newblock \emph{Psychology of Learning and Motivation}, 24:109--165, 1989.
+
+\bibitem[Mikolov et al.(2013)]{mikolov2013distributed}
+T.~Mikolov, I.~Sutskever, K.~Chen, G.~Corrado, and J.~Dean.
+\newblock Distributed representations of words and phrases and their
+compositionality.
+\newblock In \emph{NeurIPS}, 2013.
+
+\bibitem[Miller(1955)]{miller1955note}
+G.~A. Miller.
+\newblock Note on the bias of information estimates.
+\newblock In \emph{Information Theory in Psychology}, pages 95--100, 1955.
+
+\bibitem[Olsson et al.(2022)]{olsson2022context}
+C.~Olsson, N.~Elhage, N.~Nanda, et~al.
+\newblock In-context learning and induction heads.
+\newblock \emph{Transformer Circuits Thread}, 2022.
+
+\bibitem[Plate(1995)]{plate1995holographic}
+T.~A. Plate.
+\newblock Holographic reduced representations.
+\newblock \emph{IEEE Transactions on Neural Networks}, 6(3):623--641, 1995.
+
+\bibitem[Rahimi and Recht(2007)]{rahimi2007random}
+A.~Rahimi and B.~Recht.
+\newblock Random features for large-scale kernel machines.
+\newblock In \emph{NeurIPS}, 2007.
+
+\bibitem[Ramsauer et al.(2021)]{ramsauer2021hopfield}
+H.~Ramsauer, B.~Sch\"{a}fl, J.~Lehner, et~al.
+\newblock Hopfield networks is all you need.
+\newblock In \emph{ICLR}, 2021.
+
+\bibitem[Rissanen(1978)]{rissanen1978modeling}
+J.~Rissanen.
+\newblock Modeling by shortest data description.
+\newblock \emph{Automatica}, 14(5):465--471, 1978.
+
+\bibitem[Schmidhuber(1992)]{schmidhuber1992learning}
+J.~Schmidhuber.
+\newblock Learning to control fast-weight memories: An alternative to dynamic
+recurrent networks.
+\newblock \emph{Neural Computation}, 4(1):131--139, 1992.
+
+\bibitem[Sutton and Barto(2018)]{sutton2018reinforcement}
+R.~S. Sutton and A.~G. Barto.
+\newblock \emph{Reinforcement Learning: An Introduction}.
+\newblock MIT Press, 2nd edition, 2018.
+
+\bibitem[Tulving(1972)]{tulving1972episodic}
+E.~Tulving.
+\newblock Episodic and semantic memory.
+\newblock In \emph{Organization of Memory}, pages 381--403. Academic Press,
+1972.
+
+\bibitem[Vaswani et al.(2017)]{vaswani2017attention}
+A.~Vaswani, N.~Shazeer, N.~Parmar, et~al.
+\newblock Attention is all you need.
+\newblock In \emph{NeurIPS}, 2017.
+
+\bibitem[Watts and Strogatz(1998)]{watts1998collective}
+D.~J. Watts and S.~H. Strogatz.
+\newblock Collective dynamics of ``small-world'' networks.
+\newblock \emph{Nature}, 393:440--442, 1998.
+
+\bibitem[Widrow and Hoff(1960)]{widrow1960adaptive}
+B.~Widrow and M.~E. Hoff.
+\newblock Adaptive switching circuits.
+\newblock In \emph{IRE WESCON Convention Record}, pages 96--104, 1960.
+
+\bibitem[Yang(2026)]{yang_2026_22161096}
+X.~Yang.
+\newblock Trading interference for retrieval difficulty: A content-addressed
+continual memory with on-demand capacity.
+\newblock Zenodo, v1, 2026.
+\newblock DOI: \href{https://doi.org/10.5281/zenodo.22161096}{\texttt{10.5281/zenodo.22161096}}.
+
+\end{thebibliography}
+
+\end{document}
