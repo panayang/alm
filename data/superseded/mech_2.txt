@@ -1,0 +1,5 @@
+[mech] nodes=16 learned       Latin 0.193 (7.74 bits) | product 0.703 (2.57 bits) |              retention 0.149 | all-token 9.378 bits
+[mech] nodes=256 learned      Latin 0.215 (7.21 bits) | product 0.738 (2.48 bits) |              retention 0.175 | all-token 8.982 bits
+
+[mech] nodes=16 learned       Latin 0.193 (7.74 bits) | product 0.703 (2.57 bits) |              retention 0.149 | all-token 9.378 bits
+[mech] nodes=256 learned      Latin 0.215 (7.21 bits) | product 0.738 (2.48 bits) |              retention 0.175 | all-token 8.982 bits

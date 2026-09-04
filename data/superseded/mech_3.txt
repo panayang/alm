@@ -1,0 +1,5 @@
+[mech] nodes=16 FROZEN        Latin 0.185 (7.77 bits) | product 0.675 (2.63 bits) |              retention 0.167 | all-token 9.543 bits
+[mech] nodes=256 FROZEN       Latin 0.215 (7.29 bits) | product 0.743 (2.46 bits) |              retention 0.165 | all-token 9.068 bits
+
+[mech] nodes=16 FROZEN        Latin 0.185 (7.77 bits) | product 0.675 (2.63 bits) |              retention 0.167 | all-token 9.543 bits
+[mech] nodes=256 FROZEN       Latin 0.215 (7.29 bits) | product 0.743 (2.46 bits) |              retention 0.165 | all-token 9.068 bits

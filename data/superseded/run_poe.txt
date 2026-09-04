@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe full --ticks 600000 --out results.csv`
+building stream: 600000 ticks
+-- generator report ------------------------------------------
+  ticks                600000
+  baseline fraction    0.881
+  episodes             26445  (second order 7357)
+  distinct tokens      1944
+  unconditional        I(T;A) 3.023  I(T;B) 3.082  I(T;A,B) 5.561  bits
+  within regime        I(T;A|D) 0.045  I(T;B|D) 0.104  I(T;A,B|D) 2.583  bits
+  conjunctive gain     2.434 bits  (within regime, Miller-Madow              corrected, 230 items per regime)
+  product code         I(T;A|D) 1.560  I(T;B|D) 1.001  I(T;A,B|D) 2.560  bits over 7359 items
+  product consistency  1.0000  (cells mapping to a single target)
+  separations          1:2151 2:2105 4:2106 8:2118 16:2067 32:2109 64:2060 
+  zipf exponent        1.281
+  heaps exponent       0.478  (reported, not asserted)
+  segmentation purity  0.760
+  composition          support 3025  query 786  leaked 0
+error: process didn't exit successfully: `target\release\alm.exe full --ticks 600000 --out results.csv` (exit code: 1)

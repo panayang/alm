@@ -1,0 +1,5 @@
+[freeze2] n=64 gap-walk learned      Latin 0.2343 | product 0.7413 | retention 0.1806 |              answer 6.0338 bits | consistency 0.201/11.0n | drift 0.6512 share 0.062
+[freeze2] n=256 gap-walk learned     Latin 0.2379 | product 0.7511 | retention 0.1726 |              answer 5.9549 bits | consistency 0.128/14.9n | drift 0.3165 share 0.059
+
+[freeze2] n=64 gap-walk learned      Latin 0.2343 | product 0.7413 | retention 0.1806 |              answer 6.0338 bits | consistency 0.201/11.0n | drift 0.6512 share 0.062
+[freeze2] n=256 gap-walk learned     Latin 0.2379 | product 0.7511 | retention 0.1726 |              answer 5.9549 bits | consistency 0.128/14.9n | drift 0.3165 share 0.059

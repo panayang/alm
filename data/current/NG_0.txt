@@ -1,0 +1,3 @@
+[neg] uniform k=16   Latin 0.1448 | product 0.6884 | retention 0.2163 | answer 6.2486 bits | comp-query 0.0150 (14.95b, n=133) | comp-support 0.1394 (n=531)
+
+[neg] uniform k=16   Latin 0.1448 | product 0.6884 | retention 0.2163 | answer 6.2486 bits | comp-query 0.0150 (14.95b, n=133) | comp-support 0.1394 (n=531)

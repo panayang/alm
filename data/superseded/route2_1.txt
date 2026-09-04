@@ -1,0 +1,7 @@
+[route] n=64 q=state RANDOM      consistency latin 0.213/7.5n product 0.167/12.0n |              Latin 0.219 (7.33b) | product 0.723 (2.46b) | retention 0.175 |              answer 6.121 bits over 3973 events
+[route] n=64 q=state+ENTRY RANDOM consistency latin 0.213/7.5n product 0.167/12.0n |              Latin 0.219 (7.33b) | product 0.723 (2.46b) | retention 0.175 |              answer 6.121 bits over 3973 events
+[route] n=256 q=bound RANDOM     consistency latin 0.182/7.8n product 0.127/15.0n |              Latin 0.223 (7.19b) | product 0.731 (2.47b) | retention 0.163 |              answer 6.035 bits over 3973 events
+
+[route] n=64 q=state RANDOM      consistency latin 0.213/7.5n product 0.167/12.0n |              Latin 0.219 (7.33b) | product 0.723 (2.46b) | retention 0.175 |              answer 6.121 bits over 3973 events
+[route] n=64 q=state+ENTRY RANDOM consistency latin 0.213/7.5n product 0.167/12.0n |              Latin 0.219 (7.33b) | product 0.723 (2.46b) | retention 0.175 |              answer 6.121 bits over 3973 events
+[route] n=256 q=bound RANDOM     consistency latin 0.182/7.8n product 0.127/15.0n |              Latin 0.223 (7.19b) | product 0.731 (2.47b) | retention 0.163 |              answer 6.035 bits over 3973 events

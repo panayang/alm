@@ -1,0 +1,7 @@
+[mech] nodes=1 FROZEN         Latin 0.039 (9.70 bits) | product 0.254 (4.94 bits) |              retention 0.077 | all-token 10.626 bits
+[mech] nodes=64 FROZEN        Latin 0.197 (7.40 bits) | product 0.715 (2.45 bits) |              retention 0.163 | all-token 9.099 bits
+[mech] nodes=64 route RANDOM  Latin 0.219 (7.33 bits) | product 0.723 (2.46 bits) |              retention 0.175 | all-token 9.024 bits
+
+[mech] nodes=1 FROZEN         Latin 0.039 (9.70 bits) | product 0.254 (4.94 bits) |              retention 0.077 | all-token 10.626 bits
+[mech] nodes=64 FROZEN        Latin 0.197 (7.40 bits) | product 0.715 (2.45 bits) |              retention 0.163 | all-token 9.099 bits
+[mech] nodes=64 route RANDOM  Latin 0.219 (7.33 bits) | product 0.723 (2.46 bits) |              retention 0.175 | all-token 9.024 bits

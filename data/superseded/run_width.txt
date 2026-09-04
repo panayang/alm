@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe width --ticks 90000`
+[width] domains=12  nodes=64   d=64   9.060 bits/ev | Latin 0.209 |                  product 0.737 | retention 0.155 | readout 0.39M | operator 1.02M
+[width] domains=12  nodes=64   d=128  8.528 bits/ev | Latin 0.245 |                  product 0.760 | retention 0.177 | readout 0.79M | operator 4.10M
+[width] domains=36  nodes=16   d=128  8.993 bits/ev | Latin 0.085 |                  product 0.335 | retention 0.082 | readout 2.36M | operator 0.97M
+[width] domains=36  nodes=64   d=128  8.939 bits/ev | Latin 0.104 |                  product 0.360 | retention 0.082 | readout 2.36M | operator 4.10M
+
+[width] domains=12  nodes=64   d=64   9.060 bits/ev | Latin 0.209 |                  product 0.737 | retention 0.155 | readout 0.39M | operator 1.02M
+[width] domains=12  nodes=64   d=128  8.528 bits/ev | Latin 0.245 |                  product 0.760 | retention 0.177 | readout 0.79M | operator 4.10M
+[width] domains=36  nodes=16   d=128  8.993 bits/ev | Latin 0.085 |                  product 0.335 | retention 0.082 | readout 2.36M | operator 0.97M
+[width] domains=36  nodes=64   d=128  8.939 bits/ev | Latin 0.104 |                  product 0.360 | retention 0.082 | readout 2.36M | operator 4.10M

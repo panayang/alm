@@ -1,3 +1,16 @@
+# Build
 /target
-results*.csv
-run_*.txt
+*.exe
+*.pdb
+
+# LaTeX intermediates (paper.pdf is committed as the deliverable)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# The reference preprint is separate work and lives in its own repository.
+main.tex

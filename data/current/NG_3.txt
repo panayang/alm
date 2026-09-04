@@ -1,0 +1,3 @@
+[neg] TOP k=64       Latin 0.4444 | product 0.8426 | retention 0.3234 | answer 3.9839 bits | comp-query 0.3459 (6.47b, n=133) | comp-support 0.5499 (n=531)
+
+[neg] TOP k=64       Latin 0.4444 | product 0.8426 | retention 0.3234 | answer 3.9839 bits | comp-query 0.3459 (6.47b, n=133) | comp-support 0.5499 (n=531)

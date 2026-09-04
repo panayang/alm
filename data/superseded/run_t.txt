@@ -1,0 +1,23 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe screen --ticks 100000`
+screening stream: 100000 ticks
+-- generator report ------------------------------------------
+  ticks                100000
+  baseline fraction    0.880
+  episodes             4428  (second order 1232)
+  distinct tokens      1508
+  unconditional        I(T;A) 4.813  I(T;B) 4.848  I(T;A,B) 7.174  bits
+  within regime        I(T;A|D) 0.218  I(T;B|D) 0.253  I(T;A,B|D) 2.579  bits
+  conjunctive gain     2.108 bits  (within regime, Miller-Madow              corrected, 49 items per regime)
+  product code         I(T;A|D) 1.550  I(T;B|D) 1.003  I(T;A,B|D) 2.544  bits over 1234 items
+  product consistency  1.0000  (cells mapping to a single target)
+  separations          1:365 2:354 4:374 8:344 16:335 32:356 64:338 
+  zipf exponent        0.689
+  heaps exponent       0.939  (reported, not asserted)
+  segmentation purity  0.763
+  composition          support 502  query 124  leaked 0
+
+thread 'main' (18632) panicked at src\gencheck.rs:452:9:
+only 49 second-order items per regime against 36 cells: the              conjunction estimate is sample-limited and asserting on it would              be asserting on the sample size, not on the source
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: process didn't exit successfully: `target\release\alm.exe screen --ticks 100000` (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)

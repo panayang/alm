@@ -1,0 +1,5 @@
+[freeze2] n=64 no-gap learned        Latin 0.2460 | product 0.7351 | retention 0.1865 |              answer 5.7629 bits | consistency 0.236/9.1n | drift 0.6481 share 0.063
+[freeze2] n=256 no-gap learned       Latin 0.2442 | product 0.7449 | retention 0.1825 |              answer 5.7441 bits | consistency 0.216/11.5n | drift 0.3077 share 0.060
+
+[freeze2] n=64 no-gap learned        Latin 0.2460 | product 0.7351 | retention 0.1865 |              answer 5.7629 bits | consistency 0.236/9.1n | drift 0.6481 share 0.063
+[freeze2] n=256 no-gap learned       Latin 0.2442 | product 0.7449 | retention 0.1825 |              answer 5.7441 bits | consistency 0.216/11.5n | drift 0.3077 share 0.060

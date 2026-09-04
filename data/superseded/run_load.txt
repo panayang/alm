@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe load --ticks 90000`
+[load] domains=12  ticks=90000   nodes=1    10.587 bits/ev |                  Latin 0.048 | product 0.309 | retention 0.071 | 685 rows
+[load] domains=12  ticks=90000   nodes=16   9.378 bits/ev |                  Latin 0.193 | product 0.703 | retention 0.149 | 685 rows
+[load] domains=12  ticks=90000   nodes=64   9.060 bits/ev |                  Latin 0.209 | product 0.737 | retention 0.155 | 685 rows
+[load] domains=12  ticks=90000   nodes=256  8.982 bits/ev |                  Latin 0.215 | product 0.738 | retention 0.175 | 685 rows
+[load] domains=36  ticks=270000  nodes=1    9.471 bits/ev |                  Latin 0.010 | product 0.131 | retention 0.037 | 2045 rows
+[load] domains=36  ticks=270000  nodes=16   9.368 bits/ev |                  Latin 0.061 | product 0.298 | retention 0.071 | 2045 rows
+[load] domains=36  ticks=270000  nodes=64   9.272 bits/ev |                  Latin 0.072 | product 0.316 | retention 0.073 | 2045 rows
+[load] domains=36  ticks=270000  nodes=256  9.256 bits/ev |                  Latin 0.077 | product 0.327 | retention 0.078 | 2045 rows
+
+[load] domains=12  ticks=90000   nodes=1    10.587 bits/ev |                  Latin 0.048 | product 0.309 | retention 0.071 | 685 rows
+[load] domains=12  ticks=90000   nodes=16   9.378 bits/ev |                  Latin 0.193 | product 0.703 | retention 0.149 | 685 rows
+[load] domains=12  ticks=90000   nodes=64   9.060 bits/ev |                  Latin 0.209 | product 0.737 | retention 0.155 | 685 rows
+[load] domains=12  ticks=90000   nodes=256  8.982 bits/ev |                  Latin 0.215 | product 0.738 | retention 0.175 | 685 rows
+[load] domains=36  ticks=270000  nodes=1    9.471 bits/ev |                  Latin 0.010 | product 0.131 | retention 0.037 | 2045 rows
+[load] domains=36  ticks=270000  nodes=16   9.368 bits/ev |                  Latin 0.061 | product 0.298 | retention 0.071 | 2045 rows
+[load] domains=36  ticks=270000  nodes=64   9.272 bits/ev |                  Latin 0.072 | product 0.316 | retention 0.073 | 2045 rows
+[load] domains=36  ticks=270000  nodes=256  9.256 bits/ev |                  Latin 0.077 | product 0.327 | retention 0.078 | 2045 rows

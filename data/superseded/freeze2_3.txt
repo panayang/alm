@@ -1,0 +1,5 @@
+[freeze2] n=64 no-gap FROZEN         Latin 0.2424 | product 0.7315 | retention 0.1825 |              answer 5.7915 bits | consistency 0.241/9.2n | drift 0.0000 share 0.058
+[freeze2] n=256 no-gap FROZEN        Latin 0.2442 | product 0.7422 | retention 0.1746 |              answer 5.7607 bits | consistency 0.208/11.8n | drift 0.0000 share 0.058
+
+[freeze2] n=64 no-gap FROZEN         Latin 0.2424 | product 0.7315 | retention 0.1825 |              answer 5.7915 bits | consistency 0.241/9.2n | drift 0.0000 share 0.058
+[freeze2] n=256 no-gap FROZEN        Latin 0.2442 | product 0.7422 | retention 0.1746 |              answer 5.7607 bits | consistency 0.208/11.8n | drift 0.0000 share 0.058

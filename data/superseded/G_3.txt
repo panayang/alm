@@ -1,0 +1,9 @@
+[grid] n=64 gap RAND FROZEN         Latin 0.6790 | product 0.9223 | retention 0.2820 |                  answer 2.1189 bits | consist 0.067/21.2n | comp-query 0.6585 (3.49b, n=287) | comp-support 0.7740 (n=1053)
+[grid] n=64 nogap RAND FROZEN       Latin 0.6855 | product 0.9239 | retention 0.2994 |                  answer 2.0762 bits | consist 0.067/21.2n | comp-query 0.6760 (3.35b, n=287) | comp-support 0.7825 (n=1053)
+[grid] n=256 gap RAND FROZEN        Latin 0.6821 | product 0.9223 | retention 0.2829 |                  answer 2.1225 bits | consist 0.041/36.2n | comp-query 0.6376 (3.49b, n=287) | comp-support 0.7721 (n=1053)
+[grid] n=256 nogap RAND FROZEN      Latin 0.6870 | product 0.9243 | retention 0.2984 |                  answer 2.0684 bits | consist 0.041/36.2n | comp-query 0.6516 (3.40b, n=287) | comp-support 0.7844 (n=1053)
+
+[grid] n=64 gap RAND FROZEN         Latin 0.6790 | product 0.9223 | retention 0.2820 |                  answer 2.1189 bits | consist 0.067/21.2n | comp-query 0.6585 (3.49b, n=287) | comp-support 0.7740 (n=1053)
+[grid] n=64 nogap RAND FROZEN       Latin 0.6855 | product 0.9239 | retention 0.2994 |                  answer 2.0762 bits | consist 0.067/21.2n | comp-query 0.6760 (3.35b, n=287) | comp-support 0.7825 (n=1053)
+[grid] n=256 gap RAND FROZEN        Latin 0.6821 | product 0.9223 | retention 0.2829 |                  answer 2.1225 bits | consist 0.041/36.2n | comp-query 0.6376 (3.49b, n=287) | comp-support 0.7721 (n=1053)
+[grid] n=256 nogap RAND FROZEN      Latin 0.6870 | product 0.9243 | retention 0.2984 |                  answer 2.0684 bits | consist 0.041/36.2n | comp-query 0.6516 (3.40b, n=287) | comp-support 0.7844 (n=1053)

@@ -1,0 +1,41 @@
+warning: field `hops` is never read
+  --> src\descent.rs:89:5
+   |
+72 | pub struct Swarm {
+   |            ----- field in this struct
+...
+89 |     hops: usize,
+   |     ^^^^
+   |
+   = note: `Swarm` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `alm` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe retest --ticks 90000`
+-- generator report ------------------------------------------
+  ticks                90000
+  baseline fraction    0.881
+  episodes             3973  (second order 1114)
+  distinct tokens      685
+  unconditional        I(T;A) 2.786  I(T;B) 2.848  I(T;A,B) 5.237  bits
+  within regime        I(T;A|D) 0.120  I(T;B|D) 0.182  I(T;A,B|D) 2.572  bits
+  conjunctive gain     2.269 bits  (within regime, Miller-Madow              corrected, 93 items per regime)
+  product code         I(T;A|D) 1.558  I(T;B|D) 1.003  I(T;A,B|D) 2.549  bits over 1121 items
+  product consistency  1.0000  (cells mapping to a single target)
+  separations          1:331 2:329 4:329 8:313 16:302 32:328 64:303 
+  zipf exponent        1.202
+  heaps exponent       0.480  (reported, not asserted)
+  segmentation purity  0.761
+  composition          support 450  query 110  leaked 0
+[retest] flat L=1   7.171 bits/ev | Latin 0.364 | product 0.718 |              retention 0.155 | depth 1 | 8 leaves
+[retest] rungs=2    8.871 bits/ev | Latin 0.180 | product 0.384 |              retention 0.087 | depth 2 | 62 leaves
+[retest] rungs=3    9.491 bits/ev | Latin 0.171 | product 0.393 |              retention 0.056 | depth 3 | 86 leaves
+[retest] rungs=6    10.948 bits/ev | Latin 0.131 | product 0.219 |              retention 0.052 | depth 5 | 85 leaves
+[verdict] depth 2->6 with a fresh query: Latin 0.180->0.131,              product 0.384->0.219, retention 0.087->0.052 -- depth STILL costs; the original kill was justified
+
+[retest] flat L=1   7.171 bits/ev | Latin 0.364 | product 0.718 |              retention 0.155 | depth 1 | 8 leaves
+[retest] rungs=2    8.871 bits/ev | Latin 0.180 | product 0.384 |              retention 0.087 | depth 2 | 62 leaves
+[retest] rungs=3    9.491 bits/ev | Latin 0.171 | product 0.393 |              retention 0.056 | depth 3 | 86 leaves
+[retest] rungs=6    10.948 bits/ev | Latin 0.131 | product 0.219 |              retention 0.052 | depth 5 | 85 leaves
+[verdict] depth 2->6 with a fresh query: Latin 0.180->0.131,              product 0.384->0.219, retention 0.087->0.052 -- depth STILL costs; the original kill was justified

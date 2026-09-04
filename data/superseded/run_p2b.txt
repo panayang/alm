@@ -1,0 +1,131 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe quick --ticks 120000`
+building stream: 120000 ticks
+-- generator report ------------------------------------------
+  ticks                120000
+  baseline fraction    0.881
+  episodes             5304  (second order 1506)
+  distinct tokens      558
+  unconditional        I(T;A) 2.662  I(T;B) 2.715  I(T;A,B) 5.157  bits
+  within regime        I(T;A|D) 0.079  I(T;B|D) 0.132  I(T;A,B|D) 2.574  bits
+  conjunctive gain     2.363 bits  (within regime)
+  product code         I(T;A|D) 1.550  I(T;B|D) 0.995  I(T;A,B|D) 2.539  bits over 1450 items
+  product consistency  1.0000  (cells mapping to a single target)
+  separations          1:429 2:419 4:440 8:426 16:411 32:424 64:407 
+  zipf exponent        0.957
+  heaps exponent       0.232  (reported, not asserted)
+  segmentation purity  0.761
+  composition          support 602  query 151  leaked 0
+[sanity] L=1  7.307 bits/ev  top-1 0.251  Latin 6.710/0.344  product 4.025/0.799  (9 nodes, depth 1)
+== full ==========================================
+  charged events 14318   bits/event 8.279   top-1 0.123
+  evidence vs PPM: ours ahead by 45056 bits total; anytime-valid p <= 2.23e-308
+  onsets: idea at t+1.62 on 3093 events, speech at t+3.14 on 725
+  tree: 176 nodes, depth 3, 114 leaves, 8914 occupied rows  (widen 113, deepen 61)
+  particles: resamples 2557, backtracks 141460, commits 123799 (8.65/event), mean depth 3.00, root spread 0.12
+  -- ticks to mature, by level L1:2.97 L2:2.87 L3:2.12  (cap 5; flat at the cap means the maturity rule is inert)
+  -- sharpening (entropy bits by ticks since event)
+     t+0   n=900     H=8.544 +/- 0.015
+     t+1   n=831     H=8.519 +/- 0.016
+     t+2   n=850     H=8.491 +/- 0.015
+     t+3   n=772     H=8.491 +/- 0.012
+     t+4   n=804     H=8.483 +/- 0.014
+     t+5   n=445     H=8.447 +/- 0.022
+     t+6   n=468     H=8.448 +/- 0.021
+     t+7   n=112     H=8.479 +/- 0.037
+     t+8   n=114     H=8.479 +/- 0.028
+     t+9   n=59      H=8.489 +/- 0.058
+     t+10  n=67      H=8.495 +/- 0.030
+     t+11  n=67      H=8.499 +/- 0.024
+     t+12  n=68      H=8.494 +/- 0.050
+     t+13  n=76      H=8.477 +/- 0.034
+     t+14  n=67      H=8.509 +/- 0.030
+     t+15  n=84      H=8.272 +/- 0.093
+     t+16  n=71      H=8.511 +/- 0.019
+     t+17  n=57      H=8.512 +/- 0.033
+     t+18  n=55      H=8.290 +/- 0.106
+     t+19  n=66      H=8.520 +/- 0.022
+     t+20  n=48      H=8.436 +/- 0.063
+     t+21  n=57      H=8.520 +/- 0.019
+     t+22  n=73      H=8.426 +/- 0.057
+     t+23  n=1289    H=8.435 +/- 0.015
+  -- second-order window (by cue separation; within-regime chance is 1/square_m)
+     sep=1    n=208    bits=8.177 acc=0.106
+     sep=2    n=221    bits=7.995 acc=0.090
+     sep=4    n=229    bits=8.144 acc=0.087
+     sep=8    n=220    bits=8.024 acc=0.150
+     sep=16   n=208    bits=8.042 acc=0.139
+     sep=32   n=223    bits=7.995 acc=0.188
+     sep=64   n=197    bits=8.219 acc=0.132
+  -- product-code window (separable control)
+     sep=1    n=221    bits=7.044 acc=0.471
+     sep=2    n=198    bits=7.359 acc=0.399
+     sep=4    n=211    bits=7.379 acc=0.427
+     sep=8    n=206    bits=7.309 acc=0.432
+     sep=16   n=203    bits=7.162 acc=0.483
+     sep=32   n=201    bits=7.242 acc=0.458
+     sep=64   n=210    bits=7.268 acc=0.410
+  -- first-order gap curve
+     gap=6    n=1595   bits=10.010 acc=0.152
+  -- per-level calibration
+     level 1  n=1938    ECE=0.459  commit threshold 0.70
+     level 2  n=5385    ECE=0.251  commit threshold 0.95
+     level 3  n=4141    ECE=0.353  commit threshold 0.95
+  -- self-poisoning (by fraction of recent ticks spoken)
+     self 0.0-0.2  n=12687  bits=8.280 acc=0.121
+     self 0.2-0.4  n=934    bits=8.107 acc=0.137
+     self 0.4-0.6  n=458    bits=8.321 acc=0.144
+     self 0.6-0.8  n=144    bits=9.163 acc=0.111
+     self 0.8-1.0  n=95     bits=8.279 acc=0.189
+  -- decomposition by distance since baseline
+     d=0   n=754     bits=8.252 acc=0.045
+     d=1   n=429     bits=7.272 acc=0.154
+     d=2   n=419     bits=7.338 acc=0.143
+     d=4   n=5744    bits=8.440 acc=0.039
+     d=6   n=5304    bits=8.569 acc=0.215
+     d=7   n=1668    bits=7.311 acc=0.144
+  -- composition: support n=602 bits=9.026 | query n=151 bits=9.050
+  -- diagnostics: overt 0.081 of ticks, band corr(0,1)=0.075 corr(0,2)=-0.084
+  -- rung visits r0:9003 r1:13670 r2:14318  (coverage 1.00; a rung with no visits is a band the model does not have)
+  -- leaf surprise mean 8.70 bits over 14318 writes  (a split threshold below this range makes every node split always)
+  -- leaf purity by regime 0.637  (chance 0.167, over 167 leaves that took writes)
+  -- leaf purity by cue pair 0.195  (chance about 0.083: 12.0 distinct pairs per leaf)
+[sharpening] H(t+0) 8.544 -> H(t+23) 8.435, drop 0.109 bits
+[window] rungs=2 plateau 7 | 8.171 bits/ev | depth 2 | rung coverage 1.00 | Latin 8.003/0.178 | product 7.061/0.497
+[window] rungs=3 plateau 7 | 8.279 bits/ev | depth 3 | rung coverage 1.00 | Latin 8.083/0.127 | product 7.250/0.440
+[window] rungs=4 plateau 7 | 8.359 bits/ev | depth 4 | rung coverage 1.00 | Latin 8.181/0.080 | product 7.611/0.297
+[window] rungs=6 plateau 7 | 8.235 bits/ev | depth 6 | rung coverage 0.83 | Latin 8.030/0.084 | product 7.540/0.275
+[conjunction] Latin (not linearly representable) 8.083 bits acc 0.127 | product (representable) 7.250 bits acc 0.440
+[split] dispersion     8.279 bits/ev | regime 0.637 | pair 0.195 | Latin 8.083/0.127 | product 7.250/0.440 | 114 leaves
+[split] surprise@4b    8.412 bits/ev | regime 0.236 | pair 0.063 | Latin 8.068/0.224 | product 5.736/0.646 | 8 leaves
+[split] surprise@8b    8.412 bits/ev | regime 0.236 | pair 0.063 | Latin 8.068/0.224 | product 5.736/0.646 | 8 leaves
+[split] surprise@12b   6.307 bits/ev | regime 0.189 | pair 0.025 | Latin 4.530/0.471 | product 1.186/0.934 | 1 leaves
+[split] surprise@16b   6.307 bits/ev | regime 0.189 | pair 0.025 | Latin 4.530/0.471 | product 1.186/0.934 | 1 leaves
+[split] hybrid@8b      8.129 bits/ev | regime 0.620 | pair 0.122 | Latin 7.942/0.171 | product 6.667/0.494 | 44 leaves
+[split] hybrid@12b     7.493 bits/ev | regime 0.624 | pair 0.090 | Latin 6.997/0.271 | product 4.712/0.668 | 9 leaves
+[bind] off        8.428 bits/ev | Latin 8.219/0.060 | product 8.040/0.188 | Latin by sep 1:0.058 2:0.050 4:0.052 8:0.055 16:0.067 32:0.076 64:0.066
+[bind] event-lag  8.382 bits/ev | Latin 8.172/0.128 | product 7.744/0.469 | Latin by sep 1:0.072 2:0.131 4:0.092 8:0.168 16:0.106 32:0.179 64:0.147
+[bind] band       8.320 bits/ev | Latin 8.135/0.094 | product 7.547/0.330 | Latin by sep 1:0.077 2:0.072 4:0.083 8:0.109 16:0.115 32:0.108 64:0.091
+[bind] both       8.279 bits/ev | Latin 8.083/0.127 | product 7.250/0.440 | Latin by sep 1:0.106 2:0.090 4:0.087 8:0.150 16:0.139 32:0.188 64:0.132
+[poisoning] both on 8.279 | inner speech off 8.272 | spoken off 8.277 bits/ev; self writes rung 0, descent reaches rung 0 -- channel live
+[chain] w_init 0.05  8.105 bits/event, Latin 7.922/0.108, product 6.637/0.474
+[chain] w_init 0.5   8.266 bits/event, Latin 8.123/0.114, product 7.089/0.434
+[chain] w_init 1.5   8.279 bits/event, Latin 8.083/0.127, product 7.250/0.440
+[chain] w_init 3     8.313 bits/event, Latin 8.088/0.131, product 7.449/0.387
+[commit] locking on: 8.333 bits/ev | Latin 8.159/0.038 | product 7.396/0.319 | 1845 commitments, 12473 silent | speech onset t+3.01 on 709
+[commit] locking off (bits NOT comparable): 8.279 bits/ev | Latin 8.083/0.127 | product 7.250/0.440 | speech onset t+3.14 on 725
+[ablation] no readout     8.423 bits/ev | Latin 8.221/0.009 | product 8.051/0.085 | pair purity 0.194
+[ablation] no gap credit  8.291 bits/ev | Latin 8.079/0.147 | product 7.318/0.423 | pair purity 0.197
+[ablation] one particle   8.264 bits/ev | Latin 8.063/0.130 | product 7.114/0.454 | pair purity 0.200
+[baseline] PPM-C order 4, same stream (silence is a symbol): 1.519 bits/event, top-1 0.879, second-order 11.256 bits
+[baseline] PPM-C order 4, silence removed (UPPER BOUND, it is handed the segmentation): 4.929 bits/event, second-order 1.844 bits
+[verdict]  Latin items: ours 8.083 bits vs like-for-like PPM 11.256 bits  (ahead)
+[evidence] ours ahead by 45056 bits total; anytime-valid p <= 2.23e-308
+[onsets]   idea at t+1.62 (3093 events), speech at t+3.14 (725)
+[address]  regime purity 0.637 (chance 0.167) | cue-pair purity 0.195 (chance 0.083); tree 176 nodes, depth 3, 114 leaves
+[diagnosis] the square is additive modulo m, so the target is not a linear function of the superposed cue embeddings; a linear readout cannot represent it and the only route is for the address to isolate the pair. Read the two purities above in that order.
+
+thread 'main' (14508) panicked at src\gencheck.rs:438:9:
+product cells are not single-valued (0.1807); the item type is not a product code and its separability cannot be claimed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: process didn't exit successfully: `target\release\alm.exe quick --ticks 120000` (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)

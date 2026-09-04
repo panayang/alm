@@ -1,0 +1,17 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe scale --ticks 90000`
+[scale] nodes=1        10.587 bits/ev | Latin 0.048 | product 0.309 |              retention 0.071 | 2 edges | readout 0.39M | operator 0.01M |              total 0.40M
+[scale] nodes=4        10.036 bits/ev | Latin 0.124 | product 0.580 |              retention 0.137 | 9 edges | readout 0.39M | operator 0.04M |              total 0.43M
+[scale] nodes=16       9.378 bits/ev | Latin 0.193 | product 0.703 |              retention 0.149 | 59 edges | readout 0.39M | operator 0.24M |              total 0.64M
+[scale] nodes=64       9.060 bits/ev | Latin 0.209 | product 0.737 |              retention 0.155 | 250 edges | readout 0.39M | operator 1.02M |              total 1.42M
+[scale] nodes=256      8.982 bits/ev | Latin 0.215 | product 0.738 |              retention 0.175 | 1018 edges | readout 0.39M | operator 4.17M |              total 4.56M
+[scale] nodes=1 d=128  10.371 bits/ev | Latin 0.051 | product 0.351 |              retention 0.081 | 2 edges | readout 0.79M | operator 0.03M |              total 0.82M
+[scale] nodes=1 d=256  10.349 bits/ev | Latin 0.049 | product 0.343 |              retention 0.081 | 2 edges | readout 1.58M | operator 0.13M |              total 1.71M
+
+[scale] nodes=1        10.587 bits/ev | Latin 0.048 | product 0.309 |              retention 0.071 | 2 edges | readout 0.39M | operator 0.01M |              total 0.40M
+[scale] nodes=4        10.036 bits/ev | Latin 0.124 | product 0.580 |              retention 0.137 | 9 edges | readout 0.39M | operator 0.04M |              total 0.43M
+[scale] nodes=16       9.378 bits/ev | Latin 0.193 | product 0.703 |              retention 0.149 | 59 edges | readout 0.39M | operator 0.24M |              total 0.64M
+[scale] nodes=64       9.060 bits/ev | Latin 0.209 | product 0.737 |              retention 0.155 | 250 edges | readout 0.39M | operator 1.02M |              total 1.42M
+[scale] nodes=256      8.982 bits/ev | Latin 0.215 | product 0.738 |              retention 0.175 | 1018 edges | readout 0.39M | operator 4.17M |              total 4.56M
+[scale] nodes=1 d=128  10.371 bits/ev | Latin 0.051 | product 0.351 |              retention 0.081 | 2 edges | readout 0.79M | operator 0.03M |              total 0.82M
+[scale] nodes=1 d=256  10.349 bits/ev | Latin 0.049 | product 0.343 |              retention 0.081 | 2 edges | readout 1.58M | operator 0.13M |              total 1.71M

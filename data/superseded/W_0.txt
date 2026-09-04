@@ -1,0 +1,5 @@
+[worth] best from the grid           Latin 0.6930 | product 0.9250 | retention 0.3023 | answer 2.0339 bits | comp-query 0.6829 (3.29b, n=287) | comp-support 0.7806 (n=1053)
+[worth] no readout (must collapse)   Latin 0.0000 | product 0.0000 | retention 0.0000 | answer 12.0000 bits | comp-query 0.0000 (12.00b, n=287) | comp-support 0.0000 (n=1053)
+
+[worth] best from the grid           Latin 0.6930 | product 0.9250 | retention 0.3023 | answer 2.0339 bits | comp-query 0.6829 (3.29b, n=287) | comp-support 0.7806 (n=1053)
+[worth] no readout (must collapse)   Latin 0.0000 | product 0.0000 | retention 0.0000 | answer 12.0000 bits | comp-query 0.0000 (12.00b, n=287) | comp-support 0.0000 (n=1053)

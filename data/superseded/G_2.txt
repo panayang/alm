@@ -1,0 +1,9 @@
+[grid] n=64 gap RAND learned        Latin 0.6787 | product 0.9223 | retention 0.2752 |                  answer 2.1280 bits | consist 0.067/21.2n | comp-query 0.6620 (3.49b, n=287) | comp-support 0.7711 (n=1053)
+[grid] n=64 nogap RAND learned      Latin 0.6851 | product 0.9231 | retention 0.2984 |                  answer 2.0863 bits | consist 0.067/21.2n | comp-query 0.6620 (3.38b, n=287) | comp-support 0.7806 (n=1053)
+[grid] n=256 gap RAND learned       Latin 0.6840 | product 0.9220 | retention 0.2733 |                  answer 2.1226 bits | consist 0.041/36.2n | comp-query 0.6307 (3.47b, n=287) | comp-support 0.7702 (n=1053)
+[grid] n=256 nogap RAND learned     Latin 0.6855 | product 0.9246 | retention 0.2984 |                  answer 2.0738 bits | consist 0.041/36.2n | comp-query 0.6620 (3.39b, n=287) | comp-support 0.7825 (n=1053)
+
+[grid] n=64 gap RAND learned        Latin 0.6787 | product 0.9223 | retention 0.2752 |                  answer 2.1280 bits | consist 0.067/21.2n | comp-query 0.6620 (3.49b, n=287) | comp-support 0.7711 (n=1053)
+[grid] n=64 nogap RAND learned      Latin 0.6851 | product 0.9231 | retention 0.2984 |                  answer 2.0863 bits | consist 0.067/21.2n | comp-query 0.6620 (3.38b, n=287) | comp-support 0.7806 (n=1053)
+[grid] n=256 gap RAND learned       Latin 0.6840 | product 0.9220 | retention 0.2733 |                  answer 2.1226 bits | consist 0.041/36.2n | comp-query 0.6307 (3.47b, n=287) | comp-support 0.7702 (n=1053)
+[grid] n=256 nogap RAND learned     Latin 0.6855 | product 0.9246 | retention 0.2984 |                  answer 2.0738 bits | consist 0.041/36.2n | comp-query 0.6620 (3.39b, n=287) | comp-support 0.7825 (n=1053)

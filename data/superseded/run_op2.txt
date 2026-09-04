@@ -1,0 +1,122 @@
+   Compiling alm v0.1.0 (D:\dev\alm)
+    Finished `release` profile [optimized] target(s) in 8.50s
+     Running `target\release\alm.exe screen --ticks 90000`
+stream: 90000 ticks
+-- generator report ------------------------------------------
+  ticks                90000
+  baseline fraction    0.881
+  episodes             3973  (second order 1114)
+  distinct tokens      685
+  unconditional        I(T;A) 2.786  I(T;B) 2.848  I(T;A,B) 5.237  bits
+  within regime        I(T;A|D) 0.120  I(T;B|D) 0.182  I(T;A,B|D) 2.572  bits
+  conjunctive gain     2.269 bits  (within regime, Miller-Madow              corrected, 93 items per regime)
+  product code         I(T;A|D) 1.558  I(T;B|D) 1.003  I(T;A,B|D) 2.549  bits over 1121 items
+  product consistency  1.0000  (cells mapping to a single target)
+  separations          1:331 2:329 4:329 8:313 16:302 32:328 64:303 
+  zipf exponent        1.202
+  heaps exponent       0.480  (reported, not asserted)
+  segmentation purity  0.761
+  composition          support 450  query 110  leaked 0
+[screen] full         8.963 bits/ev | Latin 0.220 | product 0.737 | retention 0.171 | hop slope +0.0064 (d +0.131, 7 pts) | 685 rows
+== full ==========================================
+  charged events 10741   bits/event 8.963   top-1 0.208
+  evidence vs PPM: ours ahead by 30488 bits total; anytime-valid p <= 2.23e-308
+  onsets: idea at t+0.99 on 2772 events, speech at t+2.81 on 2040
+  memory: 685 rows, mean charge 8.96 bits
+  -- response depth: accuracy by hops taken since the event
+     hops=0   n=561     bits=9.124 acc=0.114 visitH=4.03
+     hops=1   n=331     bits=6.658 acc=0.251 visitH=4.04
+     hops=2   n=329     bits=6.691 acc=0.225 visitH=4.01
+     hops=4   n=4301    bits=12.610 acc=0.038 visitH=4.01
+     hops=6   n=3973    bits=6.051 acc=0.389 visitH=4.00
+     hops=8   n=313     bits=6.723 acc=0.230 visitH=4.00
+     hops=15  n=933     bits=6.823 acc=0.245 visitH=3.84
+  -- sharpening (entropy bits by ticks since event)
+     t+0   n=671     H=5.469 +/- 0.176
+     t+1   n=632     H=5.000 +/- 0.180
+     t+2   n=633     H=5.336 +/- 0.181
+     t+3   n=583     H=5.289 +/- 0.190
+     t+4   n=601     H=5.074 +/- 0.184
+     t+5   n=328     H=4.995 +/- 0.255
+     t+6   n=351     H=5.110 +/- 0.248
+     t+7   n=84      H=4.832 +/- 0.498
+     t+8   n=87      H=4.835 +/- 0.488
+     t+9   n=46      H=4.638 +/- 0.683
+     t+10  n=50      H=5.164 +/- 0.675
+     t+11  n=47      H=5.269 +/- 0.703
+     t+12  n=54      H=4.672 +/- 0.608
+     t+13  n=53      H=5.425 +/- 0.626
+     t+14  n=53      H=5.077 +/- 0.653
+     t+15  n=65      H=3.994 +/- 0.564
+     t+16  n=50      H=4.936 +/- 0.678
+     t+17  n=47      H=6.370 +/- 0.706
+     t+18  n=43      H=5.508 +/- 0.713
+     t+19  n=44      H=5.072 +/- 0.696
+     t+20  n=37      H=5.727 +/- 0.832
+     t+21  n=46      H=5.389 +/- 0.730
+     t+22  n=53      H=5.031 +/- 0.628
+     t+23  n=967     H=5.323 +/- 0.154
+  -- second-order window (by cue separation; within-regime chance is 1/square_m)
+     sep=1    n=156    bits=7.709 acc=0.231
+     sep=2    n=171    bits=7.443 acc=0.193
+     sep=4    n=166    bits=7.373 acc=0.211
+     sep=8    n=163    bits=6.778 acc=0.264
+     sep=16   n=151    bits=7.511 acc=0.205
+     sep=32   n=157    bits=7.333 acc=0.229
+     sep=64   n=150    bits=7.176 acc=0.207
+  -- product-code window (separable control)
+     sep=1    n=175    bits=2.570 acc=0.737
+     sep=2    n=158    bits=2.545 acc=0.690
+     sep=4    n=163    bits=2.506 acc=0.693
+     sep=8    n=150    bits=2.431 acc=0.727
+     sep=16   n=151    bits=2.048 acc=0.788
+     sep=32   n=171    bits=2.082 acc=0.801
+     sep=64   n=153    bits=2.651 acc=0.719
+  -- first-order gap curve
+     gap=6    n=1178   bits=7.615 acc=0.293
+  -- retention on departed regimes (frozen memory)
+     age=0   spans  n=29     bits=8.185 acc=0.207
+     age=1   spans  n=29     bits=7.529 acc=0.414
+     age=2   spans  n=19     bits=7.952 acc=0.421
+     age=3   spans  n=19     bits=5.773 acc=0.579
+     age=4   spans  n=15     bits=7.805 acc=0.200
+     age=5   spans  n=15     bits=8.326 acc=0.333
+     age=6   spans  n=14     bits=8.025 acc=0.286
+     age=7   spans  n=364    bits=16.055 acc=0.102
+  -- answer calibration  n=10740  ECE=0.218
+  -- self-poisoning (by fraction of recent ticks spoken)
+     self 0.0-0.2  n=3834   bits=9.453 acc=0.128
+     self 0.2-0.4  n=3136   bits=8.447 acc=0.236
+     self 0.4-0.6  n=3520   bits=8.987 acc=0.255
+     self 0.6-0.8  n=214    bits=7.640 acc=0.397
+     self 0.8-1.0  n=37     bits=7.322 acc=0.541
+  -- decomposition by distance since baseline
+     d=0   n=561     bits=9.124 acc=0.114
+     d=1   n=331     bits=6.658 acc=0.251
+     d=2   n=329     bits=6.691 acc=0.225
+     d=4   n=4301    bits=12.610 acc=0.038
+     d=6   n=3973    bits=6.051 acc=0.389
+     d=7   n=1246    bits=6.798 acc=0.242
+  -- composition: support n=450 bits=6.602 | query n=110 bits=11.274
+  -- diagnostics: overt 0.278 of ticks, band corr(0,1)=-0.259 corr(0,2)=-0.037
+  -- node purity by regime 0.323  (chance 0.083, over 32 leaves that took writes)
+  -- node purity by cue pair 0.076  (chance about 0.021: 47.7 distinct pairs per leaf)
+[screen] write off    9.950 bits/ev | Latin 0.194 | product 0.649 | retention 0.113 | hop slope +0.0062 (d +0.147, 7 pts) | 685 rows
+[screen] walk off     8.896 bits/ev | Latin 0.225 | product 0.733 | retention 0.173 | hop slope +0.0000 (d +0.000, 1 pts) | 685 rows
+[screen] near-miss 1  9.035 bits/ev | Latin 0.212 | product 0.731 | retention 0.171 | hop slope +0.0057 (d +0.135, 7 pts) | 685 rows
+[screen] near-miss 2  8.908 bits/ev | Latin 0.222 | product 0.743 | retention 0.159 | hop slope +0.0058 (d +0.140, 7 pts) | 685 rows
+[screen] anchor off   8.668 bits/ev | Latin 0.226 | product 0.759 | retention 0.167 | hop slope +0.0063 (d +0.135, 7 pts) | 685 rows
+[screen] bind off     10.417 bits/ev | Latin 0.017 | product 0.281 | retention 0.008 | hop slope +0.0027 (d +0.139, 7 pts) | 685 rows
+[screen] no readout   12.000 bits/ev | Latin 0.000 | product 0.000 | retention 0.000 | hop slope +0.0000 (d +0.000, 7 pts) | 0 rows
+[baseline] PPM-C order 4, same stream: 1.566 bits/ev, second-order 12.277 bits | silence removed (UPPER BOUND, handed the segmentation): 5.603 bits/ev, second-order 3.080
+
+== summary ====================================================
+[screen] full         8.963 bits/ev | Latin 0.220 | product 0.737 | retention 0.171 | hop slope +0.0064 (d +0.131, 7 pts) | 685 rows
+[screen] write off    9.950 bits/ev | Latin 0.194 | product 0.649 | retention 0.113 | hop slope +0.0062 (d +0.147, 7 pts) | 685 rows
+[screen] walk off     8.896 bits/ev | Latin 0.225 | product 0.733 | retention 0.173 | hop slope +0.0000 (d +0.000, 1 pts) | 685 rows
+[screen] near-miss 1  9.035 bits/ev | Latin 0.212 | product 0.731 | retention 0.171 | hop slope +0.0057 (d +0.135, 7 pts) | 685 rows
+[screen] near-miss 2  8.908 bits/ev | Latin 0.222 | product 0.743 | retention 0.159 | hop slope +0.0058 (d +0.140, 7 pts) | 685 rows
+[screen] anchor off   8.668 bits/ev | Latin 0.226 | product 0.759 | retention 0.167 | hop slope +0.0063 (d +0.135, 7 pts) | 685 rows
+[screen] bind off     10.417 bits/ev | Latin 0.017 | product 0.281 | retention 0.008 | hop slope +0.0027 (d +0.139, 7 pts) | 685 rows
+[screen] no readout   12.000 bits/ev | Latin 0.000 | product 0.000 | retention 0.000 | hop slope +0.0000 (d +0.000, 7 pts) | 0 rows
+[baseline] PPM-C order 4, same stream: 1.566 bits/ev, second-order 12.277 bits | silence removed (UPPER BOUND, handed the segmentation): 5.603 bits/ev, second-order 3.080

@@ -1,0 +1,3 @@
+[unbind] superpose OFF (control)  Latin 0.7420 | answer 1.8313 bits | WALK by depth x gap(1,2,4,8): d1[0.000 0.167 0.000 0.000] n=24 ; d2[0.000 0.000 0.000 0.000] n=24 ; d3[0.000 0.000 0.000 0.000] n=12 | walk-support 0.721 | ONE-SHOT comp-query 0.0000 (12.63b, n=96) | held-out cell 0.0000 (10.12b, n=72)
+
+[unbind] superpose OFF (control)  Latin 0.7420 | answer 1.8313 bits | WALK by depth x gap(1,2,4,8): d1[0.000 0.167 0.000 0.000] n=24 ; d2[0.000 0.000 0.000 0.000] n=24 ; d3[0.000 0.000 0.000 0.000] n=12 | walk-support 0.721 | ONE-SHOT comp-query 0.0000 (12.63b, n=96) | held-out cell 0.0000 (10.12b, n=72)

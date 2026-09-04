@@ -1,0 +1,36 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe screen --ticks 250000`
+screening stream: 250000 ticks
+-- generator report ------------------------------------------
+  ticks                250000
+  baseline fraction    0.880
+  episodes             11109  (second order 3074)
+  distinct tokens      1944
+  unconditional        I(T;A) 4.282  I(T;B) 4.331  I(T;A,B) 6.754  bits
+  within regime        I(T;A|D) 0.109  I(T;B|D) 0.158  I(T;A,B|D) 2.582  bits
+  conjunctive gain     2.314 bits  (within regime, Miller-Madow              corrected, 96 items per regime)
+  product code         I(T;A|D) 1.559  I(T;B|D) 1.001  I(T;A,B|D) 2.557  bits over 3106 items
+  product consistency  1.0000  (cells mapping to a single target)
+  separations          1:916 2:889 4:895 8:905 16:865 32:871 64:839 
+  zipf exponent        0.988
+  heaps exponent       0.787  (reported, not asserted)
+  segmentation purity  0.761
+  composition          support 1254  query 333  leaked 0
+[screen] flat L=1      10.185 bits/ev | Latin 0.012 | product 0.035 |              retention 0.044 (n=720) | pair 0.029 | 8 leaves
+[screen] rungs=2       10.521 bits/ev | Latin 0.013 | product 0.041 |              retention 0.064 (n=720) | pair 0.064 | 64 leaves
+[screen] rungs=3       11.566 bits/ev | Latin 0.040 | product 0.107 |              retention 0.026 (n=720) | pair 0.149 | 302 leaves
+[screen] rungs=6       11.933 bits/ev | Latin 0.034 | product 0.071 |              retention 0.032 (n=720) | pair 0.158 | 290 leaves
+[screen] bind off      10.871 bits/ev | Latin 0.006 | product 0.063 |              retention 0.015 (n=720) | pair 0.149 | 286 leaves
+[screen] no readout    10.609 bits/ev | Latin 0.006 | product 0.026 |              retention 0.003 (n=720) | pair 0.143 | 287 leaves
+[screen] one particle  11.599 bits/ev | Latin 0.047 | product 0.108 |              retention 0.039 (n=720) | pair 0.155 | 320 leaves
+[verdict] depth 2->6: Latin 0.013->0.034 (+0.021), product              0.041->0.071 (+0.030) -- depth no longer costs; the scoring rewrite was the fix
+
+== summary ====================================================
+[screen] flat L=1      10.185 bits/ev | Latin 0.012 | product 0.035 |              retention 0.044 (n=720) | pair 0.029 | 8 leaves
+[screen] rungs=2       10.521 bits/ev | Latin 0.013 | product 0.041 |              retention 0.064 (n=720) | pair 0.064 | 64 leaves
+[screen] rungs=3       11.566 bits/ev | Latin 0.040 | product 0.107 |              retention 0.026 (n=720) | pair 0.149 | 302 leaves
+[screen] rungs=6       11.933 bits/ev | Latin 0.034 | product 0.071 |              retention 0.032 (n=720) | pair 0.158 | 290 leaves
+[screen] bind off      10.871 bits/ev | Latin 0.006 | product 0.063 |              retention 0.015 (n=720) | pair 0.149 | 286 leaves
+[screen] no readout    10.609 bits/ev | Latin 0.006 | product 0.026 |              retention 0.003 (n=720) | pair 0.143 | 287 leaves
+[screen] one particle  11.599 bits/ev | Latin 0.047 | product 0.108 |              retention 0.039 (n=720) | pair 0.155 | 320 leaves
+[verdict] depth 2->6: Latin 0.013->0.034 (+0.021), product              0.041->0.071 (+0.030) -- depth no longer costs; the scoring rewrite was the fix

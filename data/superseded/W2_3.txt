@@ -1,0 +1,3 @@
+[worth] bind off (must collapse)     Latin 0.0872 | product 0.3554 | retention 0.0743 | answer 5.4190 bits | ONE-SHOT comp-query 0.0000 (11.99b, n=60) | held-out cell 0.0139 (9.50b, n=72)
+
+[worth] bind off (must collapse)     Latin 0.0872 | product 0.3554 | retention 0.0743 | answer 5.4190 bits | ONE-SHOT comp-query 0.0000 (11.99b, n=60) | held-out cell 0.0139 (9.50b, n=72)

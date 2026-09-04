@@ -1,0 +1,26 @@
+  single-cue baseline (prequential, within regime, one cue only):              latin A 0.1715 B 0.1612 | product A 0.4881 B 0.4005  <-- a conjunction              result must beat these
+  facts presented: latin 286 distinct, 9.2 presentations each |              product 72 distinct, 36.3 each
+-- generator report ------------------------------------------
+  ticks                180000
+  baseline fraction    0.890
+  episodes             6596  (second order 2642)
+  distinct tokens      543
+  unconditional        I(T;A) 2.259  I(T;B) 2.271  I(T;A,B) 4.802  bits
+  within regime        I(T;A|D) 0.045  I(T;B|D) 0.057  I(T;A,B|D) 2.588  bits
+  conjunctive gain     2.486 bits  (within regime, Miller-Madow              corrected, 220 items per regime)
+  product code         I(T;A|D) 1.562  I(T;B|D) 1.002  I(T;A,B|D) 2.560  bits over 2614 items
+  product consistency  1.0000  (cells mapping to a single target)
+  separations          1:790 2:769 4:763 8:764 16:738 32:736 64:696 
+  zipf exponent        1.537
+  heaps exponent       0.267  (reported, not asserted)
+  segmentation purity  0.650
+  composition          support 1053  query 287  leaked 0
+[grid] n=64 gap content learned     Latin 0.6798 | product 0.9223 | retention 0.2771 |                  answer 2.1599 bits | consist 0.470/5.9n | comp-query 0.6585 (3.52b, n=287) | comp-support 0.7616 (n=1053)
+[grid] n=64 nogap content learned   Latin 0.6851 | product 0.9227 | retention 0.2897 |                  answer 2.0744 bits | consist 0.476/5.9n | comp-query 0.6690 (3.37b, n=287) | comp-support 0.7787 (n=1053)
+[grid] n=256 gap content learned    Latin 0.6703 | product 0.9227 | retention 0.2645 |                  answer 2.1676 bits | consist 0.457/6.8n | comp-query 0.6411 (3.51b, n=287) | comp-support 0.7702 (n=1053)
+[grid] n=256 nogap content learned  Latin 0.6881 | product 0.9254 | retention 0.2955 |                  answer 2.0583 bits | consist 0.466/6.7n | comp-query 0.6794 (3.37b, n=287) | comp-support 0.7825 (n=1053)
+
+[grid] n=64 gap content learned     Latin 0.6798 | product 0.9223 | retention 0.2771 |                  answer 2.1599 bits | consist 0.470/5.9n | comp-query 0.6585 (3.52b, n=287) | comp-support 0.7616 (n=1053)
+[grid] n=64 nogap content learned   Latin 0.6851 | product 0.9227 | retention 0.2897 |                  answer 2.0744 bits | consist 0.476/5.9n | comp-query 0.6690 (3.37b, n=287) | comp-support 0.7787 (n=1053)
+[grid] n=256 gap content learned    Latin 0.6703 | product 0.9227 | retention 0.2645 |                  answer 2.1676 bits | consist 0.457/6.8n | comp-query 0.6411 (3.51b, n=287) | comp-support 0.7702 (n=1053)
+[grid] n=256 nogap content learned  Latin 0.6881 | product 0.9254 | retention 0.2955 |                  answer 2.0583 bits | consist 0.466/6.7n | comp-query 0.6794 (3.37b, n=287) | comp-support 0.7825 (n=1053)

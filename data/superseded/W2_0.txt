@@ -1,0 +1,5 @@
+[worth] best from the grid           Latin 0.8647 | product 0.9624 | retention 0.2760 | answer 1.0360 bits | ONE-SHOT comp-query 0.0000 (11.76b, n=60) | held-out cell 0.0000 (10.49b, n=72)
+[worth] no readout (must collapse)   Latin 0.0000 | product 0.0000 | retention 0.0000 | answer 12.0000 bits | ONE-SHOT comp-query 0.0000 (12.00b, n=60) | held-out cell 0.0000 (12.00b, n=72)
+
+[worth] best from the grid           Latin 0.8647 | product 0.9624 | retention 0.2760 | answer 1.0360 bits | ONE-SHOT comp-query 0.0000 (11.76b, n=60) | held-out cell 0.0000 (10.49b, n=72)
+[worth] no readout (must collapse)   Latin 0.0000 | product 0.0000 | retention 0.0000 | answer 12.0000 bits | ONE-SHOT comp-query 0.0000 (12.00b, n=60) | held-out cell 0.0000 (12.00b, n=72)

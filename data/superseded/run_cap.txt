@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target\release\alm.exe capacity --ticks 90000`
+[cap] mono d=16        11.345 bits/ev | Latin 0.017 | product 0.180 |              retention 0.020 | readout 685 x 144 = 0.10M | graph 0.00M
+[cap] mono d=32        10.956 bits/ev | Latin 0.029 | product 0.210 |              retention 0.058 | readout 685 x 288 = 0.20M | graph 0.00M
+[cap] mono d=64        10.668 bits/ev | Latin 0.037 | product 0.249 |              retention 0.073 | readout 685 x 576 = 0.39M | graph 0.00M
+[cap] mono d=128       10.543 bits/ev | Latin 0.033 | product 0.273 |              retention 0.071 | readout 685 x 1152 = 0.79M | graph 0.00M
+[cap] graph d=64 (ref) 9.167 bits/ev | Latin 0.206 | product 0.732 |              retention 0.153 | readout 685 x 576 = 0.39M | graph 0.52M
+
+[cap] mono d=16        11.345 bits/ev | Latin 0.017 | product 0.180 |              retention 0.020 | readout 685 x 144 = 0.10M | graph 0.00M
+[cap] mono d=32        10.956 bits/ev | Latin 0.029 | product 0.210 |              retention 0.058 | readout 685 x 288 = 0.20M | graph 0.00M
+[cap] mono d=64        10.668 bits/ev | Latin 0.037 | product 0.249 |              retention 0.073 | readout 685 x 576 = 0.39M | graph 0.00M
+[cap] mono d=128       10.543 bits/ev | Latin 0.033 | product 0.273 |              retention 0.071 | readout 685 x 1152 = 0.79M | graph 0.00M
+[cap] graph d=64 (ref) 9.167 bits/ev | Latin 0.206 | product 0.732 |              retention 0.153 | readout 685 x 576 = 0.39M | graph 0.52M

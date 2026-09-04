@@ -1,0 +1,5 @@
+[route] n=64 q=state argmax      consistency latin 0.219/7.4n product 0.146/12.1n |              Latin 0.209 (7.31b) | product 0.737 (2.45b) | retention 0.155 |              answer 6.116 bits over 3973 events
+[route] n=64 q=bound+state argmax consistency latin 0.198/7.6n product 0.164/11.9n |              Latin 0.214 (7.36b) | product 0.736 (2.42b) | retention 0.163 |              answer 6.132 bits over 3973 events
+
+[route] n=64 q=state argmax      consistency latin 0.219/7.4n product 0.146/12.1n |              Latin 0.209 (7.31b) | product 0.737 (2.45b) | retention 0.155 |              answer 6.116 bits over 3973 events
+[route] n=64 q=bound+state argmax consistency latin 0.198/7.6n product 0.164/11.9n |              Latin 0.214 (7.36b) | product 0.736 (2.42b) | retention 0.163 |              answer 6.132 bits over 3973 events

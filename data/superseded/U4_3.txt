@@ -1,0 +1,3 @@
+[unbind] unbind mix 1.0           Latin 0.7477 | answer 1.7978 bits | WALK by depth x gap(1,2,4,8): d1[0.167 0.000 0.000 0.000] n=24 10.06b ; d2[0.000 0.000 0.000 0.000] n=24 11.70b ; d3[0.000 0.000 0.000 0.000] n=12 12.26b | walk-support 0.704 | ONE-SHOT comp-query 0.0000 (12.50b, n=96) | held-out cell 0.0000 (9.98b, n=72)
+
+[unbind] unbind mix 1.0           Latin 0.7477 | answer 1.7978 bits | WALK by depth x gap(1,2,4,8): d1[0.167 0.000 0.000 0.000] n=24 10.06b ; d2[0.000 0.000 0.000 0.000] n=24 11.70b ; d3[0.000 0.000 0.000 0.000] n=12 12.26b | walk-support 0.704 | ONE-SHOT comp-query 0.0000 (12.50b, n=96) | held-out cell 0.0000 (9.98b, n=72)

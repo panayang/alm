@@ -1,0 +1,3 @@
+[bd] bind_decay=0.95    Latin 0.0682 | product 0.6349 | retention 0.1429 |                  answer 7.3618 bits | consistency 0.466/5.2n | comp-query 0.0075 (16.18b, n=133) | comp-support 0.0527 (n=531)
+
+[bd] bind_decay=0.95    Latin 0.0682 | product 0.6349 | retention 0.1429 |                  answer 7.3618 bits | consistency 0.466/5.2n | comp-query 0.0075 (16.18b, n=133) | comp-support 0.0527 (n=531)

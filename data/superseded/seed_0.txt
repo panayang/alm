@@ -1,0 +1,9 @@
+[seed] seed=0x5eed1234 n=64 content Latin 0.2343 (7.203b) | product 0.7413 (2.429b) |              retention 0.1806 | answer 6.0338 bits
+[seed] seed=0xfd248bed n=64 content Latin 0.2063 (7.700b) | product 0.7407 (2.472b) |              retention 0.1528 | answer 6.2967 bits
+[seed] seed=0x19b5c05a6 n=64 content Latin 0.2246 (7.378b) | product 0.7292 (2.502b) |              retention 0.1091 | answer 6.0089 bits
+[seed] seed=0x239937f5f n=64 content Latin 0.1977 (7.900b) | product 0.7113 (2.634b) |              retention 0.1071 | answer 6.3903 bits
+
+[seed] seed=0x5eed1234 n=64 content Latin 0.2343 (7.203b) | product 0.7413 (2.429b) |              retention 0.1806 | answer 6.0338 bits
+[seed] seed=0xfd248bed n=64 content Latin 0.2063 (7.700b) | product 0.7407 (2.472b) |              retention 0.1528 | answer 6.2967 bits
+[seed] seed=0x19b5c05a6 n=64 content Latin 0.2246 (7.378b) | product 0.7292 (2.502b) |              retention 0.1091 | answer 6.0089 bits
+[seed] seed=0x239937f5f n=64 content Latin 0.1977 (7.900b) | product 0.7113 (2.634b) |              retention 0.1071 | answer 6.3903 bits

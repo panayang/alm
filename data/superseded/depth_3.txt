@@ -1,0 +1,3 @@
+[depth] n=256 old: state, wander, gap-walk   hop slope +0.0070 (d +0.142, 7 pts) | Latin 0.215 |              product 0.738 | answer 6.020 bits | operator drift 0.3093,              top-direction share 0.059
+
+[depth] n=256 old: state, wander, gap-walk   hop slope +0.0070 (d +0.142, 7 pts) | Latin 0.215 |              product 0.738 | answer 6.020 bits | operator drift 0.3093,              top-direction share 0.059

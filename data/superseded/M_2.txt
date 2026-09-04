@@ -1,0 +1,5 @@
+[min] + no streams, rungs=1              Latin 0.7877 | product 0.9434 | retention 0.6163 |                  answer 1.9669 bits | 5 blocks | comp-query 0.7526 (2.94b, n=287) | comp-support 0.8490 (n=1053)
+[min] + no streams, event-lag binds only Latin 0.6908 | product 0.9227 | retention 0.3760 |                  answer 2.1639 bits | 6 blocks | comp-query 0.6446 (3.68b, n=287) | comp-support 0.7778 (n=1053)
+
+[min] + no streams, rungs=1              Latin 0.7877 | product 0.9434 | retention 0.6163 |                  answer 1.9669 bits | 5 blocks | comp-query 0.7526 (2.94b, n=287) | comp-support 0.8490 (n=1053)
+[min] + no streams, event-lag binds only Latin 0.6908 | product 0.9227 | retention 0.3760 |                  answer 2.1639 bits | 6 blocks | comp-query 0.6446 (3.68b, n=287) | comp-support 0.7778 (n=1053)

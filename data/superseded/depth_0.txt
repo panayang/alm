@@ -1,0 +1,5 @@
+[depth] n=64 old: state, wander, gap-walk    hop slope +0.0056 (d +0.116, 7 pts) | Latin 0.209 |              product 0.737 | answer 6.116 bits | operator drift 0.6556,              top-direction share 0.061
+[depth] n=256 fixed: bound+ENTRY, gap-walk   hop slope +0.0063 (d +0.137, 7 pts) | Latin 0.238 |              product 0.751 | answer 5.955 bits | operator drift 0.3165,              top-direction share 0.059
+
+[depth] n=64 old: state, wander, gap-walk    hop slope +0.0056 (d +0.116, 7 pts) | Latin 0.209 |              product 0.737 | answer 6.116 bits | operator drift 0.6556,              top-direction share 0.061
+[depth] n=256 fixed: bound+ENTRY, gap-walk   hop slope +0.0063 (d +0.137, 7 pts) | Latin 0.238 |              product 0.751 | answer 5.955 bits | operator drift 0.3165,              top-direction share 0.059

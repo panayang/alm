@@ -1,0 +1,5 @@
+[worth] NO GRAPH at all              Latin 0.8653 | product 0.9201 | retention 0.2694 | answer 1.0299 bits | ONE-SHOT comp-query 0.0000 (11.88b, n=60) | held-out cell 0.0000 (9.59b, n=72)
+[worth] all three streams off        Latin 0.8761 | product 0.9637 | retention 0.3002 | answer 0.9799 bits | ONE-SHOT comp-query 0.0000 (11.78b, n=60) | held-out cell 0.0417 (10.21b, n=72)
+
+[worth] NO GRAPH at all              Latin 0.8653 | product 0.9201 | retention 0.2694 | answer 1.0299 bits | ONE-SHOT comp-query 0.0000 (11.88b, n=60) | held-out cell 0.0000 (9.59b, n=72)
+[worth] all three streams off        Latin 0.8761 | product 0.9637 | retention 0.3002 | answer 0.9799 bits | ONE-SHOT comp-query 0.0000 (11.78b, n=60) | held-out cell 0.0417 (10.21b, n=72)

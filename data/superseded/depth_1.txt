@@ -1,0 +1,5 @@
+[depth] n=64 fixed: bound+ENTRY, gap-walk    hop slope +0.0054 (d +0.130, 7 pts) | Latin 0.234 |              product 0.741 | answer 6.034 bits | operator drift 0.6512,              top-direction share 0.062
+[depth] n=256 fixed: bound+ENTRY, NO gap-walk hop slope +0.0000 (d +0.000, 1 pts) | Latin 0.244 |              product 0.745 | answer 5.744 bits | operator drift 0.3077,              top-direction share 0.060
+
+[depth] n=64 fixed: bound+ENTRY, gap-walk    hop slope +0.0054 (d +0.130, 7 pts) | Latin 0.234 |              product 0.741 | answer 6.034 bits | operator drift 0.6512,              top-direction share 0.062
+[depth] n=256 fixed: bound+ENTRY, NO gap-walk hop slope +0.0000 (d +0.000, 1 pts) | Latin 0.244 |              product 0.745 | answer 5.744 bits | operator drift 0.3077,              top-direction share 0.060

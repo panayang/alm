@@ -1,0 +1,7 @@
+[mech] nodes=1 learned        Latin 0.048 (9.54 bits) | product 0.309 (4.40 bits) |              retention 0.071 | all-token 10.587 bits
+[mech] nodes=64 learned       Latin 0.209 (7.31 bits) | product 0.737 (2.45 bits) |              retention 0.155 | all-token 9.060 bits
+[mech] nodes=64 near-miss 1   Latin 0.210 (7.34 bits) | product 0.731 (2.44 bits) |              retention 0.171 | all-token 9.040 bits
+
+[mech] nodes=1 learned        Latin 0.048 (9.54 bits) | product 0.309 (4.40 bits) |              retention 0.071 | all-token 10.587 bits
+[mech] nodes=64 learned       Latin 0.209 (7.31 bits) | product 0.737 (2.45 bits) |              retention 0.155 | all-token 9.060 bits
+[mech] nodes=64 near-miss 1   Latin 0.210 (7.34 bits) | product 0.731 (2.44 bits) |              retention 0.171 | all-token 9.040 bits
