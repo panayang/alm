@@ -199,6 +199,49 @@ impl Graph {
         &self.keys[self.out[u][0]]
     }
 
+    /// How far the write moved each transform, and toward what shape.
+    ///
+    /// Freezing the transforms cost nothing at nodes=256, and two very different
+    /// causes predict that. Under starvation the matrices barely move: about
+    /// eleven rank-one updates against 4096 parameters. Under target
+    /// degeneration they move a long way toward rank one, because the write aims
+    /// at `E_x`, which does not depend on `p_in`, so the loss-minimising edge is
+    /// one that ignores its input and emits a constant.
+    ///
+    /// Returns (mean relative movement from initialisation, mean share of the
+    /// squared Frobenius norm held by the leading singular direction). For a
+    /// d x d Gaussian that share is about 4/d -- near 0.06 at d = 64 -- so a
+    /// value approaching 1 is a matrix that has become a broadcast.
+    pub fn operator_drift(&self, cfg: &Config) -> (f64, f64) {
+        let key = cfg.seed ^ 0x6_9A97;
+        let (mut drift, mut share, mut n) = (0.0f64, 0.0f64, 0.0f64);
+        for a in 0..self.w.len() {
+            let w0 = Mat::random(key ^ KEY_WMAT, a as u64, self.d, self.d, cfg.w_init);
+            let (mut num, mut den) = (0.0f64, 0.0f64);
+            for i in 0..self.w[a].a.len() {
+                let e = (self.w[a].a[i] - w0.a[i]) as f64;
+                num += e * e;
+                den += (w0.a[i] as f64) * (w0.a[i] as f64);
+            }
+            drift += (num / den.max(1e-12)).sqrt();
+
+            // Leading singular value by power iteration on W^T W.
+            let mut v: Vec<f32> = (0..self.d).map(|i| if i == 0 { 1.0 } else { 0.001 }).collect();
+            let mut u = vec![0.0f32; self.d];
+            let mut sigma = 0.0f32;
+            for _ in 0..24 {
+                normalize(&mut v);
+                self.w[a].matvec(&v, &mut u);
+                sigma = dot(&u, &u).sqrt();
+                self.w[a].matvec_t(&u, &mut v);
+            }
+            let fro: f32 = self.w[a].a.iter().map(|x| x * x).sum();
+            share += (sigma * sigma / fro.max(1e-12)) as f64;
+            n += 1.0;
+        }
+        if n == 0.0 { (0.0, 0.0) } else { (drift / n, share / n) }
+    }
+
     /// Out-degree, reported so the branching a walk actually has is not assumed.
     pub fn out_degree(&self, u: usize) -> usize {
         self.out[u].len()

@@ -83,6 +83,13 @@ fn main() {
                 );
             }
         }
+        "depth" => {
+            let suite = experiments::depth(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "seeds" => {
             let suite = experiments::seeds(ticks, seed, shard, shards);
             println!();

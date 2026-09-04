@@ -552,6 +552,67 @@ pub fn seeds(ticks: usize, seed0: u64, shard: usize, shards: usize) -> Suite {
     suite
 }
 
+/// (a) Does gap-time iteration pay now that the address holds still, and
+/// (b) what shape has the write pushed the transforms into.
+///
+/// Before content entry, every gap tick jumped to a new node, so "iterating with
+/// memory" was a random walk and the hop slope sat at +0.006 while switching the
+/// gap walk off scored better. With the address pinned the state evolves under
+/// *one* operator across the gap, which is the first time the loop has had the
+/// shape the founding brief asked for. If the slope is still flat, depth-from-
+/// time fails on its merits rather than on a wiring mistake.
+///
+/// The drift figures answer the other question in the same runs: starvation and
+/// target degeneration both predict that freezing costs nothing, and they are
+/// told apart by how far the matrices moved and whether they moved toward rank
+/// one.
+pub fn depth(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for (nodes, entry, gap, label) in [
+        (64usize, false, true, "old: state, wander, gap-walk"),
+        (64, true, true, "fixed: bound+ENTRY, gap-walk"),
+        (64, true, false, "fixed: bound+ENTRY, NO gap-walk"),
+        (256, false, true, "old: state, wander, gap-walk"),
+        (256, true, true, "fixed: bound+ENTRY, gap-walk"),
+        (256, true, false, "fixed: bound+ENTRY, NO gap-walk"),
+    ] {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = gcfg.vocab;
+        c.nodes = nodes;
+        c.walk_during_gap = gap;
+        if entry {
+            c.route_query = RouteQuery::Bound;
+            c.read_entry_by_content = true;
+        }
+        c.derive();
+        arms.push((format!("n={} {}", nodes, label), c));
+    }
+
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let cc = c.clone();
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let (slope, delta, npts) = hop_slope(&o.metrics);
+        let (drift, share) = o.model.graph.operator_drift(&cc);
+        suite.note(format!(
+            "[depth] {:<36} hop slope {:+.4} (d {:+.3}, {} pts) | Latin {:.3} |              product {:.3} | answer {:.3} bits | operator drift {:.4},              top-direction share {:.3}",
+            name, slope, delta, npts, la, pa, o.metrics.answer.mean(), drift, share
+        ));
+    }
+    suite
+}
+
 pub struct Suite {
     pub csv: String,
     pub summary: Vec<String>,
