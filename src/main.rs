@@ -83,6 +83,13 @@ fn main() {
                 );
             }
         }
+        "minimal" => {
+            let suite = experiments::minimal(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "worth" => {
             let suite = experiments::worth(ticks, seed, shard, shards);
             println!();

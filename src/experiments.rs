@@ -1078,6 +1078,88 @@ pub fn worth(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
     suite
 }
 
+/// What is the minimal system that still works?
+///
+/// Removing the graph improved every metric and removing the anchor improved it
+/// again; switching the three self-streams off improved composition and
+/// retention. So the parts are stripped together, and then the one mechanism
+/// that has never been ablated on its own -- the multi-timescale background --
+/// is swept. `bind off` and `no readout` collapse, so an arm that does not is
+/// saying something.
+pub fn minimal(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::{BindMode, RouteQuery};
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let stripped = |seed: u64, vocab: usize| {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = vocab;
+        c.nodes = 64;
+        c.route_query = RouteQuery::Bound;
+        c.read_entry_by_content = true;
+        c.walk_during_gap = false;
+        c.freeze_operator = true;
+        c.bypass_graph = true;
+        c.anchor = 0.0;
+        c
+    };
+    let mut arms: Vec<(String, Config)> = Vec::new();
+
+    let mut c = stripped(seed, gcfg.vocab);
+    c.derive();
+    arms.push(("no graph, no anchor".into(), c));
+
+    let mut c = stripped(seed, gcfg.vocab);
+    c.feedback_write = false;
+    c.feedback_covert = false;
+    c.feedback_overt = false;
+    c.derive();
+    arms.push(("+ no streams".into(), c));
+
+    // The background, swept for the first time on its own.
+    for r in [1usize, 2, 3, 5] {
+        let mut c = stripped(seed, gcfg.vocab);
+        c.feedback_write = false;
+        c.feedback_covert = false;
+        c.feedback_overt = false;
+        c.rungs = r;
+        c.derive();
+        arms.push((format!("+ no streams, rungs={}", r), c));
+    }
+
+    // Binding without any background reaching the readout at all.
+    let mut c = stripped(seed, gcfg.vocab);
+    c.feedback_write = false;
+    c.feedback_covert = false;
+    c.feedback_overt = false;
+    c.bind_mode = BindMode::EventLag;
+    c.derive();
+    arms.push(("+ no streams, event-lag binds only".into(), c));
+
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let blocks = c.feature_blocks();
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(
+            format!(
+                "[min] {:<34} Latin {:.4} | product {:.4} | retention {:.4} |                  answer {:.4} bits | {} blocks",
+                name, la, pa, ret_acc, o.metrics.answer.mean(), blocks
+            ) + &comp_tail(&o),
+        );
+    }
+    suite
+}
+
 pub struct Suite {
     pub csv: String,
     pub summary: Vec<String>,
