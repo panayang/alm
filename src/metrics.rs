@@ -739,6 +739,17 @@ pub fn run(model: &mut Model, stream: &Stream, metrics: &mut Metrics) {
     let every = model.cfg.entropy_every;
     let mut reference = crate::baseline::Ppm::new(4, stream.vocab + 1);
     let silence = stream.vocab as u32;
+    // Every tick inside a walk query's silence, with how far into it we are.
+    let mut walk_at: Vec<Option<(usize, usize)>> = vec![None; stream.len() + 1];
+    for e in stream.episodes.iter() {
+        if matches!(e.kind, crate::gen::Kind::WalkQuery) {
+            for (off, tk) in (e.last_cue_tick..=e.target_tick).enumerate() {
+                if tk < walk_at.len() {
+                    walk_at[tk] = Some((e.target, off));
+                }
+            }
+        }
+    }
     for t in 0..stream.len() {
         let want_entropy = every > 0 && (t as u64) % every == 0;
         let obs = stream.observe(t);
@@ -748,11 +759,8 @@ pub fn run(model: &mut Model, stream: &Stream, metrics: &mut Metrics) {
         }
         // Before the answer is folded in, ask how close the cursor stands to it.
         // This is the only population where a retrieval failure is informative.
-        if let Some(i) = stream.ep_at[t] {
-            let e = &stream.episodes[i];
-            if matches!(e.kind, crate::gen::Kind::WalkQuery) {
-                model.note_cursor(e.target);
-            }
+        if let Some((tok, off)) = walk_at.get(t).copied().flatten() {
+            model.note_cursor_at(tok, off);
         }
         let out = model.tick(obs, want_entropy);
         let (ref_bits, _) = reference.observe(match obs {

@@ -212,6 +212,29 @@ pub struct Config {
     /// particle filter is the wrong shape here and a parallel mixture is not.
     /// How fast a response that retrieved nothing this tick fades out.
     pub cursor_fade: f32,
+    /// Sigmas above chance that a retrieval must verify at to be believed.
+    ///
+    /// A key that was never written still hashes into an occupied bank, and its
+    /// occupants answer -- so a chain that has run out does not retrieve nothing,
+    /// it retrieves a neighbour. No threshold on the retrieval separates the two,
+    /// because both are real stored content at comparable strength. That is
+    /// address crowding in its purest form and it is the weakness this whole
+    /// family is built on.
+    ///
+    /// Challenge-response has a move an autoregressive forward pass does not:
+    /// the answer need not be given at a fixed instant, so a retrieval can be
+    /// checked. Bind the candidate back onto the key and ask memory whether that
+    /// triple is actually there:
+    ///
+    /// ```text
+    ///   <M / |M| , nu(q (*) y)>   ~  1/sqrt(k)   if the triple was written
+    ///                             ~  1/sqrt(d)   if it came from a neighbour
+    /// ```
+    ///
+    /// Eight to one at k=4, d=256, for one convolution and one dot product.
+    /// Binding writes, unbinding reads, and re-binding checks -- and a near miss
+    /// becomes detectable, which it has never been in this project.
+    pub verify_sigma: f32,
     pub traj: usize,
     pub mem_banks: usize,
     pub superpose: bool,
@@ -466,6 +489,7 @@ impl Config {
             cleanup_floor_mult: 1.6,
             readout_codebook: 1.0,
             cursor_fade: 0.4,
+            verify_sigma: 4.0,
             traj: 4,
             mem_banks: 64,
             superpose: true,
@@ -524,6 +548,11 @@ impl Config {
     /// entries. Everything about cleanup has to be measured against this.
     pub fn codebook_floor(&self) -> f32 {
         (2.0 * (self.vocab.max(2) as f32).ln() / self.d as f32).sqrt()
+    }
+
+    /// The read-back score a genuine triple has to clear.
+    pub fn verify_min(&self) -> f32 {
+        self.verify_sigma / (self.d as f32).sqrt()
     }
 
     pub fn cleanup_min_cos(&self) -> f32 {

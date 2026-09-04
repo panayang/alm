@@ -1338,14 +1338,22 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
     // Inside and outside the operating region, which is d > 2 k ln V. With
     // roughly sixteen thousand triples: d=64 needs ~3000 banks to be legal at
     // all, d=256 needs ~800, d=1024 is comfortable at 1024.
-    for (sup, banks, dim, label) in [
-        (false, 1usize, 256usize, "superpose OFF (control)"),
-        (true, 64, 256, "d=256 x 64 banks"),
-        (true, 256, 256, "d=256 x 256 banks"),
-        (true, 1024, 256, "d=256 x 1024 banks"),
-        (true, 256, 512, "d=512 x 256 banks"),
-        (true, 1024, 512, "d=512 x 1024 banks"),
+    // Parameters placed by the capacity law rather than by taste. With ~16000
+    // triples and a 4096-token codebook: at d=256 the floor is 0.255 and the
+    // threshold 0.408, so a bank may hold about six triples, which needs some
+    // 2700 banks. 4096 gives four per bank and a signal of 0.506. 1024 banks
+    // gives 15.6 per bank and a signal of 0.253 -- just under the threshold, and
+    // it is carried as the arm that should fail, because a law that only ever
+    // predicts success is not being tested.
+    for (sup, banks, dim, traj, lock, label) in [
+        (false, 1usize, 256usize, 1usize, false, "superpose OFF (control)"),
+        (true, 4096, 256, 4, false, "4096 banks, no commit-lock"),
+        (true, 4096, 256, 4, true, "4096 banks + COMMIT-LOCK"),
+        (true, 4096, 256, 1, true, "1 response + commit-lock"),
+        (true, 8192, 256, 4, true, "8192 banks + commit-lock"),
+        (true, 4096, 512, 4, true, "d=512 + commit-lock"),
     ] {
+
         let mix = 1.0f32;
         let mut c = Config::local();
         c.seed = seed;
@@ -1361,6 +1369,8 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
         c.unbind_mix = mix;
         c.mem_banks = banks;
         c.d = dim;
+        c.traj = traj;
+        c.commit_locks_charge = lock;
         c.derive();
         arms.push((label.to_string(), c));
     }
@@ -1372,13 +1382,19 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
         let (_, la) = window_mean(&o.metrics.window);
         suite.note(
             format!(
-                "[unbind] {:<26} Latin {:.4} | answer {:.4} bits | unbind {}/{} accepted,                  mean best cos {:.3} | {} triples stored | CURSOR->answer cos {:.3} over {}",
+                "[unbind] {:<26} Latin {:.4} | answer {:.4} bits | unbind {}/{} accepted,                  mean best cos {:.3} | {} triples | CURSOR->answer by silence tick {}",
                 name, la, o.metrics.answer.mean(),
                 o.model.unbind_hits, o.model.unbind_tries,
                 o.model.unbind_cos / o.model.unbind_tries.max(1) as f64,
                 o.model.mem_triples,
-                o.model.probe_cursor_cos / o.model.probe_cursor_n.max(1) as f64,
-                o.model.probe_cursor_n
+                o.model
+                    .cursor_trace
+                    .iter()
+                    .take(6)
+                    .enumerate()
+                    .map(|(i, (s, n))| format!("t{} {:+.3}", i, s / (*n).max(1) as f64))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ) + &walk_tail(&o)
                 + &comp_tail(&o),
         );

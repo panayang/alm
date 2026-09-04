@@ -44,6 +44,10 @@ pub struct Store {
     /// One row per token, shared by everything. The only learned readout.
     pub rows: Vec<(u32, Vec<f32>)>,
     row_index: HashMap<u32, usize>,
+    /// The same token ids as `rows`, kept as a slice so a hot loop does not have
+    /// to rebuild them. `known()` allocated a fresh Vec of every known token on
+    /// each call, and cleanup calls it once per response per silent tick.
+    known_toks: Vec<u32>,
     pub answer_calib: Calibration,
     pub write_surprise: Running,
 }
@@ -108,6 +112,7 @@ impl Store {
             vocab: cfg.vocab,
             rows: Vec::new(),
             row_index: HashMap::new(),
+            known_toks: Vec::new(),
             answer_calib: Calibration::new(cfg.calib_bins),
             write_surprise: Running::default(),
         }
@@ -128,6 +133,7 @@ impl Store {
         }
         let fw = self.fw;
         self.row_index.insert(tok, self.rows.len());
+        self.known_toks.push(tok);
         self.rows.push((tok, vec![0.0; fw]));
         let i = self.rows.len() - 1;
         &mut self.rows[i].1
@@ -166,6 +172,12 @@ impl Store {
 
     /// Tokens that have rows: where a write samples its negatives from.
     pub fn known(&self) -> Vec<u32> {
-        self.rows.iter().map(|(t, _)| *t).collect()
+        self.known_toks.clone()
+    }
+
+    /// The known tokens without a copy.
+    #[inline]
+    pub fn known_slice(&self) -> &[u32] {
+        &self.known_toks
     }
 }

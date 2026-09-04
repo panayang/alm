@@ -702,3 +702,78 @@ fn a_walk_advances_one_link_per_silent_tick() {
         held
     );
 }
+
+/// A chain that has run out must stay where it stopped.
+///
+/// A key nobody wrote still hashes into an occupied bank and its occupants
+/// answer, so the end of a walk does not retrieve nothing -- it retrieves a
+/// neighbour, and the cursor wanders off its own answer. On the real stream the
+/// cursor stood at 0.193 with the answer one tick after the cues and 0.059 the
+/// tick after that. Read-back is what tells the two apart: bind the candidate
+/// onto the key and ask whether that triple is in the bank at all.
+#[test]
+fn a_finished_walk_holds_its_answer_through_surplus_silence() {
+    let build = |verify: f32| {
+        let mut cfg = alm::config::Config::local();
+        cfg.seed = 4;
+        cfg.vocab = 512;
+        cfg.d = 256;
+        cfg.mem_banks = 512;
+        cfg.traj = 4;
+        cfg.verify_sigma = verify;
+        cfg.derive();
+        let mut m = alm::model::Model::new(cfg.clone());
+        let (a0, a1, r) = (10usize, 11, 20);
+        for round in 0..40usize {
+            m.tick(Some(a0), false);
+            m.tick(None, false);
+            m.tick(Some(r), false);
+            m.tick(None, false);
+            m.tick(Some(a1), false);
+            for _ in 0..3 {
+                m.tick(None, false);
+            }
+            for j in 0..14usize {
+                m.tick(Some(30 + (round * 11 + j) % 400), false);
+                m.tick(None, false);
+                m.tick(Some(r), false);
+                m.tick(None, false);
+                m.tick(Some(31 + (round * 11 + j) % 400), false);
+                m.tick(None, false);
+            }
+        }
+        m.tick(Some(a0), false);
+        m.tick(Some(r), false);
+        let mut trace = Vec::new();
+        for _ in 0..6 {
+            m.tick(None, false);
+            trace.push(m.cursor_cos(a1));
+        }
+        (trace, m.verify_rejects, cfg.codebook_floor())
+    };
+
+    let (off, _, _) = build(0.0);
+    let (on, rejects, floor) = build(4.0);
+    println!("verify off: {:?}", off.iter().map(|v| (v * 100.0).round() / 100.0).collect::<Vec<_>>());
+    println!("verify on : {:?}  rejects {}", on.iter().map(|v| (v * 100.0).round() / 100.0).collect::<Vec<_>>(), rejects);
+
+    // Against the codebook floor, not a number picked by hand -- the same
+    // discipline the cleanup threshold needed after a magic 0.25 sat below its
+    // own noise floor for several runs.
+    assert!(
+        on[0] > floor,
+        "the first quiet tick did not clear the codebook floor: {:.3} against          {:.3}",
+        on[0],
+        floor
+    );
+    assert!(
+        on[5] > on[0] * 0.6,
+        "the cursor did not hold its answer through surplus silence: {:.3} at \
+         the first quiet tick, {:.3} five ticks later (without read-back: {:.3} \
+         -> {:.3})",
+        on[0],
+        on[5],
+        off[0],
+        off[5]
+    );
+}
