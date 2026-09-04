@@ -205,6 +205,18 @@ pub struct Metrics {
     /// Evidence against the reference coder, accumulated on the same events.
     pub evidence: EProcess,
 
+    /// The ledger that matches the design: codelength at the answer tick only.
+    ///
+    /// `cumulative_bits` charges every observed token, cues included. That is
+    /// next-symbol accounting, and on this source a cue is near-uniform over the
+    /// domains' entities, so most of it is the price of not doing something the
+    /// model is never asked to do. Worse, it dilutes the design's own result:
+    /// addressing nearly halves the cost of a product answer (4.40 -> 2.45 bits)
+    /// while moving the all-token figure by 14%.
+    ///
+    /// Kept as a separate accumulator rather than a change to `out.charged`, so
+    /// nothing the model does depends on which ledger is read.
+    pub answer: Bucket,
     pub cumulative_bits: f64,
     pub charged_events: u64,
     /// Diagnostics, printed but not promoted.
@@ -242,6 +254,7 @@ impl Metrics {
             idea_onset: Bucket::default(),
             speech_onset: Bucket::default(),
             evidence: EProcess::default(),
+            answer: Bucket::default(),
             cumulative_bits: 0.0,
             charged_events: 0,
             overt_ticks: 0,
@@ -372,6 +385,9 @@ impl Metrics {
 
         if !out.charged {
             return;
+        }
+        if ep.is_some() {
+            self.answer.push(out.bits, out.correct);
         }
         self.cumulative_bits += out.bits;
         self.charged_events += 1;

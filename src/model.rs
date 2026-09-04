@@ -380,6 +380,23 @@ impl Model {
     /// makes the walk depend on the situation, the state is what makes it depend
     /// on the challenge.
     fn query(&self, out: &mut Vec<f32>) {
+        use crate::config::RouteQuery;
+        if matches!(self.cfg.route_query, RouteQuery::Bound | RouteQuery::BoundState) {
+            out.clear();
+            out.resize(self.cfg.d, 0.0);
+            for b in self.binds.iter() {
+                for i in 0..self.cfg.d {
+                    out[i] += b[i];
+                }
+            }
+            if matches!(self.cfg.route_query, RouteQuery::BoundState) {
+                for i in 0..self.cfg.d {
+                    out[i] += self.p[i];
+                }
+            }
+            normalize(out);
+            return;
+        }
         out.clear();
         out.extend_from_slice(self.ladder.delta(0));
         for k in 1..self.cfg.rungs {

@@ -423,6 +423,69 @@ pub fn mechanism(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite 
     suite
 }
 
+/// Does routing on content instead of on the trajectory make the address an
+/// address?
+///
+/// Two steps, and the second is only worth reading if the first passes.
+///
+/// 1. **Address consistency.** With the query taken from the bound traces, one
+///    fact should stop scattering. The baseline is 0.146 of visits on the
+///    dominant node, over 12.1 distinct nodes per fact.
+/// 2. **argmax against random.** Under `State` these were indistinguishable
+///    (Latin 0.209 against 0.219), which is what said the addressing carried
+///    nothing. If content routing is real, argmax has to separate from random
+///    here. Each query mode therefore carries its own random control; comparing
+///    across modes would confound the repair with the arm.
+pub fn route(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for (nodes, q, qn) in [
+        (64usize, RouteQuery::State, "state"),
+        (64, RouteQuery::Bound, "bound"),
+        (64, RouteQuery::BoundState, "bound+state"),
+        (256, RouteQuery::Bound, "bound"),
+    ] {
+        for rnd in [false, true] {
+            let mut c = Config::local();
+            c.seed = seed;
+            c.vocab = gcfg.vocab;
+            c.nodes = nodes;
+            c.route_query = q;
+            c.route_random = rnd;
+            c.derive();
+            arms.push((
+                format!("n={} q={} {}", nodes, qn, if rnd { "RANDOM" } else { "argmax" }),
+                c,
+            ));
+        }
+    }
+
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (lb, la) = window_mean(&o.metrics.window);
+        let (pb, pa) = window_mean(&o.metrics.window_product);
+        let (ls, ln, _, _) = o.metrics.address_consistency_full(0);
+        let (ps, pn, _, _) = o.metrics.address_consistency_full(1);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(format!(
+            "[route] {:<24} consistency latin {:.3}/{:.1}n product {:.3}/{:.1}n |              Latin {:.3} ({:.2}b) | product {:.3} ({:.2}b) | retention {:.3} |              answer {:.3} bits over {} events",
+            name, ls, ln, ps, pn, la, lb, pa, pb, ret_acc,
+            o.metrics.answer.mean(), o.metrics.answer.n
+        ));
+    }
+    suite
+}
+
 pub struct Suite {
     pub csv: String,
     pub summary: Vec<String>,

@@ -83,6 +83,13 @@ fn main() {
                 );
             }
         }
+        "route" => {
+            let suite = experiments::route(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "mechanism" => {
             let suite = experiments::mechanism(ticks, seed, shard, shards);
             println!();

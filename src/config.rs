@@ -44,6 +44,13 @@ pub enum BindMode {
     Both,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RouteQuery {
+    State,
+    Bound,
+    BoundState,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     // ---- widths -------------------------------------------------------
@@ -203,6 +210,25 @@ pub struct Config {
     /// contrast that was supposed to rule this out, nodes=1 against no graph at
     /// all, cannot: nodes=1 has two edges, so it varies the number of random
     /// transforms rather than holding it fixed.
+    /// Where the routing query comes from.
+    ///
+    /// `State` is what has been running: `q = nu(sum_k Delta_k + p)`. It contains
+    /// no statement of *what was just observed* -- `p` is the trajectory and
+    /// `Delta` is the background -- and it moves on every gap tick, so a six-tick
+    /// gap routes to six different nodes. Measured: one fact reaches 12.1 distinct
+    /// nodes and its dominant node holds 14.6% of its visits. An argmax over an
+    /// address that unstable is a hash of noise, which is why random routing
+    /// matched it exactly.
+    ///
+    /// `Bound` routes on the bound traces instead. Those are content -- the
+    /// conjunction of what was recently observed -- and `rebind` only runs on
+    /// event ticks, so the address holds still through the gap. It needs no
+    /// challenge boundary and no prefix: a bound trace is a decaying binding of
+    /// recent observations, not a window over them.
+    ///
+    /// Address consistency is the instrument. If it does not rise well above
+    /// 0.146, the repair failed and nothing downstream of it is worth running.
+    pub route_query: RouteQuery,
     pub freeze_operator: bool,
     pub route_random: bool,
     pub bypass_graph: bool,
@@ -282,6 +308,7 @@ impl Config {
             feedback_overt: true,
             feedback_covert: true,
             feedback_write: true,
+            route_query: RouteQuery::State,
             freeze_operator: false,
             route_random: false,
             bypass_graph: false,
