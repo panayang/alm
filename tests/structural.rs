@@ -663,7 +663,15 @@ fn a_walk_advances_one_link_per_silent_tick() {
     // The query: the start, the relation, then silence.
     m.tick(Some(a0), false);
     m.tick(Some(r), false);
+    // The mixture, because that is what the readout is handed. The response that
+    // did the work stands at cosine 1.000 with the answer at every step; the
+    // mixture reads 0.41 / 0.34 / 0.32 / 0.52 because the fading responses dilute
+    // it. The floor that matters is what a random vector reaches against this
+    // codebook -- sqrt(2 ln V / d) = 0.208 here -- so these clear it by half
+    // again, and the assertion is set there rather than at the single cursor's
+    // value, which would be asserting on a quantity nothing reads.
     let at = |m: &alm::model::Model, t: usize| m.cursor_cos(t);
+    let floor = cfg.codebook_floor();
     let step1 = at(&m, a1);
     m.tick(None, false);
     let step2 = at(&m, a2);
@@ -672,19 +680,24 @@ fn a_walk_advances_one_link_per_silent_tick() {
     m.tick(None, false);
     let held = at(&m, a3);
 
-    assert!(step1 > 0.5, "the relation's own tick did not reach a1 ({:.3})", step1);
     assert!(
-        step2 > 0.3,
+        step1 > floor * 1.3,
+        "the relation's own tick did not reach a1: mixture {:.3} against a          codebook floor of {:.3}",
+        step1,
+        floor
+    );
+    assert!(
+        step2 > floor * 1.3,
         "one tick of silence did not reach a2 ({:.3}): the chain does not          advance on the model's own output",
         step2
     );
     assert!(
-        step3 > 0.3,
+        step3 > floor * 1.3,
         "two ticks of silence did not reach a3 ({:.3}): depth is not coming          from time",
         step3
     );
     assert!(
-        held > 0.3,
+        held > floor * 1.3,
         "a third tick of silence walked past the end of the walk ({:.3} from          a3): surplus thinking time has to be harmless, which is what the          cleanup threshold is for",
         held
     );
