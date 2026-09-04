@@ -34,12 +34,32 @@ pub struct Scored {
 }
 
 pub fn score(store: &Store, phi: &[f32], use_readout: bool) -> Scored {
+    score_with(store, phi, use_readout, None, 0.0, None)
+}
+
+/// As `score`, plus the cleanup term: every token is also compared directly to
+/// the state, so a retrieved cursor can be named.
+pub fn score_with(
+    store: &Store,
+    phi: &[f32],
+    use_readout: bool,
+    state: Option<&[f32]>,
+    codebook: f32,
+    emb: Option<&crate::embed::Embeddings>,
+) -> Scored {
     let mut rows = Vec::with_capacity(store.rows.len());
     let mut z = 0.0f32;
     if use_readout {
         let w = store.fw.min(phi.len());
         for (tok, row) in store.rows.iter() {
-            let s = crate::num::dot(&row[..w], &phi[..w]);
+            let mut s = crate::num::dot(&row[..w], &phi[..w]);
+            if let Some(p) = state {
+                if codebook != 0.0 {
+                    if let Some(t) = emb {
+                        s += codebook * crate::num::dot(t.row(*tok as usize), p);
+                    }
+                }
+            }
             // Clamped so one large score cannot overflow the normaliser.
             let e = s.clamp(-30.0, 30.0).exp();
             z += e;

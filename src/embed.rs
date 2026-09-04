@@ -55,7 +55,12 @@ impl Embeddings {
         let key = cfg.seed ^ 0xE_1BED;
         let mut table = vec![0.0f32; vocab * d];
         for t in 0..vocab {
-            let v = unit_vector(key, t as u64, d);
+            // Unitary, not Gaussian: binding's inverse is exact only when every
+            // Fourier magnitude is one. With Gaussian rows a single stored
+            // triple reconstructs at cosine 0.527 before any interference at
+            // all, and the 1/sqrt(k) capacity law the banking argument rests on
+            // is a statement about unitary vectors.
+            let v = crate::num::unitary_vector(key, t as u64, d);
             table[t * d..(t + 1) * d].copy_from_slice(&v);
         }
         let mut op_u = vec![0.0f32; vocab * d];

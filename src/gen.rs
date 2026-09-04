@@ -535,6 +535,8 @@ impl Generator {
         let mut episodes: Vec<EpisodeRec> = Vec::new();
         let mut counter: u64 = 0;
 
+        // (domain, cue, relation, target, kind, depth)
+        let mut pending: Vec<(usize, usize, usize, usize, Kind, u32)> = Vec::new();
         let mut probe_at: Vec<Vec<ProbeSpec>> = Vec::new();
         let mut last_span = usize::MAX;
 
@@ -543,12 +545,19 @@ impl Generator {
             if span != last_span {
                 last_span = span;
 
-                // The final exam. When a regime is in its last span, every
-                // withheld cell and every composition chain is asked exactly
-                // once, and never again -- so nothing here can be answered from
-                // a copy of the question. These are the only items in the source
-                // whose answer was never presented as a fact, and the only ones
-                // that a lookup table cannot reach.
+                // One-shot questions are queued, not examined.
+                //
+                // They used to be emitted in a burst at a regime's last span --
+                // every walk query, every withheld cell and every composition
+                // query back to back. The background that burst produces is a
+                // rapid-fire run of query tokens, a situation the stream never
+                // otherwise contains, and since the background is part of the
+                // retrieval key the questions were asked in a context nothing
+                // had been learned in. Depth-1 walk queries scored 0.000 while
+                // the identical pair scored 0.74 as an ordinary support.
+                //
+                // So there is no exam, only the stream: each question is queued
+                // once and drawn into the ordinary flow like any other item.
                 if span > 0 {
                     for d in 0..cfg.domains {
                         let stride =
@@ -560,47 +569,20 @@ impl Generator {
                         let dm = &self.domains[d];
                         for &(a, b) in dm.held_out.iter() {
                             let tgt = dm.sq_tgts[dm.square[a * cfg.square_m + b]];
-                            Self::emit_pair(
-                                &mut ticks, &mut episodes, cfg, d,
-                                dm.sq_a[a], dm.sq_b[b], tgt, Kind::Generalize,
-                                Self::GAPS[(d + a + b) % 4],
-                            );
-                        }
-                        // Walk queries: start plus relation, one gap length
-                        // per query, asked once. The gap is what the world
-                        // grants; whether it is enough is the measurement.
-                        for (wi, w) in dm.walks.iter().enumerate() {
-                            let gaps = [1u32, 2, 4, 8];
-                            let g = gaps[(d + wi) % gaps.len()];
-                            let depth = (w.len() - 1) as u32;
-                            let start = ticks.len();
-                            ticks.push(Tick::Token(w[0]));
-                            let last_cue_tick = ticks.len();
-                            ticks.push(Tick::Token(dm.walk_rel));
-                            for _ in 0..g {
-                                ticks.push(Tick::Baseline);
-                            }
-                            let target_tick = ticks.len();
-                            ticks.push(Tick::Token(w[w.len() - 1]));
-                            let _ = start;
-                            episodes.push(EpisodeRec {
-                                kind: Kind::WalkQuery,
-                                domain: d,
-                                separation: 0,
-                                answer_gap: g,
-                                target: w[w.len() - 1],
-                                cues: vec![w[0], dm.walk_rel],
-                                target_tick,
-                                last_cue_tick,
-                                depth,
-                            });
+                            pending.push((d, dm.sq_a[a], dm.sq_b[b], tgt, Kind::Generalize, 1));
                         }
                         for &(a, _b, c) in dm.chains.iter() {
-                            Self::emit_pair(
-                                &mut ticks, &mut episodes, cfg, d,
-                                a, dm.r12, c, Kind::CompQuery,
-                                Self::GAPS[(d + a) % 4],
-                            );
+                            pending.push((d, a, dm.r12, c, Kind::CompQuery, 2));
+                        }
+                        for w in dm.walks.iter() {
+                            pending.push((
+                                d,
+                                w[0],
+                                dm.walk_rel,
+                                w[w.len() - 1],
+                                Kind::WalkQuery,
+                                (w.len() - 1) as u32,
+                            ));
                         }
                     }
                 }
@@ -615,6 +597,35 @@ impl Generator {
                         probe_at[ticks.len()] = batch;
                     }
                 }
+            }
+            // A queued question takes this slot, in the ordinary flow and with
+            // an ordinary silence, so nothing about how it is asked marks it
+            // out.
+            if !pending.is_empty() && uniform(key ^ 0x77, counter) < 0.25 {
+                let i = uniform_below(key ^ 0x78, counter, pending.len() as u64) as usize;
+                let (d, cue, rel, tgt, kind, depth) = pending.swap_remove(i);
+                counter += 1;
+                let g = Self::draw_gap(key, counter);
+                ticks.push(Tick::Token(cue));
+                let last_cue_tick = ticks.len();
+                ticks.push(Tick::Token(rel));
+                for _ in 0..g {
+                    ticks.push(Tick::Baseline);
+                }
+                let target_tick = ticks.len();
+                ticks.push(Tick::Token(tgt));
+                episodes.push(EpisodeRec {
+                    kind,
+                    domain: d,
+                    separation: 0,
+                    answer_gap: g,
+                    target: tgt,
+                    cues: vec![cue, rel],
+                    target_tick,
+                    last_cue_tick,
+                    depth,
+                });
+                continue;
             }
             let live = self.live_domains(span);
             let domain = live[uniform_below(key ^ 0x71, counter, live.len() as u64) as usize];

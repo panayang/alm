@@ -746,6 +746,14 @@ pub fn run(model: &mut Model, stream: &Stream, metrics: &mut Metrics) {
             let (bits, correct) = model.probe(spec, 6);
             metrics.note_probe(spec.age_spans, bits, correct);
         }
+        // Before the answer is folded in, ask how close the cursor stands to it.
+        // This is the only population where a retrieval failure is informative.
+        if let Some(i) = stream.ep_at[t] {
+            let e = &stream.episodes[i];
+            if matches!(e.kind, crate::gen::Kind::WalkQuery) {
+                model.note_cursor(e.target);
+            }
+        }
         let out = model.tick(obs, want_entropy);
         let (ref_bits, _) = reference.observe(match obs {
             Some(x) => x as u32,

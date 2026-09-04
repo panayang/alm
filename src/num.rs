@@ -305,15 +305,118 @@ pub fn unbind(m: &[f32], a: &[f32], out: &mut [f32]) {
     circconv(m, &inv, out);
 }
 
+/// In-place radix-2 FFT. `re`/`im` have power-of-two length.
+fn fft(re: &mut [f32], im: &mut [f32], inverse: bool) {
+    let n = re.len();
+    let mut j = 0usize;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let mut len = 2usize;
+    while len <= n {
+        let ang = 2.0 * std::f64::consts::PI / len as f64 * if inverse { 1.0 } else { -1.0 };
+        let (wr, wi) = (ang.cos() as f32, ang.sin() as f32);
+        let mut i = 0usize;
+        while i < n {
+            let (mut cr, mut ci) = (1.0f32, 0.0f32);
+            for k in 0..len / 2 {
+                let (ur, ui) = (re[i + k], im[i + k]);
+                let (vr, vi) = (
+                    re[i + k + len / 2] * cr - im[i + k + len / 2] * ci,
+                    re[i + k + len / 2] * ci + im[i + k + len / 2] * cr,
+                );
+                re[i + k] = ur + vr;
+                im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr;
+                im[i + k + len / 2] = ui - vi;
+                let nr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = nr;
+            }
+            i += len;
+        }
+        len <<= 1;
+    }
+    if inverse {
+        let inv = 1.0 / n as f32;
+        for k in 0..n {
+            re[k] *= inv;
+            im[k] *= inv;
+        }
+    }
+}
+
+/// Circular convolution. O(d log d) through the FFT when `d` is a power of two,
+/// which every configuration here uses; the quadratic form is kept for the rest.
+///
+/// This was O(d^2) and called several times a tick, which is most of why a run
+/// took hours on one core.
 pub fn circconv(a: &[f32], b: &[f32], out: &mut [f32]) {
     let d = a.len();
-    for k in 0..d {
-        let mut s = 0.0f32;
-        for j in 0..d {
-            s += a[j] * b[(k + d - j) % d];
+    if d < 8 || d & (d - 1) != 0 {
+        for k in 0..d {
+            let mut s = 0.0f32;
+            for j in 0..d {
+                s += a[j] * b[(k + d - j) % d];
+            }
+            out[k] = s;
         }
-        out[k] = s;
+        return;
     }
+    let mut ar = a.to_vec();
+    let mut ai = vec![0.0f32; d];
+    let mut br = b.to_vec();
+    let mut bi = vec![0.0f32; d];
+    fft(&mut ar, &mut ai, false);
+    fft(&mut br, &mut bi, false);
+    for k in 0..d {
+        let (r, i) = (ar[k] * br[k] - ai[k] * bi[k], ar[k] * bi[k] + ai[k] * br[k]);
+        ar[k] = r;
+        ai[k] = i;
+    }
+    fft(&mut ar, &mut ai, true);
+    out[..d].copy_from_slice(&ar);
+}
+
+/// A *unitary* vector: unit-magnitude Fourier coefficients, random phase.
+///
+/// Binding's inverse is correlation, and `a (o) a` equals the identity only when
+/// every Fourier magnitude of `a` is one. Gaussian vectors do not satisfy that,
+/// and the cost is not small: measured reconstruction cosine 0.527 for a *single*
+/// stored triple with no interference at all, against 1.000 for unitary vectors.
+/// The capacity law `signal ~ 1/sqrt(k)` that the whole banking argument rests on
+/// is a statement about unitary vectors; with Gaussian ones a constant loss of
+/// about a half multiplies it, which is why even a configuration inside the
+/// computed operating region retrieved at 0.089.
+pub fn unitary_vector(key: u64, slot: u64, d: usize) -> Vec<f32> {
+    if d < 8 || d & (d - 1) != 0 {
+        return unit_vector(key, slot, d);
+    }
+    let mut ph = vec![0.0f32; d / 2 - 1];
+    fill_gaussian(key ^ 0xF7_1CE5, slot.wrapping_mul(0x2000), &mut ph);
+    let mut re = vec![0.0f32; d];
+    let mut im = vec![0.0f32; d];
+    re[0] = 1.0;
+    re[d / 2] = 1.0;
+    for k in 1..d / 2 {
+        let a = ph[k - 1] * std::f32::consts::PI;
+        re[k] = a.cos();
+        im[k] = a.sin();
+        re[d - k] = a.cos();
+        im[d - k] = -a.sin();
+    }
+    fft(&mut re, &mut im, true);
+    normalize(&mut re);
+    re
 }
 
 /// Running mean and variance (Welford), used for the allocation criterion.

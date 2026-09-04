@@ -151,7 +151,69 @@ pub struct Config {
     /// outgoing link, so the unbinding returns noise, and refusing noise leaves
     /// the cursor where it is -- stopping for free, and making surplus thinking
     /// time harmless instead of harmful.
-    pub cleanup_min_cos: f32,
+    /// Multiple of the codebook's noise floor an unbound result must clear.
+    ///
+    /// The floor is what a *random* vector scores against its best match among V
+    /// codebook entries, sqrt(2 ln V / d): 0.452 at d = 64 with 685 tokens. It
+    /// was a fixed 0.25 -- below the floor -- so cleanup accepted noise on 97.6%
+    /// of silent ticks and the cursor was randomised every tick. Measured mean
+    /// best cosine was 0.385, which is the floor and not a signal.
+    ///
+    /// The operating region follows, and it is the reference paper's trade
+    /// written quantitatively for the first time here:
+    ///
+    /// ```text
+    ///   signal  ~ 1/sqrt(k)            k = triples per bank  (interference)
+    ///   floor   ~ sqrt(2 ln V / d)                           (retrieval difficulty)
+    ///   usable  <=>  d > 2 k ln V  ~  13 k
+    /// ```
+    ///
+    /// At d = 64 that allows five triples per bank, so sixteen thousand of them
+    /// need three thousand banks. This design has never been inside its own
+    /// operating region.
+    pub cleanup_floor_mult: f32,
+    /// How many superpositions the memory is split into.
+    ///
+    /// Retrieval from a superposition degrades as 1/sqrt(k) in the number of
+    /// triples it holds -- measured 0.043 against a predicted 0.050 at k = 401 --
+    /// so one memory cannot carry a continual stream of ten thousand events. The
+    /// address chooses which bank to write and which to unbind, each stays under
+    /// capacity, and the read stays one unbinding however much has been stored.
+    ///
+    /// This is the first job content addressing has had in this project that is
+    /// not about accuracy. It measured inert on every accuracy axis because a few
+    /// hundred facts fit in one linear table with room to spare; against a
+    /// superposition the capacity is hard and the address is what buys past it.
+    /// Weight of the direct codebook comparison in the emitted score.
+    ///
+    /// `s(o) = <R_o, phi> + codebook * <E_o, p>`. The second term is not
+    /// learned; it is the cleanup memory that lets a retrieved state be *said*.
+    ///
+    /// Without it the model could retrieve and could not answer. The unbound
+    /// cursor is one of nine blocks handed to a learned linear readout, and that
+    /// readout is trained on presented facts where the bound block does all the
+    /// work, so it has no reason to put weight on the state block. Six memory
+    /// configurations -- superposition off, and one through a thousand banks --
+    /// produced a bit-identical walk surface, which is what it looks like when
+    /// the retrieval never reaches the charge.
+    pub readout_codebook: f32,
+    /// How many responses are forming at once.
+    ///
+    /// "It is not just one trajectory." A single cursor has to be aimed, and
+    /// aiming needs to know which challenge is pending -- which is
+    /// one-challenge-one-response, the autoregressive shape. Several cursors of
+    /// different ages step in parallel and the emission is their superposition:
+    /// half-formed answers maturing together, one of which is the one that comes
+    /// out. A cursor `k` ticks old has advanced `k` links, so depth is read off
+    /// which cursor matures rather than off a schedule.
+    ///
+    /// Superposition, not competition. Every mechanism this project killed was a
+    /// competition and both survivors were superpositions, so a resampling
+    /// particle filter is the wrong shape here and a parallel mixture is not.
+    /// How fast a response that retrieved nothing this tick fades out.
+    pub cursor_fade: f32,
+    pub traj: usize,
+    pub mem_banks: usize,
     pub superpose: bool,
     /// Weight of the unbound result against the standing state.
     pub unbind_mix: f32,
@@ -401,7 +463,11 @@ impl Config {
             hops: 1,
             eta: 0.5,
             event_locked_key: true,
-            cleanup_min_cos: 0.25,
+            cleanup_floor_mult: 1.6,
+            readout_codebook: 1.0,
+            cursor_fade: 0.4,
+            traj: 4,
+            mem_banks: 64,
             superpose: true,
             unbind_mix: 0.7,
             hard_negatives: true,
@@ -454,6 +520,16 @@ impl Config {
 
     /// Recompute every DERIVED field. Call after changing a FREE or CEILING
     /// field; the experiment drivers do this for every sweep point.
+    /// The cosine a random vector reaches against its best of `vocab` codebook
+    /// entries. Everything about cleanup has to be measured against this.
+    pub fn codebook_floor(&self) -> f32 {
+        (2.0 * (self.vocab.max(2) as f32).ln() / self.d as f32).sqrt()
+    }
+
+    pub fn cleanup_min_cos(&self) -> f32 {
+        self.cleanup_floor_mult * self.codebook_floor()
+    }
+
     pub fn derive(&mut self) {
         // bind_blocks() branches on use_binding; rebind() branches on
         // bind_mode. If they disagree, rebind writes past the end of the

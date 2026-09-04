@@ -1333,12 +1333,20 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
     gcfg.seed = seed ^ 0xA11CE;
     let stream = build_stream(&gcfg, ticks, 20, false);
     let mut arms: Vec<(String, Config)> = Vec::new();
-    for (sup, mix, label) in [
-        (false, 0.0f32, "superpose OFF (control)"),
-        (true, 0.4, "unbind mix 0.4"),
-        (true, 0.7, "unbind mix 0.7"),
-        (true, 1.0, "unbind mix 1.0"),
+    // Banks are the axis now: one superposition cannot hold a continual stream,
+    // and the address exists to keep each bank under its capacity.
+    // Inside and outside the operating region, which is d > 2 k ln V. With
+    // roughly sixteen thousand triples: d=64 needs ~3000 banks to be legal at
+    // all, d=256 needs ~800, d=1024 is comfortable at 1024.
+    for (sup, banks, dim, label) in [
+        (false, 1usize, 256usize, "superpose OFF (control)"),
+        (true, 64, 256, "d=256 x 64 banks"),
+        (true, 256, 256, "d=256 x 256 banks"),
+        (true, 1024, 256, "d=256 x 1024 banks"),
+        (true, 256, 512, "d=512 x 256 banks"),
+        (true, 1024, 512, "d=512 x 1024 banks"),
     ] {
+        let mix = 1.0f32;
         let mut c = Config::local();
         c.seed = seed;
         c.vocab = gcfg.vocab;
@@ -1351,6 +1359,8 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
         c.anchor = 0.0;
         c.superpose = sup;
         c.unbind_mix = mix;
+        c.mem_banks = banks;
+        c.d = dim;
         c.derive();
         arms.push((label.to_string(), c));
     }
@@ -1362,8 +1372,13 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
         let (_, la) = window_mean(&o.metrics.window);
         suite.note(
             format!(
-                "[unbind] {:<24} Latin {:.4} | answer {:.4} bits",
-                name, la, o.metrics.answer.mean()
+                "[unbind] {:<26} Latin {:.4} | answer {:.4} bits | unbind {}/{} accepted,                  mean best cos {:.3} | {} triples stored | CURSOR->answer cos {:.3} over {}",
+                name, la, o.metrics.answer.mean(),
+                o.model.unbind_hits, o.model.unbind_tries,
+                o.model.unbind_cos / o.model.unbind_tries.max(1) as f64,
+                o.model.mem_triples,
+                o.model.probe_cursor_cos / o.model.probe_cursor_n.max(1) as f64,
+                o.model.probe_cursor_n
             ) + &walk_tail(&o)
                 + &comp_tail(&o),
         );

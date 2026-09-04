@@ -96,6 +96,14 @@ pub struct Volatile {
     tick_index: u64,
     committed: Option<Vec<f32>>,
     committed_token: Option<usize>,
+    /// Responses in flight are situation, not memory, and a probe must leave
+    /// them exactly where it found them -- the same class of omission as
+    /// `tick_index`, which an audit had to find.
+    cursors: Vec<Vec<f32>>,
+    cursor_age: Vec<u32>,
+    cursor_w: Vec<f32>,
+    last_self_token: Option<usize>,
+    prev2: Option<usize>,
 }
 
 pub struct Model {
@@ -115,9 +123,28 @@ pub struct Model {
     /// Where the walk is, and where it has been.
     gnode: usize,
     /// The superposed memory: bound triples, written on speech, read on silence.
-    pub mem: Vec<f32>,
+    pub mem: Vec<Vec<f32>>,
     /// The token before last, so a triple can be formed without a boundary.
     prev2: Option<usize>,
+    /// Responses in flight. Each stepped every tick; the oldest is re-seeded
+    /// whenever the world speaks.
+    cursors: Vec<Vec<f32>>,
+    cursor_age: Vec<u32>,
+    /// How live each response is. A step whose cleanup found something sets it
+    /// to one; a step that found nothing lets it fade.
+    ///
+    /// Equal weights let a stalled response swamp a moving one: seeding happens
+    /// on every world token, so a relation token becomes a cursor of its own,
+    /// `r (o) (r (*) r)` retrieves nothing, cleanup refuses, and it sits at full
+    /// strength forever. Measured, the mixture went to 0.63 on the relation while
+    /// the response that had correctly reached `a1` fell to -0.03. Weighting is
+    /// still superposition -- no resampling, no argmax -- and it is the same idea
+    /// as committing when evidence stops rising.
+    cursor_w: Vec<f32>,
+    /// The token the model itself last said. On a silent tick this is what
+    /// arrives, which is what makes the self-output stream the thing that
+    /// advances a chain rather than a decoration.
+    last_self_token: Option<usize>,
     /// The background as it stood at the last event: the frozen half of the key.
     bands_locked: Vec<Vec<f32>>,
     visit: Vec<f32>,
@@ -145,6 +172,21 @@ pub struct Model {
     pub events: u64,
     pub total_bits: f64,
     pub content_writes: u64,
+    /// Silent ticks that attempted an unbinding, and those whose result was
+    /// close enough to a codebook entry to be accepted, with the summed best
+    /// cosine. Three mechanism changes in a row moved no number at all; without
+    /// this there was no way to tell a mechanism that does nothing from one
+    /// whose output never reaches the charge.
+    pub unbind_tries: u64,
+    pub unbind_hits: u64,
+    pub unbind_cos: f64,
+    pub mem_triples: u64,
+    /// Cosine between the cursor and a named token, sampled only where it means
+    /// something. Aggregates over every silent tick cannot show retrieval: most
+    /// silent ticks have no triple to find and are *supposed* to be noise, so
+    /// the mean is dominated by the population where failure is correct.
+    pub probe_cursor_cos: f64,
+    pub probe_cursor_n: u64,
     pub baseline_ticks: u64,
     pub overt_emissions: u64,
     pub commitments: u64,
@@ -169,6 +211,8 @@ impl Model {
         let d = cfg.d;
         let blocks = cfg.bind_blocks();
         let cfg_rungs = cfg.rungs;
+        let cfg_banks = cfg.mem_banks.max(1);
+        let cfg_traj = cfg.traj.max(1);
         let mut p = vec![0.0f32; d];
         p[0] = 1.0;
         let n = graph.nodes;
@@ -180,8 +224,12 @@ impl Model {
             graph,
             store,
             p,
-            mem: vec![0.0; d],
+            mem: vec![vec![0.0; d]; cfg_banks],
             prev2: None,
+            cursors: vec![vec![0.0; d]; cfg_traj],
+            cursor_age: vec![0; cfg_traj],
+            cursor_w: vec![0.0; cfg_traj],
+            last_self_token: None,
             bands_locked: vec![vec![0.0; d]; cfg_rungs],
             gnode: 0,
             visit: vec![0.0; n],
@@ -201,6 +249,12 @@ impl Model {
             events: 0,
             total_bits: 0.0,
             content_writes: 0,
+            unbind_tries: 0,
+            unbind_hits: 0,
+            unbind_cos: 0.0,
+            mem_triples: 0,
+            probe_cursor_cos: 0.0,
+            probe_cursor_n: 0,
             baseline_ticks: 0,
             overt_emissions: 0,
             commitments: 0,
@@ -229,6 +283,11 @@ impl Model {
             tick_index: self.tick_index,
             committed: self.committed.clone(),
             committed_token: self.committed_token,
+            cursors: self.cursors.clone(),
+            cursor_age: self.cursor_age.clone(),
+            cursor_w: self.cursor_w.clone(),
+            last_self_token: self.last_self_token,
+            prev2: self.prev2,
         }
     }
 
@@ -247,6 +306,11 @@ impl Model {
         self.tick_index = v.tick_index;
         self.committed = v.committed;
         self.committed_token = v.committed_token;
+        self.cursors = v.cursors;
+        self.cursor_age = v.cursor_age;
+        self.cursor_w = v.cursor_w;
+        self.last_self_token = v.last_self_token;
+        self.prev2 = v.prev2;
         self.covert_log.clear();
         self.overt_log.clear();
     }
@@ -256,6 +320,46 @@ impl Model {
     /// so a probe cannot leak into the stream that follows it.
     /// The i-th bound trace, so a test can check that what the readout is handed
     /// at an answer tick is the conjunction it is supposed to be.
+    /// How close the cursor now stands to a given token.
+    /// Per-response state, so a diagnostic can see which one is advancing
+    /// instead of only their sum.
+    pub fn cursor_report(&self, toks: &[usize]) -> Vec<(f32, u32, Vec<f32>)> {
+        (0..self.cursors.len())
+            .map(|i| {
+                let cs = toks
+                    .iter()
+                    .map(|&t| {
+                        let e = self.emb.row(t);
+                        crate::num::dot(&self.cursors[i], e) / crate::num::norm(e).max(1e-9)
+                    })
+                    .collect();
+                (self.cursor_w[i], self.cursor_age[i], cs)
+            })
+            .collect()
+    }
+
+    pub fn cursor_cos(&self, tok: usize) -> f32 {
+        let e = self.emb.row(tok);
+        crate::num::dot(&self.p, e) / crate::num::norm(e).max(1e-9)
+    }
+
+    /// Record that cosine for a token the caller knows to be the right answer.
+    pub fn note_cursor(&mut self, tok: usize) {
+        self.probe_cursor_cos += self.cursor_cos(tok) as f64;
+        self.probe_cursor_n += 1;
+    }
+
+    /// Everything a probe must leave exactly as it found it, flattened so a
+    /// test can compare it in one equality.
+    pub fn snapshot_debug(&self) -> (Vec<u32>, Vec<u32>, Option<usize>, Option<usize>, u64) {
+        let cur: Vec<u32> = self
+            .cursors
+            .iter()
+            .flat_map(|c| c.iter().map(|v| v.to_bits()))
+            .collect();
+        (cur, self.cursor_age.clone(), self.last_self_token, self.prev2, self.tick_index)
+    }
+
     pub fn bound_block(&self, i: usize) -> &[f32] {
         &self.binds[i]
     }
@@ -375,6 +479,115 @@ impl Model {
 
     /// Snapshot the background. Called on event ticks only, so the retrieval key
     /// stops moving the moment the world does.
+    /// Which superposition a bound pair belongs to.
+    ///
+    /// The same pair must reach the same bank whether it is being written or
+    /// asked about, so the bank is a function of the pair's content and of
+    /// nothing else -- no state, no trajectory, no elapsed time. Fixed random
+    /// keys, never trained, as the reference mechanism has it.
+    pub fn bank_of(&self, pair: &[f32]) -> usize {
+        let n = self.mem.len();
+        if n <= 1 {
+            return 0;
+        }
+        let mut best = (f32::NEG_INFINITY, 0usize);
+        for b in 0..n {
+            let k = crate::num::unit_vector(self.cfg.seed ^ 0xBA_11C5, b as u64, self.cfg.d);
+            let s = crate::num::dot(&k, pair);
+            if s > best.0 {
+                best = (s, b);
+            }
+        }
+        best.1
+    }
+
+    /// Step every response in flight one link, against the token that arrived.
+    ///
+    /// The token is the world's when it speaks and the model's own last emission
+    /// when it does not, so the same rule runs on every tick and nothing has to
+    /// know whether a challenge is pending. Circular convolution commutes, so a
+    /// cursor that has just said `a1` after hearing `r` carries the trace
+    /// `(r (*) a1) = (a1 (*) r)`, which is exactly the key for the next link.
+    fn step_cursors(&mut self, arriving: usize) {
+        if !self.cfg.superpose {
+            return;
+        }
+        let d = self.cfg.d;
+        let tok = self.emb.row(arriving).to_vec();
+        for i in 0..self.cursors.len() {
+            if self.cursor_w[i] <= 1e-3 {
+                // Faded out: it costs nothing and must keep ageing so it stays
+                // the natural one to recycle.
+                self.cursor_age[i] += 1;
+                continue;
+            }
+            let mut q = vec![0.0f32; d];
+            crate::num::circconv(&self.cursors[i], &tok, &mut q);
+            normalize(&mut q);
+            let bank = self.bank_of(&q);
+            let mut raw = vec![0.0f32; d];
+            crate::num::unbind(&self.mem[bank], &q, &mut raw);
+            normalize(&mut raw);
+            let mut clean = Vec::new();
+            let (ok, cos) = self.cleanup(&raw, &mut clean);
+            if !self.frozen {
+                self.unbind_tries += 1;
+                self.unbind_cos += cos as f64;
+            }
+            if ok {
+                if !self.frozen {
+                    self.unbind_hits += 1;
+                }
+                self.cursors[i] = clean;
+                self.cursor_w[i] = 1.0;
+            } else {
+                self.cursor_w[i] *= self.cfg.cursor_fade;
+            }
+            self.cursor_age[i] += 1;
+        }
+        // The mixture is the state the readout sees: a superposition of the
+        // answers in flight, not a winner.
+        let mut mix = vec![0.0f32; d];
+        for (i, c) in self.cursors.iter().enumerate() {
+            let w = self.cursor_w[i];
+            if w <= 1e-3 {
+                continue;
+            }
+            for j in 0..d {
+                mix[j] += w * c[j];
+            }
+        }
+        if crate::num::norm(&mix) > 1e-6 {
+            normalize(&mut mix);
+            self.p = mix;
+        }
+    }
+
+    /// The world spoke: retire the oldest response and start a new one here.
+    fn seed_cursor(&mut self, tok: usize) {
+        if !self.cfg.superpose || self.cursors.is_empty() {
+            return;
+        }
+        // Retire the least live response, not the oldest. On ties "oldest" is
+        // index 0, which is exactly where the response that has just advanced
+        // sits, so seeding destroyed the one link that had worked -- the cursor
+        // reached a1 on the relation's own tick and was overwritten by the
+        // relation in the same tick.
+        let mut worst = 0usize;
+        for i in 1..self.cursors.len() {
+            let (wi, wb) = (self.cursor_w[i], self.cursor_w[worst]);
+            if wi < wb - 1e-6 || ((wi - wb).abs() <= 1e-6 && self.cursor_age[i] > self.cursor_age[worst])
+            {
+                worst = i;
+            }
+        }
+        let oldest = worst;
+        self.cursors[oldest].copy_from_slice(self.emb.row(tok));
+        normalize(&mut self.cursors[oldest]);
+        self.cursor_age[oldest] = 0;
+        self.cursor_w[oldest] = 1.0;
+    }
+
     fn lock_bands(&mut self) {
         if !self.cfg.event_locked_key {
             return;
@@ -387,22 +600,26 @@ impl Model {
     /// Snap an unbound result to the nearest token the store has a row for, if
     /// anything is near enough. Returns false when nothing is, which is the
     /// signal that the chain has run out of links.
-    fn cleanup(&self, v: &[f32], out: &mut Vec<f32>) -> bool {
-        let mut best = (self.cfg.cleanup_min_cos, usize::MAX);
+    fn cleanup(&self, v: &[f32], out: &mut Vec<f32>) -> (bool, f32) {
+        let mut best = (self.cfg.cleanup_min_cos(), usize::MAX);
+        let mut raw_best = 0.0f32;
         for t in self.store.known() {
             let e = self.emb.row(t as usize);
             let c = crate::num::dot(v, e) / crate::num::norm(e).max(1e-9);
+            if c > raw_best {
+                raw_best = c;
+            }
             if c > best.0 {
                 best = (c, t as usize);
             }
         }
         if best.1 == usize::MAX {
-            return false;
+            return (false, raw_best);
         }
         out.clear();
         out.extend_from_slice(self.emb.row(best.1));
         normalize(out);
-        true
+        (true, best.0)
     }
 
     /// Refresh the bound traces from the arriving token. Called after the
@@ -608,8 +825,21 @@ impl Model {
 
     // ---- emission --------------------------------------------------------
 
+    /// What the model would say, scored the same way the ledger charges: the
+    /// learned rows plus the direct comparison of every token to the state.
     fn best_answer(&self, phi: &[f32]) -> Option<(usize, f32)> {
-        code::score(&self.store, phi, !self.cfg.no_readout).top().map(|(t, q)| (t as usize, q))
+        let d = self.cfg.d;
+        let st: Vec<f32> = phi[..d.min(phi.len())].to_vec();
+        code::score_with(
+            &self.store,
+            phi,
+            !self.cfg.no_readout,
+            Some(&st),
+            self.cfg.readout_codebook,
+            Some(&self.emb),
+        )
+        .top()
+        .map(|(t, q)| (t as usize, q))
     }
 
     /// Decide what to think and what to say, and log both. Runs on every tick,
@@ -624,6 +854,11 @@ impl Model {
             Some(v) => v,
         };
         self.covert = Some(t);
+        // What the model just said is what arrives next tick if the world stays
+        // quiet. Covert rather than overt: the founding requirement is that the
+        // model is always outputting and that its own output is context, not
+        // that it has to commit out loud before it may think against it.
+        self.last_self_token = Some(t);
         out.top1 = Some(t);
         self.covert_log.push((self.ticks_since_event, t));
 
@@ -750,42 +985,26 @@ impl Model {
                 self.ladder.refresh();
                 self.graph.decay_traces(self.cfg.trace_lambda);
 
-                // The read. The response keeps unfolding for as long as the
-                // world gives it ticks; this is what the gap is for. Switched
-                // off, the response state freezes after the write walk and the
-                // gap does nothing -- which is the control that says whether any
-                // of the gain is the walk.
-                // Silence: unbind. There is nothing to combine, so the tick
-                // does the opposite -- release out of memory whatever was stored
-                // against the state bound with the most recent observation. One
-                // quiet tick, one link; the world decides how far the chain gets
-                // by deciding how long to stay quiet.
-                if self.cfg.superpose {
-                    if let Some(&last) = self.event_hist.first() {
-                        // One quiet tick, one link. The cursor is the state; the
-                        // relation is whatever the world said most recently.
-                        // Both are event-locked, so this needs no boundary and
-                        // no schedule.
-                        let d = self.cfg.d;
-                        let mut q = vec![0.0f32; d];
-                        crate::num::circconv(&self.p, self.emb.row(last), &mut q);
-                        normalize(&mut q);
-                        let mut raw = vec![0.0f32; d];
-                        crate::num::unbind(&self.mem, &q, &mut raw);
-                        normalize(&mut raw);
-                        let mut clean = Vec::new();
-                        if self.cleanup(&raw, &mut clean) {
-                            let m = self.cfg.unbind_mix;
-                            for i in 0..d {
-                                self.p[i] = (1.0 - m) * self.p[i] + m * clean[i];
-                            }
-                            normalize(&mut self.p);
-                        }
-                        // Nothing near enough in the codebook means the chain has
-                        // no next link, so the cursor stays where it is and more
-                        // silence costs nothing.
-                    }
+                // The world is quiet, so what arrives is what the model itself
+                // last said. There is no "is a challenge pending" to answer:
+                // every tick has a token, and the self-output stream is how a
+                // chain advances rather than a channel bolted alongside one.
+                // The relation is the operator and stays on the table; the
+                // model's own output is where it has got to, which is the
+                // cursor itself. Stepping with the self-token instead computed
+                // `a1 (*) a1` once the cursor had already become a1, so the
+                // first link worked and the chain never advanced past it.
+                if let Some(t) = self.event_hist.first().copied() {
+                    // Step the responses, but do NOT rebind. `step_cursors` uses
+                    // `cursor (*) E_arriving` and never reads `binds`, so binding
+                    // the self-token here did nothing for the mechanism and
+                    // overwrote the world's conjunction, which is what the Latin
+                    // and product families are answered from. Distinguish and
+                    // combine: the self stream drives retrieval, the world's
+                    // stream owns the key.
+                    self.step_cursors(t);
                 }
+
                 if self.cfg.walk_during_gap {
                     self.step_walk();
                 }
@@ -819,7 +1038,7 @@ impl Model {
                 if silent {
                     self.silent_settlements += 1;
                 }
-                let sc = code::score(&self.store, &phi, !self.cfg.no_readout && !silent);
+                let sc = code::score_with(&self.store, &phi, !self.cfg.no_readout && !silent, Some(&p0), self.cfg.readout_codebook, Some(&self.emb));
                 let prob = sc.prob_of(&self.store, x as u32);
                 out.bits = code::charge_bits(prob);
                 self.total_bits += out.bits;
@@ -885,7 +1104,7 @@ impl Model {
                         // The associative write: the same `Scored` the ledger
                         // charged, so the rows are fitted against the
                         // distribution that was actually settled.
-                        let sc_neg = code::score(&self.store, &phi, !self.cfg.no_readout);
+                        let sc_neg = code::score_with(&self.store, &phi, !self.cfg.no_readout, Some(&p0), self.cfg.readout_codebook, Some(&self.emb));
                         let negs = if self.cfg.hard_negatives {
                             self.top_negatives(&sc_neg, x as u32, self.cfg.neg_samples)
                         } else {
@@ -898,7 +1117,7 @@ impl Model {
                         // distribution the ledger never charged -- exactly what
                         // `code.rs` says must not happen. Identical when the
                         // flag is off, which is why it stayed hidden.
-                        let sc_write = code::score(&self.store, &phi, !self.cfg.no_readout && !silent);
+                        let sc_write = code::score_with(&self.store, &phi, !self.cfg.no_readout && !silent, Some(&p0), self.cfg.readout_codebook, Some(&self.emb));
                         self.store.write(&sc_write, &phi, x as u32, &negs, eta);
                     }
                     if !self.cfg.no_eligibility {
@@ -950,10 +1169,23 @@ impl Model {
                         let mut tri = vec![0.0f32; d];
                         crate::num::circconv(&pair, self.emb.row(x), &mut tri);
                         normalize(&mut tri);
+                        let bank = self.bank_of(&pair);
+                        // Accumulate. Do NOT renormalise here.
+                        //
+                        // `M <- nu(M + t)` with both unit and near-orthogonal
+                        // gives |M + t| ~ sqrt(2), so every write shrank
+                        // everything already stored by 1/sqrt(2) and the first
+                        // item's weight after k writes was 2^(-k/2): an
+                        // effective horizon of two or three triples across a run
+                        // of ten thousand events. A superposition that forgets
+                        // in three steps is a sliding window, and the point of
+                        // superposing is that it is not one. Unbinding compares
+                        // by cosine, which is scale-free, so the plain sum needs
+                        // no normalisation at all.
                         for i in 0..d {
-                            self.mem[i] += tri[i];
+                            self.mem[bank][i] += tri[i];
                         }
-                        normalize(&mut self.mem);
+                        self.mem_triples += 1;
                     }
                     self.prev2 = self.event_hist.first().copied();
                     // The cursor is the second-to-last observation. When the
@@ -965,6 +1197,8 @@ impl Model {
                     }
                 }
                 self.rebind(x);
+                self.step_cursors(x);
+                self.seed_cursor(x);
                 self.ladder.observe_world(&v);
                 self.feedback();
                 self.ladder.refresh();
