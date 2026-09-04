@@ -437,10 +437,15 @@ impl Model {
         }
         let mut q = Vec::with_capacity(self.cfg.d);
         self.query(&mut q);
+        let from = if self.cfg.read_entry_by_content && !self.cfg.route_random {
+            self.graph.entry(&q)
+        } else {
+            self.gnode
+        };
         let a = if self.cfg.route_random {
             self.graph.select_random(self.gnode, self.tick_index as u64)
         } else {
-            self.graph.select_rank(self.gnode, &q, self.cfg.route_perturb)
+            self.graph.select_rank(from, &q, self.cfg.route_perturb)
         };
         let cur = self.p.clone();
         let st = self.graph.hop(a, &cur);

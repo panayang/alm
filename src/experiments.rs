@@ -444,11 +444,13 @@ pub fn route(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
     let stream = build_stream(&gcfg, ticks, 20, false);
 
     let mut arms: Vec<(String, Config)> = Vec::new();
-    for (nodes, q, qn) in [
-        (64usize, RouteQuery::State, "state"),
-        (64, RouteQuery::Bound, "bound"),
-        (64, RouteQuery::BoundState, "bound+state"),
-        (256, RouteQuery::Bound, "bound"),
+    for (nodes, q, qn, entry) in [
+        (64usize, RouteQuery::State, "state", false),
+        (64, RouteQuery::Bound, "bound", false),
+        (64, RouteQuery::State, "state", true),
+        (64, RouteQuery::Bound, "bound", true),
+        (256, RouteQuery::Bound, "bound", false),
+        (256, RouteQuery::Bound, "bound", true),
     ] {
         for rnd in [false, true] {
             let mut c = Config::local();
@@ -457,9 +459,16 @@ pub fn route(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
             c.nodes = nodes;
             c.route_query = q;
             c.route_random = rnd;
+            c.read_entry_by_content = entry;
             c.derive();
             arms.push((
-                format!("n={} q={} {}", nodes, qn, if rnd { "RANDOM" } else { "argmax" }),
+                format!(
+                    "n={} q={}{} {}",
+                    nodes,
+                    qn,
+                    if entry { "+ENTRY" } else { "" },
+                    if rnd { "RANDOM" } else { "argmax" }
+                ),
                 c,
             ));
         }
@@ -481,6 +490,63 @@ pub fn route(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
             "[route] {:<24} consistency latin {:.3}/{:.1}n product {:.3}/{:.1}n |              Latin {:.3} ({:.2}b) | product {:.3} ({:.2}b) | retention {:.3} |              answer {:.3} bits over {} events",
             name, ls, ln, ps, pn, la, lb, pa, pb, ret_acc,
             o.metrics.answer.mean(), o.metrics.answer.n
+        ));
+    }
+    suite
+}
+
+/// The four decisive cells, replicated across seeds.
+///
+/// Content routing beat its matched random control by +0.015 Latin and +0.02
+/// product at both node counts, which is exactly the size at which one seed
+/// decides nothing. Stream and model seed move together, so this replicates the
+/// claim rather than just the initialisation.
+pub fn seeds(ticks: usize, seed0: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut jobs: Vec<(u64, usize, bool)> = Vec::new();
+    for s in 0..4u64 {
+        for nodes in [64usize, 256] {
+            for rnd in [false, true] {
+                jobs.push((seed0.wrapping_add(s.wrapping_mul(0x9E37_79B9)), nodes, rnd));
+            }
+        }
+    }
+    let mut last_seed: Option<u64> = None;
+    let mut stream = None;
+    let mut gcfg = GenConfig::fast();
+    for (i, (sd, nodes, rnd)) in jobs.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        if last_seed != Some(sd) {
+            gcfg = GenConfig::fast();
+            gcfg.seed = sd ^ 0xA11CE;
+            stream = Some(build_stream(&gcfg, ticks, 20, false));
+            last_seed = Some(sd);
+        }
+        let st = stream.as_ref().unwrap();
+        let mut c = Config::local();
+        c.seed = sd;
+        c.vocab = gcfg.vocab;
+        c.nodes = nodes;
+        c.route_query = RouteQuery::Bound;
+        c.read_entry_by_content = true;
+        c.route_random = rnd;
+        c.derive();
+        let name = format!(
+            "seed={:#x} n={} {}",
+            sd, nodes, if rnd { "RANDOM" } else { "content" }
+        );
+        let o = run_one(&name, c, &gcfg, st);
+        let (lb, la) = window_mean(&o.metrics.window);
+        let (pb, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(format!(
+            "[seed] {:<28} Latin {:.4} ({:.3}b) | product {:.4} ({:.3}b) |              retention {:.4} | answer {:.4} bits",
+            name, la, lb, pa, pb, ret_acc, o.metrics.answer.mean()
         ));
     }
     suite

@@ -228,6 +228,20 @@ pub struct Config {
     ///
     /// Address consistency is the instrument. If it does not rise well above
     /// 0.146, the repair failed and nothing downstream of it is worth running.
+    /// Enter the read walk at the content-determined node, as the write walk
+    /// already does, instead of continuing from wherever the last walk stopped.
+    ///
+    /// `gnode` is initialised to 0 and thereafter only ever follows edges, so a
+    /// read is a wander from its predecessor that content nudges among at most
+    /// four local out-edges. The write walk calls `entry(q)` and is content
+    /// addressed; the read walk never has been. No query, however clean, can
+    /// produce a content address when the starting node is set by history --
+    /// which is why routing on the bound traces changed nothing.
+    ///
+    /// With a query that holds still through the gap, this also pins the address
+    /// while the state keeps evolving under one operator, which is nearer to
+    /// "iterate with memory" than stepping to a new node every tick.
+    pub read_entry_by_content: bool,
     pub route_query: RouteQuery,
     pub freeze_operator: bool,
     pub route_random: bool,
@@ -308,6 +322,7 @@ impl Config {
             feedback_overt: true,
             feedback_covert: true,
             feedback_write: true,
+            read_entry_by_content: false,
             route_query: RouteQuery::State,
             freeze_operator: false,
             route_random: false,
