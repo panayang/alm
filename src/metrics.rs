@@ -164,6 +164,22 @@ pub struct Metrics {
     /// the walk is diffusing and its prior says nothing.
     pub visit_h: Vec<Bucket>,
     pub composition_query: Bucket,
+    /// Withheld Latin cells, asked once each and never presented as facts.
+    /// Nothing can be memorised here; only the square's rule answers them.
+    pub generalize: Bucket,
+    /// Accuracy by how many times this exact fact has already been charged:
+    /// [Second, Product, CompQuery] x [1st time, 2nd, 3rd, 4th+].
+    ///
+    /// Every family in this source is presented as a pair and then queried
+    /// again, so a lookup that memorises the pair scores the same as a mechanism
+    /// that composes or generalises. The first exposure is the only column where
+    /// they differ: the fact has never been charged before, so nothing about it
+    /// can have been stored as a pair. For a composition query that column is
+    /// the chaining test -- `a -> c` is never presented as a fact, but after its
+    /// first query it has been charged and written like any other pair, and from
+    /// then on it is a lookup.
+    pub by_exposure: [[Bucket; 4]; 3],
+    seen_fact: std::collections::HashMap<(u8, usize, usize), u32>,
     pub composition_support: Bucket,
     pub all_events: Bucket,
 
@@ -245,6 +261,9 @@ impl Metrics {
             by_hops: vec![Bucket::default(); HOP_BINS],
             visit_h: vec![Bucket::default(); HOP_BINS],
             composition_query: Bucket::default(),
+            generalize: Bucket::default(),
+            by_exposure: Default::default(),
+            seen_fact: std::collections::HashMap::new(),
             composition_support: Bucket::default(),
             all_events: Bucket::default(),
             leaf_domain: std::collections::HashMap::new(),
@@ -390,8 +409,22 @@ impl Metrics {
         if !out.charged {
             return;
         }
-        if ep.is_some() {
+        if let Some(e) = ep {
             self.answer.push(out.bits, out.correct);
+            let fam = match e.kind {
+                Kind::Second => Some(0usize),
+                Kind::Product => Some(1),
+                Kind::CompQuery => Some(2),
+                _ => None,
+            };
+            if let Some(f) = fam {
+                let c0 = e.cues.first().copied().unwrap_or(0);
+                let c1 = e.cues.get(1).copied().unwrap_or(0);
+                let k = (f as u8, c0, c1);
+                let n = *self.seen_fact.get(&k).unwrap_or(&0);
+                self.by_exposure[f][(n as usize).min(3)].push(out.bits, out.correct);
+                self.seen_fact.insert(k, n + 1);
+            }
         }
         self.cumulative_bits += out.bits;
         self.charged_events += 1;
@@ -439,6 +472,7 @@ impl Metrics {
                     }
                 }
                 Kind::CompQuery => self.composition_query.push(out.bits, out.correct),
+                Kind::Generalize => self.generalize.push(out.bits, out.correct),
                 Kind::CompSupport => self.composition_support.push(out.bits, out.correct),
             }
         }

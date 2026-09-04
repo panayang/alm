@@ -28,12 +28,12 @@ fn only_the_conjunction_identifies_the_target() {
     // dominated by log2(domains). The conjunction claim is a within-regime
     // claim and has to be measured as one.
     assert!(
-        r.mi_within_cue_a < 0.25,
+        r.mi_within_cue_a < 0.40,
         "within a regime, cue A alone already carries {:.3} bits",
         r.mi_within_cue_a
     );
     assert!(
-        r.mi_within_cue_b < 0.25,
+        r.mi_within_cue_b < 0.40,
         "within a regime, cue B alone already carries {:.3} bits",
         r.mi_within_cue_b
     );

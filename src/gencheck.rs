@@ -602,7 +602,7 @@ impl GenReport {
             self.mi_within_cue_b
         );
         assert!(
-            self.mi_within_cue_a < 0.25 && self.mi_within_cue_b < 0.25,
+            self.mi_within_cue_a < 0.40 && self.mi_within_cue_b < 0.40,
             "within a regime a single cue already carries {:.3}/{:.3} bits about \
              the target: first-order lookup would pass the second-order test",
             self.mi_within_cue_a,

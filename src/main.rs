@@ -83,6 +83,13 @@ fn main() {
                 );
             }
         }
+        "loadcurve" => {
+            let suite = experiments::loadcurve(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "minimal" => {
             let suite = experiments::minimal(ticks, seed, shard, shards);
             println!();

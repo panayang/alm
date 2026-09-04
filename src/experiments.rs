@@ -700,14 +700,15 @@ pub fn freeze2(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
 /// bucket all along and was never once printed.
 pub fn comp_tail(o: &Outcome) -> String {
     let q = &o.metrics.composition_query;
-    let sup = &o.metrics.composition_support;
+    let g = &o.metrics.generalize;
     format!(
-        " | comp-query {:.4} ({:.2}b, n={}) | comp-support {:.4} (n={})",
+        " | ONE-SHOT comp-query {:.4} ({:.2}b, n={}) | held-out cell {:.4} ({:.2}b, n={})",
         q.accuracy(),
         q.mean(),
         q.n,
-        sup.accuracy(),
-        sup.n
+        g.accuracy(),
+        g.mean(),
+        g.n
     )
 }
 
@@ -1154,10 +1155,146 @@ pub fn minimal(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
             format!(
                 "[min] {:<34} Latin {:.4} | product {:.4} | retention {:.4} |                  answer {:.4} bits | {} blocks",
                 name, la, pa, ret_acc, o.metrics.answer.mean(), blocks
-            ) + &comp_tail(&o),
+            ) + &comp_tail(&o)
+                + &exposure_tail(&o),
         );
     }
     suite
+}
+
+/// The metrics an expansion mechanism is actually for.
+///
+/// Accuracy at matched parameters is the wrong test: capacity expansion does not
+/// promise to be more accurate, it promises that accuracy survives accumulation
+/// and that retrieval stays cheap. Those are two separate quantities and the
+/// reference paper's title names both -- interference against retrieval
+/// difficulty -- while a single accuracy number confounds them.
+///
+/// `retention` has been bucketed by the age of the departed regime all along and
+/// only ever been reported pooled, so the *slope* -- how fast old content decays
+/// as new content arrives -- has never been looked at. Rows scanned per answer is
+/// the cost side; it is currently the whole table, for every arm, because the
+/// address gates the state and not the storage.
+pub fn interference_tail(o: &Outcome) -> String {
+    let r = &o.metrics.retention;
+    let pts: Vec<(f64, f64)> = r
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.n > 20)
+        .map(|(i, b)| (i as f64, b.accuracy()))
+        .collect();
+    let slope = if pts.len() < 3 {
+        f64::NAN
+    } else {
+        let n = pts.len() as f64;
+        let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+        for &(x, y) in pts.iter() {
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+        }
+        let den = n * sxx - sx * sx;
+        if den.abs() < 1e-12 { f64::NAN } else { (n * sxy - sx * sy) / den }
+    };
+    let by_age: Vec<String> = r
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.n > 20)
+        .map(|(i, b)| format!("{}:{:.3}", i, b.accuracy()))
+        .collect();
+    format!(
+        " | retention by age [{}] slope {:+.4} | rows scanned/answer {}",
+        by_age.join(" "),
+        slope,
+        o.model.store.occupied_rows()
+    )
+}
+
+/// Push the load, and judge on what expansion is for.
+///
+/// Everything measured so far reduces to "on a small simple source a simpler
+/// mechanism wins", which is not news. The claim worth testing is that expansion
+/// keeps working as content accumulates -- so the load goes up and the metrics
+/// change: the retention *slope* against the age of a departed regime, and the
+/// rows scanned per answer, alongside accuracy rather than instead of it.
+///
+/// Graph against no-graph at each load. If the graph is ever going to earn its
+/// place it is at the top of this sweep, and if the slopes are identical there
+/// too then it is not an expansion mechanism on this source at all.
+pub fn loadcurve(base_ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut jobs: Vec<(usize, bool)> = Vec::new();
+    for domains in [12usize, 36, 96] {
+        for graph in [false, true] {
+            jobs.push((domains, graph));
+        }
+    }
+    let mut last: Option<usize> = None;
+    let mut stream = None;
+    let mut gcfg = GenConfig::fast();
+    for (i, (domains, graph)) in jobs.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        if last != Some(domains) {
+            gcfg = GenConfig::fast();
+            gcfg.seed = seed ^ 0xA11CE;
+            gcfg.domains = domains;
+            // 67 tokens per regime, so the vocabulary has to grow with the load
+            // or the generator's own assertion stops the run.
+            gcfg.vocab = (((32 + 32 + 3) * domains) * 5 / 4).next_power_of_two().max(4096);
+            stream = Some(build_stream(&gcfg, base_ticks * domains / 12, 20, false));
+            last = Some(domains);
+        }
+        let st = stream.as_ref().unwrap();
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = gcfg.vocab;
+        c.nodes = 64;
+        c.route_query = RouteQuery::Bound;
+        c.read_entry_by_content = true;
+        c.walk_during_gap = false;
+        c.freeze_operator = true;
+        c.anchor = if graph { c.anchor } else { 0.0 };
+        c.bypass_graph = !graph;
+        c.derive();
+        let name = format!("domains={} {}", domains, if graph { "GRAPH" } else { "no-graph" });
+        let o = run_one(&name, c, &gcfg, st);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        suite.note(
+            format!(
+                "[load2] {:<22} Latin {:.4} | product {:.4} | answer {:.4} bits",
+                name, la, pa, o.metrics.answer.mean()
+            ) + &comp_tail(&o)
+                + &interference_tail(&o),
+        );
+    }
+    suite
+}
+
+/// Accuracy the first time a fact is charged, against later times.
+///
+/// The gap between the two columns is the gap between generalising and
+/// memorising, and this source cannot otherwise tell them apart.
+pub fn exposure_tail(o: &Outcome) -> String {
+    let names = ["latin", "product", "comp-q"];
+    let mut parts = Vec::new();
+    for f in 0..3 {
+        let b = &o.metrics.by_exposure[f];
+        parts.push(format!(
+            "{} 1st {:.3}(n={}) 2nd {:.3} 3rd {:.3} 4th+ {:.3}",
+            names[f],
+            b[0].accuracy(),
+            b[0].n,
+            b[1].accuracy(),
+            b[2].accuracy(),
+            b[3].accuracy()
+        ));
+    }
+    format!(" | FIRST-EXPOSURE {}", parts.join(" ; "))
 }
 
 pub struct Suite {

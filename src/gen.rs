@@ -88,7 +88,21 @@ pub enum Kind {
     /// One of the two support facts for a composition query.
     CompSupport,
     /// The composition query itself, never presented as a fact.
+    ///
+    /// Posed exactly once per chain, late in the regime's life. It used to be
+    /// posed on 20% of chain draws, so after its first appearance it had been
+    /// charged and written like any other pair and every later hit was a lookup
+    /// -- which is why composition read 0.75 while its first exposure read
+    /// 0.000. A chaining test survives exactly one question.
     CompQuery,
+    /// A Latin cell that is never presented as a fact, asked once.
+    ///
+    /// Every family in this source is a pair presented repeatedly and then
+    /// asked, so memorising the pair scores the same as learning the structure.
+    /// A quarter of each square's cells are withheld from presentation and each
+    /// is asked once, late. The square is `t = (a + b) mod m`, so a mechanism
+    /// that has the rule answers them and a lookup table cannot.
+    Generalize,
 }
 
 #[derive(Clone, Copy)]
@@ -270,6 +284,8 @@ struct Domain {
     firsts: Vec<(usize, usize)>,
     /// Composition chains: (a, b, c) with relation tokens r1, r2, r12.
     chains: Vec<(usize, usize, usize)>,
+    /// Square cells (a, b) withheld from presentation, asked once each.
+    held_out: Vec<(usize, usize)>,
     r1: usize,
     r2: usize,
     r12: usize,
@@ -362,8 +378,21 @@ impl Generator {
                 j += 1;
             }
 
+            // The diagonal: exactly one withheld cell per row and per column.
+            //
+            // Any withholding perturbs the shown marginals -- a row missing one
+            // of its m targets has P(T|A) uniform over m-1 rather than m, worth
+            // log2(m) - log2(m-1) = 0.263 bits at m = 6. The diagonal at least
+            // keeps the two sides symmetric, so cue A and cue B stay equally
+            // (un)informative and gencheck's single-cue baseline measures the
+            // residue instead of it hiding in an asymmetry. A scattered set
+            // withholds one cell from some rows and two from others and does
+            // not.
+            let held_out: Vec<(usize, usize)> = (0..m).map(|a| (a, a)).collect();
+
             domains.push(Domain {
                 ents,
+                held_out,
                 tgts,
                 square,
                 sq_a,
@@ -469,6 +498,38 @@ impl Generator {
             let span = ticks.len() / cfg.span_ticks;
             if span != last_span {
                 last_span = span;
+
+                // The final exam. When a regime is in its last span, every
+                // withheld cell and every composition chain is asked exactly
+                // once, and never again -- so nothing here can be answered from
+                // a copy of the question. These are the only items in the source
+                // whose answer was never presented as a fact, and the only ones
+                // that a lookup table cannot reach.
+                if span > 0 {
+                    for d in 0..cfg.domains {
+                        let stride =
+                            (cfg.lifetime_spans.max(1) / cfg.concurrent.max(1)).max(1);
+                        let last = d * stride + cfg.lifetime_spans - 1;
+                        if last != span {
+                            continue;
+                        }
+                        let dm = &self.domains[d];
+                        for &(a, b) in dm.held_out.iter() {
+                            let tgt = dm.sq_tgts[dm.square[a * cfg.square_m + b]];
+                            Self::emit_pair(
+                                &mut ticks, &mut episodes, cfg, d,
+                                dm.sq_a[a], dm.sq_b[b], tgt, Kind::Generalize,
+                            );
+                        }
+                        for &(a, _b, c) in dm.chains.iter() {
+                            Self::emit_pair(
+                                &mut ticks, &mut episodes, cfg, d,
+                                a, dm.r12, c, Kind::CompQuery,
+                            );
+                        }
+                    }
+                }
+
                 // At a span boundary, test what has already departed.
                 if span > 0 && span % cfg.probe_every_spans == 0 {
                     let batch = self.build_probes(span, counter);
@@ -542,8 +603,18 @@ impl Generator {
                     // product code's cue A (that family is deliberately
                     // non-zero-marginal and is the control for exactly this),
                     // and which chain is drawn.
-                    let a = uniform_below(key ^ 0x31, counter, m as u64) as usize;
-                    let b = uniform_below(key ^ 0x32, counter, m as u64) as usize;
+                    let mut a = uniform_below(key ^ 0x31, counter, m as u64) as usize;
+                    let mut b = uniform_below(key ^ 0x32, counter, m as u64) as usize;
+                    // Withheld cells are never presented. Resample rather than
+                    // nudge: advancing to the next cell piles probability onto
+                    // whatever follows a withheld one, which cost 0.304 bits of
+                    // cue-A marginal and was caught by the generator's own guard.
+                    let mut tries = 0u64;
+                    while dom.held_out.contains(&(a, b)) && tries < 16 {
+                        tries += 1;
+                        a = uniform_below(key ^ 0x33, counter ^ (tries << 32), m as u64) as usize;
+                        b = uniform_below(key ^ 0x34, counter ^ (tries << 40), m as u64) as usize;
+                    }
                     let sep_i =
                         uniform_below(key ^ 0x33, counter, cfg.separations.len() as u64) as usize;
                     let sep = cfg.separations[sep_i];
@@ -612,13 +683,14 @@ impl Generator {
                     // Most of the time present one of the two support facts;
                     // occasionally pose the composition query, which has never
                     // been presented as a fact.
+                    // Supports only. The query is posed once per chain, on the
+                    // schedule below, so it can never be answered from a copy of
+                    // itself.
                     let roll = uniform(key ^ 0x42, counter);
-                    if roll < 0.4 {
+                    if roll < 0.5 {
                         Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, a, dom.r1, b, Kind::CompSupport);
-                    } else if roll < 0.8 {
-                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, b, dom.r2, c, Kind::CompSupport);
                     } else {
-                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, a, dom.r12, c, Kind::CompQuery);
+                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, b, dom.r2, c, Kind::CompSupport);
                     }
                 }
             }
