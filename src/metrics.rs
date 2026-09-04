@@ -167,6 +167,15 @@ pub struct Metrics {
     /// Withheld Latin cells, asked once each and never presented as facts.
     /// Nothing can be memorised here; only the square's rule answers them.
     pub generalize: Bucket,
+    /// The walk query, bucketed by [links required][ticks of silence granted].
+    ///
+    /// This is the shape the whole design turns on. A mechanism that answers in
+    /// one pass gives a flat surface; one whose depth is bought with time gives
+    /// a diagonal -- deeper walks needing longer silences before they come
+    /// right. Depth 1 is a stored fact and is the control: if that does not come
+    /// right in one tick, nothing below it is worth reading.
+    pub walk: [[Bucket; 4]; 4],
+    pub walk_support: Bucket,
     /// Accuracy by how many times this exact fact has already been charged:
     /// [Second, Product, CompQuery] x [1st time, 2nd, 3rd, 4th+].
     ///
@@ -262,6 +271,8 @@ impl Metrics {
             visit_h: vec![Bucket::default(); HOP_BINS],
             composition_query: Bucket::default(),
             generalize: Bucket::default(),
+            walk: Default::default(),
+            walk_support: Bucket::default(),
             by_exposure: Default::default(),
             seen_fact: std::collections::HashMap::new(),
             composition_support: Bucket::default(),
@@ -473,6 +484,17 @@ impl Metrics {
                 }
                 Kind::CompQuery => self.composition_query.push(out.bits, out.correct),
                 Kind::Generalize => self.generalize.push(out.bits, out.correct),
+                Kind::WalkSupport => self.walk_support.push(out.bits, out.correct),
+                Kind::WalkQuery => {
+                    let d = (e.depth as usize).min(3);
+                    let g = match e.answer_gap {
+                        0..=1 => 0usize,
+                        2..=3 => 1,
+                        4..=7 => 2,
+                        _ => 3,
+                    };
+                    self.walk[d][g].push(out.bits, out.correct);
+                }
                 Kind::CompSupport => self.composition_support.push(out.bits, out.correct),
             }
         }

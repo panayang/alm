@@ -1073,7 +1073,8 @@ pub fn worth(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
             format!(
                 "[worth] {:<28} Latin {:.4} | product {:.4} | retention {:.4} | answer {:.4} bits",
                 name, la, pa, ret_acc, o.metrics.answer.mean()
-            ) + &comp_tail(&o),
+            ) + &comp_tail(&o)
+                + &walk_tail(&o),
         );
     }
     suite
@@ -1295,6 +1296,79 @@ pub fn exposure_tail(o: &Outcome) -> String {
         ));
     }
     format!(" | FIRST-EXPOSURE {}", parts.join(" ; "))
+}
+
+/// The depth x silence surface, which is the measurement the design exists for.
+pub fn walk_tail(o: &Outcome) -> String {
+    let mut rows = Vec::new();
+    for d in 1..4usize {
+        let cells: Vec<String> = (0..4)
+            .map(|g| {
+                let b = &o.metrics.walk[d][g];
+                if b.n == 0 { "  -  ".to_string() } else { format!("{:.3}", b.accuracy()) }
+            })
+            .collect();
+        let n: u64 = (0..4).map(|g| o.metrics.walk[d][g].n).sum();
+        let bits: f64 = (0..4).map(|g| o.metrics.walk[d][g].sum).sum::<f64>() / n.max(1) as f64;
+        rows.push(format!("d{}[{}] n={} {:.2}b", d, cells.join(" "), n, bits));
+    }
+    format!(
+        " | WALK by depth x gap(1,2,4,8): {} | walk-support {:.3}",
+        rows.join(" ; "),
+        o.metrics.walk_support.accuracy()
+    )
+}
+
+/// Does bind-on-speech / unbind-on-silence actually retrieve?
+///
+/// Confirm the mechanism before asking anything of it. Depth 1 is a stored fact
+/// and must come right in one tick of silence; if it does not, the retrieval is
+/// broken and the depth axis says nothing. Then the surface: accuracy by links
+/// required against ticks granted. Flat means one-pass computation; a diagonal
+/// means the world's silence is buying depth.
+pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for (sup, mix, label) in [
+        (false, 0.0f32, "superpose OFF (control)"),
+        (true, 0.4, "unbind mix 0.4"),
+        (true, 0.7, "unbind mix 0.7"),
+        (true, 1.0, "unbind mix 1.0"),
+    ] {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = gcfg.vocab;
+        c.nodes = 64;
+        c.route_query = RouteQuery::Bound;
+        c.read_entry_by_content = true;
+        c.walk_during_gap = false;
+        c.freeze_operator = true;
+        c.bypass_graph = true;
+        c.anchor = 0.0;
+        c.superpose = sup;
+        c.unbind_mix = mix;
+        c.derive();
+        arms.push((label.to_string(), c));
+    }
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        suite.note(
+            format!(
+                "[unbind] {:<24} Latin {:.4} | answer {:.4} bits",
+                name, la, o.metrics.answer.mean()
+            ) + &walk_tail(&o)
+                + &comp_tail(&o),
+        );
+    }
+    suite
 }
 
 pub struct Suite {

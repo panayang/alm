@@ -464,3 +464,41 @@ fn the_bound_block_at_an_answer_is_the_episodes_own_conjunction() {
         worst
     );
 }
+
+/// The retrieval key must stop moving when the world does.
+///
+/// The bands carried both "which regime this is" and "how long since the world
+/// spoke", and both were in the key, so a fact learned at six ticks of silence
+/// did not answer at one -- a clock deciding whether a memory fires. Everything
+/// in the key except the state block must now be bit-identical across a silence;
+/// the state is the one thing that is supposed to evolve.
+#[test]
+fn the_retrieval_key_is_frozen_while_the_world_is_silent() {
+    let mut cfg = alm::config::Config::local();
+    cfg.seed = 5;
+    cfg.vocab = 512;
+    cfg.derive();
+    let d = cfg.d;
+    let mut m = alm::model::Model::new(cfg.clone());
+
+    for t in 0..600usize {
+        m.tick(if t % 7 == 0 { Some(t % 97) } else { None }, false);
+    }
+    // An event, then a stretch of silence.
+    m.tick(Some(11), false);
+    let mut keys = Vec::new();
+    for _ in 0..6 {
+        m.tick(None, false);
+        let f = m.features_now();
+        keys.push(f[d..].to_vec());
+    }
+    for (i, k) in keys.iter().enumerate().skip(1) {
+        assert_eq!(
+            &keys[0], k,
+            "the retrieval key moved between silent tick 1 and silent tick {}: \
+             elapsed time is still inside the key",
+            i + 1
+        );
+    }
+    assert!(keys[0].iter().any(|v| *v != 0.0), "the key is empty");
+}

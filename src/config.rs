@@ -114,6 +114,47 @@ pub struct Config {
     /// subset, so the two saw different distributions. Correcting what the model
     /// would actually have said is both error-driven and the same distribution
     /// the charge came from.
+    /// Hold a superposed memory that speech writes into and silence reads out of.
+    ///
+    /// The two operations are opposites and the tick already says which one is
+    /// called for: the world speaking means there is something to combine, the
+    /// identity input means there is not, and therefore that what is called for
+    /// is the inverse. Nothing is scheduled and no boundary is needed.
+    ///
+    ///   speech   M += nu( (E_prev2 (*) E_prev) (*) E_now )
+    ///   silence  p <- nu( M (o) (p (*) E_last) )
+    ///
+    /// Under silence the state is unbound out of memory using itself bound with
+    /// the most recent observation, so each quiet tick advances one link and the
+    /// world decides how far the chain gets by deciding how long to stay quiet.
+    /// That is "depth comes from time" as a mechanism rather than a hope, and it
+    /// is why gap ticks have measured as dead weight so far: iterating a state
+    /// through a transform is not retrieval, and there was nothing to retrieve.
+    /// Key the readout on the background as it stood at the last event, not as
+    /// it stands now.
+    ///
+    /// The bands carry two things at once: which regime this is, which should
+    /// hold across a silence, and how long the world has been quiet, which
+    /// changes every tick. Both were in the retrieval key, so how long ago the
+    /// world last spoke decided whether a memory fired at all -- a fact learned
+    /// at six ticks of silence did not answer at one. That is a clock in the
+    /// key. Locking the bands at the last event freezes the challenge the moment
+    /// the world stops speaking and leaves only the state free to evolve, which
+    /// is what challenge-response means. The live fast rung stays available to
+    /// the commit rule, which is where elapsed time belongs.
+    pub event_locked_key: bool,
+    /// Minimum cosine to the nearest codebook entry for an unbound result to be
+    /// accepted.
+    ///
+    /// Without it a cursor given more silence than the walk has links keeps
+    /// stepping and walks past the answer. At the end of a chain there is no
+    /// outgoing link, so the unbinding returns noise, and refusing noise leaves
+    /// the cursor where it is -- stopping for free, and making surplus thinking
+    /// time harmless instead of harmful.
+    pub cleanup_min_cos: f32,
+    pub superpose: bool,
+    /// Weight of the unbound result against the standing state.
+    pub unbind_mix: f32,
     pub hard_negatives: bool,
     pub neg_samples: usize,
     /// DERIVED. Eligibility decay, matched to the mean inter-event interval.
@@ -359,6 +400,10 @@ impl Config {
             shortcuts: 2,
             hops: 1,
             eta: 0.5,
+            event_locked_key: true,
+            cleanup_min_cos: 0.25,
+            superpose: true,
+            unbind_mix: 0.7,
             hard_negatives: true,
             neg_samples: 16,
             trace_lambda: 0.9,

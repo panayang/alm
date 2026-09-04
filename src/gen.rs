@@ -95,6 +95,18 @@ pub enum Kind {
     /// -- which is why composition read 0.75 while its first exposure read
     /// 0.000. A chaining test survives exactly one question.
     CompQuery,
+    /// One link of a walk: `x --r--> y`, presented like any other fact.
+    WalkSupport,
+    /// The walk's endpoint, asked once: given the start and the relation, name
+    /// the token `depth` links away.
+    ///
+    /// Every link uses the *same* relation token, so answering needs no prefix
+    /// and no boundary: apply "unbind by (state (*) most recent observation)"
+    /// once per tick of silence and you advance one link. The world decides how
+    /// far you get by deciding how long to stay quiet, which is what "depth
+    /// comes from time" has to mean if it means anything. An architecture that
+    /// computes in one pass cannot produce a curve that rises with the gap.
+    WalkQuery,
     /// A Latin cell that is never presented as a fact, asked once.
     ///
     /// Every family in this source is a pair presented repeatedly and then
@@ -127,6 +139,8 @@ pub struct EpisodeRec {
     pub target_tick: usize,
     /// Index into `ticks` of the last cue.
     pub last_cue_tick: usize,
+    /// Links that must be traversed to reach the answer. 1 for a stored fact.
+    pub depth: u32,
 }
 
 /// One retention test on a departed regime.
@@ -244,7 +258,12 @@ impl GenConfig {
             vocab: 4096,
             mode: Mode::A,
             domains: 32,
-            ents_per_domain: 32,
+            // 32 left nothing for the walks: the square, the product code and
+            // the composition chains consumed all of it, so `walks` came out
+            // empty and the family that the depth measurement rests on was
+            // never emitted. The budget is checked against the vocabulary at
+            // construction, so this is the place it has to be paid.
+            ents_per_domain: 56,
             tgts_per_domain: 32,
             square_m: 6,
             product_na: 3,
@@ -284,6 +303,9 @@ struct Domain {
     firsts: Vec<(usize, usize)>,
     /// Composition chains: (a, b, c) with relation tokens r1, r2, r12.
     chains: Vec<(usize, usize, usize)>,
+    /// Walks a0 -r-> a1 -r-> ... , all sharing one relation token.
+    walks: Vec<Vec<usize>>,
+    walk_rel: usize,
     /// Square cells (a, b) withheld from presentation, asked once each.
     held_out: Vec<(usize, usize)>,
     r1: usize,
@@ -300,7 +322,8 @@ pub struct Generator {
 impl Generator {
     pub fn new(cfg: GenConfig) -> Self {
         let m = cfg.square_m;
-        let block = cfg.ents_per_domain + cfg.tgts_per_domain + 3;
+        // +4 relation tokens: r1, r2, r12 and the walk relation.
+        let block = cfg.ents_per_domain + cfg.tgts_per_domain + 4;
         assert!(
             block * cfg.domains <= cfg.vocab,
             "vocabulary too small for {} domains",
@@ -320,6 +343,7 @@ impl Generator {
             let r1 = tgt_base + cfg.tgts_per_domain;
             let r2 = r1 + 1;
             let r12 = r1 + 2;
+            let walk_rel = r1 + 3;
 
             let (na, nb) = (cfg.product_na, cfg.product_nb);
             // Token budget, laid out so no two item types share a cue or a
@@ -368,9 +392,27 @@ impl Generator {
                 chains.push((a, b, c));
             }
 
-            // First-order facts start past everything the chains claimed.
+            // Walks of length 1, 2 and 3 over entities nothing else claims, all
+            // sharing `walk_rel`. Length 1 is the control: it is a stored fact,
+            // so it must be answerable in one tick of silence and says whether
+            // the retrieval works at all before depth is asked about.
+            let mut walks: Vec<Vec<usize>> = Vec::new();
+            {
+                let mut i = free_ent + 3 * n_chain;
+                for len in [1usize, 2, 3, 1, 2, 3] {
+                    if i + len + 1 > ents.len() {
+                        break;
+                    }
+                    walks.push(ents[i..i + len + 1].to_vec());
+                    i += len + 1;
+                }
+            }
+
+            // First-order facts start past everything the chains and walks
+            // claimed.
+            let walk_ents: usize = walks.iter().map(|w| w.len()).sum();
             let mut firsts = Vec::new();
-            let mut i = free_ent + 3 * n_chain;
+            let mut i = free_ent + 3 * n_chain + walk_ents;
             let mut j = free_tgt + n_chain;
             while i < ents.len() && j < tgts.len() {
                 firsts.push((ents[i], tgts[j]));
@@ -393,6 +435,8 @@ impl Generator {
             domains.push(Domain {
                 ents,
                 held_out,
+                walks,
+                walk_rel,
                 tgts,
                 square,
                 sq_a,
@@ -519,12 +563,43 @@ impl Generator {
                             Self::emit_pair(
                                 &mut ticks, &mut episodes, cfg, d,
                                 dm.sq_a[a], dm.sq_b[b], tgt, Kind::Generalize,
+                                Self::GAPS[(d + a + b) % 4],
                             );
+                        }
+                        // Walk queries: start plus relation, one gap length
+                        // per query, asked once. The gap is what the world
+                        // grants; whether it is enough is the measurement.
+                        for (wi, w) in dm.walks.iter().enumerate() {
+                            let gaps = [1u32, 2, 4, 8];
+                            let g = gaps[(d + wi) % gaps.len()];
+                            let depth = (w.len() - 1) as u32;
+                            let start = ticks.len();
+                            ticks.push(Tick::Token(w[0]));
+                            let last_cue_tick = ticks.len();
+                            ticks.push(Tick::Token(dm.walk_rel));
+                            for _ in 0..g {
+                                ticks.push(Tick::Baseline);
+                            }
+                            let target_tick = ticks.len();
+                            ticks.push(Tick::Token(w[w.len() - 1]));
+                            let _ = start;
+                            episodes.push(EpisodeRec {
+                                kind: Kind::WalkQuery,
+                                domain: d,
+                                separation: 0,
+                                answer_gap: g,
+                                target: w[w.len() - 1],
+                                cues: vec![w[0], dm.walk_rel],
+                                target_tick,
+                                last_cue_tick,
+                                depth,
+                            });
                         }
                         for &(a, _b, c) in dm.chains.iter() {
                             Self::emit_pair(
                                 &mut ticks, &mut episodes, cfg, d,
                                 a, dm.r12, c, Kind::CompQuery,
+                                Self::GAPS[(d + a) % 4],
                             );
                         }
                     }
@@ -568,7 +643,8 @@ impl Generator {
                     let (cue, tgt) = dom.firsts[i];
                     let last_cue_tick = ticks.len();
                     ticks.push(Tick::Token(cue));
-                    for _ in 0..cfg.answer_gap {
+                    let g = Self::draw_gap(key, counter);
+                    for _ in 0..g {
                         ticks.push(Tick::Baseline);
                     }
                     let target_tick = ticks.len();
@@ -577,11 +653,12 @@ impl Generator {
                         kind: Kind::First,
                         domain,
                         separation: 0,
-                        answer_gap: cfg.answer_gap,
+                        answer_gap: g,
                         target: tgt,
                         cues: vec![cue],
                         target_tick,
                         last_cue_tick,
+                        depth: 1,
                     });
                 }
                 Kind::Second => {
@@ -626,7 +703,8 @@ impl Generator {
                     }
                     let last_cue_tick = ticks.len();
                     ticks.push(Tick::Token(dom.sq_b[b]));
-                    for _ in 0..cfg.answer_gap {
+                    let g = Self::draw_gap(key, counter);
+                    for _ in 0..g {
                         ticks.push(Tick::Baseline);
                     }
                     let target_tick = ticks.len();
@@ -635,11 +713,12 @@ impl Generator {
                         kind: Kind::Second,
                         domain,
                         separation: sep,
-                        answer_gap: cfg.answer_gap,
+                        answer_gap: g,
                         target: tgt,
                         cues: vec![dom.sq_a[a], dom.sq_b[b]],
                         target_tick,
                         last_cue_tick,
+                        depth: 1,
                     });
                 }
                 Kind::Product => {
@@ -657,7 +736,8 @@ impl Generator {
                     }
                     let last_cue_tick = ticks.len();
                     ticks.push(Tick::Token(dom.pc_b[b]));
-                    for _ in 0..cfg.answer_gap {
+                    let g = Self::draw_gap(key, counter);
+                    for _ in 0..g {
                         ticks.push(Tick::Baseline);
                     }
                     let target_tick = ticks.len();
@@ -666,11 +746,12 @@ impl Generator {
                         kind: Kind::Product,
                         domain,
                         separation: sep,
-                        answer_gap: cfg.answer_gap,
+                        answer_gap: g,
                         target: tgt,
                         cues: vec![dom.pc_a[a], dom.pc_b[b]],
                         target_tick,
                         last_cue_tick,
+                        depth: 1,
                     });
                 }
                 _ => {
@@ -686,11 +767,26 @@ impl Generator {
                     // Supports only. The query is posed once per chain, on the
                     // schedule below, so it can never be answered from a copy of
                     // itself.
+                    // Every link of every walk, presented like any other fact,
+                    // so the pieces are stored and only the composition is not.
+                    if !dom.walks.is_empty() && uniform(key ^ 0x44, counter) < 0.5 {
+                        let wi = uniform_below(key ^ 0x45, counter, dom.walks.len() as u64)
+                            as usize;
+                        let w = &dom.walks[wi];
+                        let li =
+                            uniform_below(key ^ 0x46, counter, (w.len() - 1) as u64) as usize;
+                        Self::emit_pair(
+                            &mut ticks, &mut episodes, cfg, domain,
+                            w[li], dom.walk_rel, w[li + 1], Kind::WalkSupport,
+                            Self::draw_gap(key, counter),
+                        );
+                        continue;
+                    }
                     let roll = uniform(key ^ 0x42, counter);
                     if roll < 0.5 {
-                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, a, dom.r1, b, Kind::CompSupport);
+                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, a, dom.r1, b, Kind::CompSupport, Self::draw_gap(key, counter));
                     } else {
-                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, b, dom.r2, c, Kind::CompSupport);
+                        Self::emit_pair(&mut ticks, &mut episodes, cfg, domain, b, dom.r2, c, Kind::CompSupport, Self::draw_gap(key, counter));
                     }
                 }
             }
@@ -763,6 +859,20 @@ impl Generator {
         out
     }
 
+    /// Ticks of silence granted before the answer, drawn per episode.
+    ///
+    /// Every family used a fixed `answer_gap` while the walk queries varied
+    /// theirs, and the background bands in `phi` encode how long the world has
+    /// been quiet -- so a row learned at six ticks of silence does not fire at
+    /// one, and the depth-by-gap surface measured the readout's dependence on
+    /// gap length rather than depth. The walk query is the one family whose
+    /// point is that the world decides the thinking time, so the whole source
+    /// has to vary it or that family is out of distribution by construction.
+    pub const GAPS: [u32; 4] = [1, 2, 4, 8];
+    fn draw_gap(key: u64, counter: u64) -> u32 {
+        Self::GAPS[uniform_below(key ^ 0x9A, counter, 4) as usize]
+    }
+
     fn emit_pair(
         ticks: &mut Vec<Tick>,
         episodes: &mut Vec<EpisodeRec>,
@@ -772,11 +882,13 @@ impl Generator {
         rel: usize,
         tail: usize,
         kind: Kind,
+        gap: u32,
     ) {
+        let _ = cfg;
         ticks.push(Tick::Token(head));
         let last_cue_tick = ticks.len();
         ticks.push(Tick::Token(rel));
-        for _ in 0..cfg.answer_gap {
+        for _ in 0..gap {
             ticks.push(Tick::Baseline);
         }
         let target_tick = ticks.len();
@@ -785,11 +897,12 @@ impl Generator {
             kind,
             domain,
             separation: 0,
-            answer_gap: cfg.answer_gap,
+            answer_gap: gap,
             target: tail,
             cues: vec![head, rel],
             target_tick,
             last_cue_tick,
+            depth: 1,
         });
     }
 

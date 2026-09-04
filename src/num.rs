@@ -281,6 +281,30 @@ pub fn argmax(xs: &[f32]) -> usize {
 /// at all: the target is linear in the tensor features E_A x E_B and not in
 /// their sum, so a linear readout over a bound trace can represent what a linear
 /// readout over a superposition cannot.
+/// The involution `a*`: `a[0]` fixed, the rest reversed.
+///
+/// `(a (*) b) (o) a ~= b`, which is the whole reason binding was chosen over a
+/// concatenation. Binding has been in this codebase since the first version and
+/// its inverse never was, so memory could be written associatively and only ever
+/// read by a learned lookup -- which is why an unseen combination scored exactly
+/// zero: to a table it is a fresh random key, and to an unbinding it is a
+/// question with an answer.
+pub fn involve(a: &[f32], out: &mut [f32]) {
+    let n = a.len();
+    out[0] = a[0];
+    for i in 1..n {
+        out[i] = a[n - i];
+    }
+}
+
+/// Circular correlation: unbind `a` out of `m`.
+pub fn unbind(m: &[f32], a: &[f32], out: &mut [f32]) {
+    let n = a.len();
+    let mut inv = vec![0.0f32; n];
+    involve(a, &mut inv);
+    circconv(m, &inv, out);
+}
+
 pub fn circconv(a: &[f32], b: &[f32], out: &mut [f32]) {
     let d = a.len();
     for k in 0..d {

@@ -114,6 +114,12 @@ pub struct Model {
     p: Vec<f32>,
     /// Where the walk is, and where it has been.
     gnode: usize,
+    /// The superposed memory: bound triples, written on speech, read on silence.
+    pub mem: Vec<f32>,
+    /// The token before last, so a triple can be formed without a boundary.
+    prev2: Option<usize>,
+    /// The background as it stood at the last event: the frozen half of the key.
+    bands_locked: Vec<Vec<f32>>,
     visit: Vec<f32>,
     hops: u32,
     /// The transform applied on the last tick, so the operator write is local
@@ -162,6 +168,7 @@ impl Model {
         let store = Store::new(&cfg);
         let d = cfg.d;
         let blocks = cfg.bind_blocks();
+        let cfg_rungs = cfg.rungs;
         let mut p = vec![0.0f32; d];
         p[0] = 1.0;
         let n = graph.nodes;
@@ -173,6 +180,9 @@ impl Model {
             graph,
             store,
             p,
+            mem: vec![0.0; d],
+            prev2: None,
+            bands_locked: vec![vec![0.0; d]; cfg_rungs],
             gnode: 0,
             visit: vec![0.0; n],
             hops: 0,
@@ -354,9 +364,45 @@ impl Model {
             f.extend_from_slice(b);
         }
         for k in 0..self.cfg.rungs {
-            f.extend_from_slice(self.ladder.delta(k));
+            if self.cfg.event_locked_key && !self.bands_locked.is_empty() {
+                f.extend_from_slice(&self.bands_locked[k]);
+            } else {
+                f.extend_from_slice(self.ladder.delta(k));
+            }
         }
         f
+    }
+
+    /// Snapshot the background. Called on event ticks only, so the retrieval key
+    /// stops moving the moment the world does.
+    fn lock_bands(&mut self) {
+        if !self.cfg.event_locked_key {
+            return;
+        }
+        for k in 0..self.cfg.rungs {
+            self.bands_locked[k].copy_from_slice(self.ladder.delta(k));
+        }
+    }
+
+    /// Snap an unbound result to the nearest token the store has a row for, if
+    /// anything is near enough. Returns false when nothing is, which is the
+    /// signal that the chain has run out of links.
+    fn cleanup(&self, v: &[f32], out: &mut Vec<f32>) -> bool {
+        let mut best = (self.cfg.cleanup_min_cos, usize::MAX);
+        for t in self.store.known() {
+            let e = self.emb.row(t as usize);
+            let c = crate::num::dot(v, e) / crate::num::norm(e).max(1e-9);
+            if c > best.0 {
+                best = (c, t as usize);
+            }
+        }
+        if best.1 == usize::MAX {
+            return false;
+        }
+        out.clear();
+        out.extend_from_slice(self.emb.row(best.1));
+        normalize(out);
+        true
     }
 
     /// Refresh the bound traces from the arriving token. Called after the
@@ -709,6 +755,37 @@ impl Model {
                 // off, the response state freezes after the write walk and the
                 // gap does nothing -- which is the control that says whether any
                 // of the gain is the walk.
+                // Silence: unbind. There is nothing to combine, so the tick
+                // does the opposite -- release out of memory whatever was stored
+                // against the state bound with the most recent observation. One
+                // quiet tick, one link; the world decides how far the chain gets
+                // by deciding how long to stay quiet.
+                if self.cfg.superpose {
+                    if let Some(&last) = self.event_hist.first() {
+                        // One quiet tick, one link. The cursor is the state; the
+                        // relation is whatever the world said most recently.
+                        // Both are event-locked, so this needs no boundary and
+                        // no schedule.
+                        let d = self.cfg.d;
+                        let mut q = vec![0.0f32; d];
+                        crate::num::circconv(&self.p, self.emb.row(last), &mut q);
+                        normalize(&mut q);
+                        let mut raw = vec![0.0f32; d];
+                        crate::num::unbind(&self.mem, &q, &mut raw);
+                        normalize(&mut raw);
+                        let mut clean = Vec::new();
+                        if self.cleanup(&raw, &mut clean) {
+                            let m = self.cfg.unbind_mix;
+                            for i in 0..d {
+                                self.p[i] = (1.0 - m) * self.p[i] + m * clean[i];
+                            }
+                            normalize(&mut self.p);
+                        }
+                        // Nothing near enough in the codebook means the chain has
+                        // no next link, so the cursor stays where it is and more
+                        // silence costs nothing.
+                    }
+                }
                 if self.cfg.walk_during_gap {
                     self.step_walk();
                 }
@@ -859,10 +936,39 @@ impl Model {
                 // the five bound blocks, which are also three fifths of the
                 // routing query under `RouteQuery::Bound`. The trace should be
                 // "the background as it stood, bound to what just arrived".
+                // Speech: bind. The standing conjunction of the two previous
+                // observations is combined with what just arrived and superposed
+                // into memory. For a presented link `x r y` the triple formed at
+                // the `y` tick is exactly (E_x (*) E_r) (*) E_y, and no episode
+                // boundary was needed to know that.
+                if self.cfg.superpose {
+                    if let (Some(p2), Some(&p1)) = (self.prev2, self.event_hist.first()) {
+                        let d = self.cfg.d;
+                        let mut pair = vec![0.0f32; d];
+                        crate::num::circconv(self.emb.row(p2), self.emb.row(p1), &mut pair);
+                        normalize(&mut pair);
+                        let mut tri = vec![0.0f32; d];
+                        crate::num::circconv(&pair, self.emb.row(x), &mut tri);
+                        normalize(&mut tri);
+                        for i in 0..d {
+                            self.mem[i] += tri[i];
+                        }
+                        normalize(&mut self.mem);
+                    }
+                    self.prev2 = self.event_hist.first().copied();
+                    // The cursor is the second-to-last observation. When the
+                    // relation arrives it is therefore the entity, which is what
+                    // the first unbinding has to be asked about.
+                    if let Some(&prev) = self.event_hist.first() {
+                        self.p.copy_from_slice(self.emb.row(prev));
+                        normalize(&mut self.p);
+                    }
+                }
                 self.rebind(x);
                 self.ladder.observe_world(&v);
                 self.feedback();
                 self.ladder.refresh();
+                self.lock_bands();
                 self.emb.apply_operator(Some(x), &mut self.p);
                 self.graph.decay_traces(self.cfg.trace_lambda);
                 self.step_walk();
