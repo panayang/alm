@@ -22,6 +22,7 @@ fn main() {
     };
     let mut seed: u64 = 0x5EED_1234;
     let mut out: Option<String> = None;
+    let (mut shard, mut shards) = (0usize, 1usize);
 
     let mut i = 1;
     while i < args.len() {
@@ -36,6 +37,13 @@ fn main() {
             }
             "--out" => {
                 out = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--shard" => {
+                let v = &args[i + 1];
+                let (a, b) = v.split_once('/').expect("--shard wants i/n");
+                shard = a.parse().expect("shard index");
+                shards = b.parse().expect("shard count");
                 i += 2;
             }
             other => panic!("unknown argument {}", other),
@@ -73,6 +81,13 @@ fn main() {
                     r.product.mean(), r.product.accuracy(),
                     r.ppm.bits_per_event()
                 );
+            }
+        }
+        "mechanism" => {
+            let suite = experiments::mechanism(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
             }
         }
         "width" => {

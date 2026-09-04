@@ -462,6 +462,9 @@ impl Model {
     /// of the layout -- nothing can flow in from elsewhere -- rather than an
     /// approximation.
     fn write_operator_on(&mut self, st: &crate::graph::WalkStep, x: usize, eta: f32) {
+        if self.cfg.freeze_operator {
+            return;
+        }
         let target = if self.cfg.write_toward_embedding {
             self.emb.row(x).to_vec()
         } else {

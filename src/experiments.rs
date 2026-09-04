@@ -310,8 +310,7 @@ pub fn load_sweep(base_ticks: usize, seed: u64) -> Suite {
 pub fn width(base_ticks: usize, seed: u64) -> Suite {
     let mut suite = Suite::new();
     for (domains, arms) in [
-        (12usize, vec![(64usize, 64usize)]),
-        (36, vec![(64, 64)]),
+        (12usize, vec![(1usize, 64usize), (64, 64)]),
     ] {
         let mut gcfg = GenConfig::fast();
         gcfg.seed = seed ^ 0xA11CE;
@@ -328,7 +327,13 @@ pub fn width(base_ticks: usize, seed: u64) -> Suite {
             let rw = c.feature_blocks() * c.d;
             let o = run_one("width", c, &gcfg, &stream);
             let (_, la) = window_mean(&o.metrics.window);
-            let (_, pa) = window_mean(&o.metrics.window_product);
+            let (pb, pa) = window_mean(&o.metrics.window_product);
+            // Codelength at the answer tick only. `bits_per_event` charges every
+            // observed token, cues included -- next-symbol accounting on a design
+            // that never claimed to predict next symbols. On this source a cue is
+            // near-uniform over the domains' entities, so that figure is mostly
+            // the price of not doing something the model is not asked to do.
+            let (lb, _) = window_mean(&o.metrics.window);
             let ret: (u64, u64) =
                 o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
             let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
@@ -337,14 +342,83 @@ pub fn width(base_ticks: usize, seed: u64) -> Suite {
             let (ls, ln, lf, lo) = o.metrics.address_consistency_full(0);
             let (ps, pn, pf, po) = o.metrics.address_consistency_full(1);
             suite.note(format!(
-                "[width] domains={:<3} nodes={:<4} d={:<4} {:.3} bits/ev | Latin {:.3} |                  product {:.3} | retention {:.3} | readout {:.2}M | operator {:.2}M |                  addr-consistency latin {:.3} over {:.1} nodes ({} facts, {:.1} occ each),                  product {:.3} over {:.1} nodes ({} facts, {:.1} occ each)",
+                "[width] domains={:<3} nodes={:<4} d={:<4} ALL-TOKEN {:.3} bits | ANSWER-ONLY latin {:.3} product {:.3} bits | Latin {:.3} |                  product {:.3} | retention {:.3} | readout {:.2}M | operator {:.2}M |                  addr-consistency latin {:.3} over {:.1} nodes ({} facts, {:.1} occ each),                  product {:.3} over {:.1} nodes ({} facts, {:.1} occ each)",
                 domains, n, dd,
-                o.metrics.bits_per_event(), la, pa, ret_acc,
+                o.metrics.bits_per_event(), lb, pb, la, pa, ret_acc,
                 (rows * rw) as f64 / 1e6,
                 (edges * dd * dd) as f64 / 1e6,
                 ls, ln, lf, lo, ps, pn, pf, po
             ));
         }
+    }
+    suite
+}
+
+/// The two questions that gate everything downstream, in one grid.
+///
+/// **Is the graph a memory or a hash?** Every arm is paired with the same
+/// configuration whose edge transforms are frozen at initialisation. If the
+/// nodes curve survives freezing, what the walk contributes is the diversity of
+/// fixed random transforms the state is routed through, and the operator write
+/// -- along with the question of what it should be written toward -- is moot.
+///
+/// **Is a near miss cheap because neighbours hold related content?** Taking the
+/// runner-up edge and taking any edge at all are compared against the same
+/// argmax baseline. Cheap-near-miss with expensive-random is the graceful
+/// degradation the design claims; both cheap means routing carries nothing.
+///
+/// Answer-tick codelength is reported alongside the all-token figure, because
+/// the latter charges cues the model was never asked to predict.
+pub fn mechanism(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let base = |nodes: usize| {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = gcfg.vocab;
+        c.nodes = nodes;
+        c
+    };
+
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for n in [1usize, 16, 64, 256] {
+        for frozen in [false, true] {
+            let mut c = base(n);
+            c.freeze_operator = frozen;
+            c.derive();
+            arms.push((
+                format!("nodes={} {}", n, if frozen { "FROZEN" } else { "learned" }),
+                c,
+            ));
+        }
+    }
+    // Routing, all at nodes=64 so the three share one baseline.
+    let mut c = base(64);
+    c.route_perturb = 1;
+    c.derive();
+    arms.push(("nodes=64 near-miss 1".into(), c));
+    let mut c = base(64);
+    c.route_random = true;
+    c.derive();
+    arms.push(("nodes=64 route RANDOM".into(), c));
+
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (lb, la) = window_mean(&o.metrics.window);
+        let (pb, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(format!(
+            "[mech] {:<22} Latin {:.3} ({:.2} bits) | product {:.3} ({:.2} bits) |              retention {:.3} | all-token {:.3} bits",
+            name, la, lb, pa, pb, ret_acc, o.metrics.bits_per_event()
+        ));
     }
     suite
 }

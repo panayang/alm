@@ -192,6 +192,18 @@ pub struct Config {
     /// addressed content, the near miss should stay cheap -- neighbours hold
     /// related content -- while random routing collapses. The two controls only
     /// mean something as a pair.
+    /// FREE. Leave every edge transform at its random initialisation.
+    ///
+    /// The suite has never had this arm, and without it "the graph is an
+    /// addressed operator memory" is not distinguishable from "the graph is a
+    /// bank of fixed random transforms the state gets routed through". The
+    /// arithmetic makes the second live: 10741 charged events write one edge
+    /// each, so at nodes=256 a 64x64 matrix receives about eleven rank-one
+    /// updates for its 4096 parameters -- and that is the best-scoring arm. The
+    /// contrast that was supposed to rule this out, nodes=1 against no graph at
+    /// all, cannot: nodes=1 has two edges, so it varies the number of random
+    /// transforms rather than holding it fixed.
+    pub freeze_operator: bool,
     pub route_random: bool,
     pub bypass_graph: bool,
     pub walk_during_gap: bool,
@@ -270,6 +282,7 @@ impl Config {
             feedback_overt: true,
             feedback_covert: true,
             feedback_write: true,
+            freeze_operator: false,
             route_random: false,
             bypass_graph: false,
             walk_during_gap: true,
