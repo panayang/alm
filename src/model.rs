@@ -89,6 +89,13 @@ pub struct Volatile {
     overt: Option<usize>,
     ticks_since_event: u32,
     prev_answer_conf: f32,
+    /// A probe runs ~15 ticks and there are 24 per batch, so leaving this out
+    /// advanced the live counter by ~400 ticks per batch. It keys
+    /// `select_random`'s nonce and `sample_negatives`, so a probe batch shifted
+    /// the random-routing arm's edge sequence and every arm's negative samples.
+    tick_index: u64,
+    committed: Option<Vec<f32>>,
+    committed_token: Option<usize>,
 }
 
 pub struct Model {
@@ -139,6 +146,11 @@ pub struct Model {
     /// The node the last write landed in. Exposed only so an experiment can ask
     /// whether the address separates regimes; the model never reads it.
     pub last_write_node: usize,
+    /// The node a read actually settled on -- what an address instrument must
+    /// look at. `last_write_node` describes the write walk and is unaffected by
+    /// `route_query`, `read_entry_by_content` or `route_random`, so pointing the
+    /// consistency statistic at it measured a walk none of those arms touch.
+    pub last_read_node: usize,
     scratch: Vec<f32>,
 }
 
@@ -184,6 +196,7 @@ impl Model {
             commitments: 0,
             silent_settlements: 0,
             last_write_node: 0,
+            last_read_node: 0,
             scratch: vec![0.0; d],
         }
     }
@@ -203,6 +216,9 @@ impl Model {
             overt: self.overt,
             ticks_since_event: self.ticks_since_event,
             prev_answer_conf: self.prev_answer_conf,
+            tick_index: self.tick_index,
+            committed: self.committed.clone(),
+            committed_token: self.committed_token,
         }
     }
 
@@ -218,8 +234,9 @@ impl Model {
         self.overt = v.overt;
         self.ticks_since_event = v.ticks_since_event;
         self.prev_answer_conf = v.prev_answer_conf;
-        self.committed = None;
-        self.committed_token = None;
+        self.tick_index = v.tick_index;
+        self.committed = v.committed;
+        self.committed_token = v.committed_token;
         self.covert_log.clear();
         self.overt_log.clear();
     }
@@ -437,13 +454,22 @@ impl Model {
         }
         let mut q = Vec::with_capacity(self.cfg.d);
         self.query(&mut q);
-        let from = if self.cfg.read_entry_by_content && !self.cfg.route_random {
-            self.graph.entry(&q)
+        // The random control has to differ from the treatment in exactly one
+        // way: it ignores content. It must not also be pinned to a local walk
+        // while the treatment gets a global jump, or "content routing beats
+        // random routing" is confounded with "global re-entry beats a local
+        // wander" -- which the logs said was the whole effect.
+        let from = if self.cfg.read_entry_by_content {
+            if self.cfg.route_random {
+                self.graph.random_node(self.tick_index as u64)
+            } else {
+                self.graph.entry(&q)
+            }
         } else {
             self.gnode
         };
         let a = if self.cfg.route_random {
-            self.graph.select_random(self.gnode, self.tick_index as u64)
+            self.graph.select_random(from, self.tick_index as u64)
         } else {
             self.graph.select_rank(from, &q, self.cfg.route_perturb)
         };
@@ -463,6 +489,7 @@ impl Model {
         }
 
         self.gnode = self.graph.head_of(a);
+        self.last_read_node = self.gnode;
         self.graph.touch_read(&st);
         self.last_step = Some(st);
         self.hops += 1;
@@ -643,6 +670,17 @@ impl Model {
             None => {
                 self.baseline_ticks += 1;
                 self.ticks_since_event += 1;
+                // A bound trace has to decay or it is not a trace. `bind_decay`
+                // was declared, documented as "decay of the binding trace across
+                // a response", and referenced nowhere -- so a conjunction stood
+                // at full strength from one episode into the next until an event
+                // overwrote it, and the lag-1 block at a target carried a
+                // cross-episode pair.
+                for b in self.binds.iter_mut() {
+                    for v in b.iter_mut() {
+                        *v *= self.cfg.bind_decay;
+                    }
+                }
                 self.ladder.tick_baseline();
                 self.feedback();
                 self.ladder.refresh();
@@ -724,10 +762,27 @@ impl Model {
                     // landed on the same edge together, so the near-miss
                     // experiment had no inconsistency left to detect and its
                     // flat curve measured nothing.
+                    // The write walk takes the *read's* query and the read's
+                    // entry rule, differing only in that it is never perturbed.
+                    //
+                    // It used to route on `p0` while reads routed on `query()`.
+                    // Under `RouteQuery::Bound` those are unrelated vectors, so
+                    // the write landed on edges reads never traversed -- measured
+                    // at chance coincidence -- and freezing the transforms could
+                    // not cost anything whatever operator memory was worth. A3
+                    // asks that writes be unperturbed, not that they go
+                    // somewhere else.
                     let steps = if self.cfg.bypass_graph {
                         Vec::new()
                     } else {
-                        self.graph.write_walk(&p0, &p0, self.cfg.hops)
+                        let mut wq = Vec::with_capacity(self.cfg.d);
+                        self.query(&mut wq);
+                        let from = if self.cfg.read_entry_by_content {
+                            None
+                        } else {
+                            Some(self.gnode)
+                        };
+                        self.graph.write_walk(&wq, &p0, self.cfg.hops, from)
                     };
                     self.store.write_surprise.push(out.bits);
                     let eta = self.cfg.eta * gate;
@@ -743,7 +798,7 @@ impl Model {
                         // distribution the ledger never charged -- exactly what
                         // `code.rs` says must not happen. Identical when the
                         // flag is off, which is why it stayed hidden.
-                        let sc_write = code::score(&self.store, &phi, !self.cfg.no_readout);
+                        let sc_write = code::score(&self.store, &phi, !self.cfg.no_readout && !silent);
                         self.store.write(&sc_write, &phi, x as u32, &negs, eta);
                     }
                     if !self.cfg.no_eligibility {
@@ -757,8 +812,14 @@ impl Model {
 
                     // The operator write, on the write walk's own last step.
                     // Local: nothing crosses a hop.
-                    if let Some(st) = steps.last() {
+                    // Every step, not only the last. With `hops = 2` only the
+                    // second edge ever learned, and its `p_in` was the output of
+                    // an untrained first hop -- a region of state space the read
+                    // path, which takes one hop per tick, never produces.
+                    for st in steps.iter() {
                         self.write_operator_on(st, x, eta);
+                    }
+                    if let Some(st) = steps.last() {
                         self.last_write_node = self.graph.head_of(st.edge);
                     }
                     self.content_writes += 1;
@@ -769,10 +830,16 @@ impl Model {
                 //    and the state, then take this tick's read.
                 self.emb.rotated(x, Channel::In, &mut self.scratch);
                 let v = self.scratch.clone();
+                // Bind first. `observe_world` folds `E_x` into every band, so
+                // binding afterwards convolved bands that already contained
+                // `E_x` with `E_x` again -- an autocorrelation term in three of
+                // the five bound blocks, which are also three fifths of the
+                // routing query under `RouteQuery::Bound`. The trace should be
+                // "the background as it stood, bound to what just arrived".
+                self.rebind(x);
                 self.ladder.observe_world(&v);
                 self.feedback();
                 self.ladder.refresh();
-                self.rebind(x);
                 self.emb.apply_operator(Some(x), &mut self.p);
                 self.graph.decay_traces(self.cfg.trace_lambda);
                 self.step_walk();

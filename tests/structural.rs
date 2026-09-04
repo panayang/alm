@@ -190,8 +190,8 @@ fn read_and_write_walks_agree_once_the_read_has_finished() {
     let mut m = Model::new(cfg);
     warm(&mut m, 200);
     let q = unit_vector(0x9555_6666, 3, m.cfg.d);
-    let a = m.graph.write_walk(&q, &q, hops);
-    let b = m.graph.write_walk(&q, &q, hops);
+    let a = m.graph.write_walk(&q, &q, hops, None);
+    let b = m.graph.write_walk(&q, &q, hops, None);
     assert_eq!(
         bits_of(&a.last().unwrap().p_out),
         bits_of(&b.last().unwrap().p_out),
@@ -397,12 +397,12 @@ fn the_write_route_is_deterministic_given_its_query() {
     let mut g = alm::graph::Graph::new(&cfg);
     let q: Vec<f32> = (0..cfg.d).map(|i| ((i * 37 % 19) as f32 - 9.0) / 9.0).collect();
 
-    let a = g.write_walk(&q, &q, cfg.hops).iter().map(|s| s.edge).collect::<Vec<_>>();
+    let a = g.write_walk(&q, &q, cfg.hops, None).iter().map(|s| s.edge).collect::<Vec<_>>();
     // Wander the read head all over the graph in between.
     for r in 0..40usize {
         let _ = g.select_rank(r % cfg.nodes, &q, r % 3);
     }
-    let b = g.write_walk(&q, &q, cfg.hops).iter().map(|s| s.edge).collect::<Vec<_>>();
+    let b = g.write_walk(&q, &q, cfg.hops, None).iter().map(|s| s.edge).collect::<Vec<_>>();
     assert_eq!(a, b, "the write route moved without its query moving");
     assert_eq!(a.len(), cfg.hops, "the write walk did not take cfg.hops steps");
 }

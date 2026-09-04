@@ -335,25 +335,31 @@ impl Generator {
                 }
             }
 
-            // First-order facts drawn from the entities and targets no other
-            // item type touches.
-            let mut firsts = Vec::new();
-            let mut i = free_ent;
-            let mut j = free_tgt;
-            while i < ents.len() && j < tgts.len() {
-                firsts.push((ents[i], tgts[j]));
-                i += 1;
-                j += 1;
-            }
-
-            // Composition chains a -> b -> c, using entities as intermediates.
+            // Composition chains a -> b -> c, taken first so they own their
+            // tokens outright. Previously chains and first-order facts were both
+            // laid down from `free_ent` / `free_tgt`, so chain k = 0 had
+            // (a, c) == firsts[0]: the composition query was answerable from a
+            // first-order fact the stream had already presented, and the whole
+            // point of the family -- that the answer exists only as a chain --
+            // was lost. The leak guard could not see it, because it only
+            // compared query pairs against support pairs.
             let mut chains = Vec::new();
-            let n_chain = 8.min((ents.len() - free_ent) / 3);
+            let n_chain = 8.min((ents.len() - free_ent) / 3).min(tgts.len() - free_tgt);
             for k in 0..n_chain {
                 let a = ents[free_ent + 3 * k];
                 let b = ents[free_ent + 3 * k + 1];
                 let c = tgts[free_tgt + k];
                 chains.push((a, b, c));
+            }
+
+            // First-order facts start past everything the chains claimed.
+            let mut firsts = Vec::new();
+            let mut i = free_ent + 3 * n_chain;
+            let mut j = free_tgt + n_chain;
+            while i < ents.len() && j < tgts.len() {
+                firsts.push((ents[i], tgts[j]));
+                i += 1;
+                j += 1;
             }
 
             domains.push(Domain {
@@ -519,7 +525,24 @@ impl Generator {
                 }
                 Kind::Second => {
                     let m = cfg.square_m;
-                    let a = self.zipf_pick(key ^ 0x31, counter, m);
+                    // Both cues uniform, and it has to be both.
+                    //
+                    // For T = (a+b) mod m, P(T|A=a) is uniform exactly when
+                    // p_B is, and P(T|B=b) is uniform exactly when p_A is. So
+                    // zero marginals on both sides require both cue
+                    // distributions uniform -- no choice of Latin square
+                    // changes that. `a` Zipf with `b` uniform gave I(T;B) =
+                    // 0.067 bits and a single-cue ceiling of 0.2745, above
+                    // every Latin accuracy the suite had ever reported; making
+                    // both Zipf only makes the leak symmetric and leaves that
+                    // ceiling exactly where it was.
+                    //
+                    // The frequency skew therefore lives outside the square:
+                    // which regime and which item family are presented, the
+                    // product code's cue A (that family is deliberately
+                    // non-zero-marginal and is the control for exactly this),
+                    // and which chain is drawn.
+                    let a = uniform_below(key ^ 0x31, counter, m as u64) as usize;
                     let b = uniform_below(key ^ 0x32, counter, m as u64) as usize;
                     let sep_i =
                         uniform_below(key ^ 0x33, counter, cfg.separations.len() as u64) as usize;
@@ -634,9 +657,16 @@ impl Generator {
             let dom = &self.domains[d];
             let m = cfg.square_m;
             let (na, nb) = (cfg.product_na, cfg.product_nb);
-            // Context: a few of the regime's own entities, so the background is
-            // the one it lived in.
-            let ctx: Vec<usize> = dom.ents.iter().take(4).copied().collect();
+            // Context: entities of this regime that are *not* cues of any item
+            // family, so the background is the one the regime lived in without
+            // the probe being run against four competing cue-A tokens sitting in
+            // the ladder and in `event_hist`. `ents[..2m]` are the square's cues
+            // and `ents[2m..free_ent]` the product code's, so the context is
+            // drawn from past them -- an interference condition the live stream
+            // never presents was otherwise being applied to every probe.
+            let ctx_base = 2 * m + na + nb;
+            let ctx: Vec<usize> =
+                dom.ents.iter().skip(ctx_base).take(4).copied().collect();
             // Rotate through the item types so retention is not measured on one
             // kind of fact only.
             let (cue, target, kind) = match i % 3 {

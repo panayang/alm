@@ -270,6 +270,10 @@ impl Metrics {
         self.overt_window.iter().filter(|b| **b).count() as f64 / self.overt_window.len() as f64
     }
 
+    /// `leaf` is the node the *read* settled on. It used to be the write walk's
+    /// last node, which no routing arm touches, so `address_consistency` was a
+    /// statistic about a walk the repair could not move -- and it duly did not
+    /// move, and I explained that away as a weak instrument.
     pub fn note_write(&mut self, leaf: usize, ep: &EpisodeRec) {
         let n = self.domains.max(ep.domain + 1);
         self.domains = n;
@@ -697,7 +701,7 @@ pub fn run(model: &mut Model, stream: &Stream, metrics: &mut Metrics) {
         let ep = stream.ep_at[t].map(|i| &stream.episodes[i]);
         if out.wrote {
             if let Some(e) = ep {
-                metrics.note_write(model.last_write_node, e);
+                metrics.note_write(model.last_read_node, e);
             }
         }
         metrics.observe(&out, ep);

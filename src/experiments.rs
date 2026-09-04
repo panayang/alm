@@ -72,7 +72,10 @@ pub fn hop_slope(m: &Metrics) -> (f64, f64, usize) {
         .map(|(h, b)| (h as f64, b.accuracy()))
         .collect();
     if pts.len() < 3 {
-        return (0.0, 0.0, pts.len());
+        // Undefined, not flat. With the gap walk off every charged event lands
+        // in hop bucket 0, and returning 0.0 put a refusal to compute in the
+        // same column as a measurement.
+        return (f64::NAN, f64::NAN, pts.len());
     }
     let n = pts.len() as f64;
     let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
@@ -131,8 +134,14 @@ pub fn capacity(ticks: usize, seed: u64) -> Suite {
 
     for (name, c) in arms {
         let readout = c.feature_blocks() * c.d;
-        let graph_params = if c.bypass_graph { 0 } else { c.nodes * (2 + c.shortcuts) * c.d * c.d };
+        // Shortcuts colliding with a ring neighbour or the node itself are
+        // dropped at construction, so the formula overcounts -- 4 edges against
+        // 2 at nodes=1, which is exactly where the budget-matching argument was
+        // being made. Ask the graph.
+        let dd = c.d;
+        let bypass = c.bypass_graph;
         let o = run_one(&name, c, &gcfg, &stream);
+        let graph_params = if bypass { 0 } else { o.model.graph.edges() * dd * dd };
         let (_, la) = window_mean(&o.metrics.window);
         let (_, pa) = window_mean(&o.metrics.window_product);
         let ret: (u64, u64) =
@@ -418,7 +427,7 @@ pub fn mechanism(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite 
         suite.note(format!(
             "[mech] {:<22} Latin {:.3} ({:.2} bits) | product {:.3} ({:.2} bits) |              retention {:.3} | all-token {:.3} bits",
             name, la, lb, pa, pb, ret_acc, o.metrics.bits_per_event()
-        ));
+        ) + &comp_tail(&o));
     }
     suite
 }
@@ -490,7 +499,7 @@ pub fn route(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
             "[route] {:<24} consistency latin {:.3}/{:.1}n product {:.3}/{:.1}n |              Latin {:.3} ({:.2}b) | product {:.3} ({:.2}b) | retention {:.3} |              answer {:.3} bits over {} events",
             name, ls, ln, ps, pn, la, lb, pa, pb, ret_acc,
             o.metrics.answer.mean(), o.metrics.answer.n
-        ));
+        ) + &comp_tail(&o));
     }
     suite
 }
@@ -547,7 +556,7 @@ pub fn seeds(ticks: usize, seed0: u64, shard: usize, shards: usize) -> Suite {
         suite.note(format!(
             "[seed] {:<28} Latin {:.4} ({:.3}b) | product {:.4} ({:.3}b) |              retention {:.4} | answer {:.4} bits",
             name, la, lb, pa, pb, ret_acc, o.metrics.answer.mean()
-        ));
+        ) + &comp_tail(&o));
     }
     suite
 }
@@ -608,9 +617,98 @@ pub fn depth(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
         suite.note(format!(
             "[depth] {:<36} hop slope {:+.4} (d {:+.3}, {} pts) | Latin {:.3} |              product {:.3} | answer {:.3} bits | operator drift {:.4},              top-direction share {:.3}",
             name, slope, delta, npts, la, pa, o.metrics.answer.mean(), drift, share
-        ));
+        ) + &comp_tail(&o));
     }
     suite
+}
+
+/// Does the operator write start working once the address isolates content?
+///
+/// The drift figures said the write is neither starved nor degenerate: the
+/// matrices move 0.31--0.65 of their initial norm while their spectra stay at
+/// the random baseline, and that movement scales as the square root of the
+/// updates per edge (2.10x for 3.9x the updates), which is what uncorrelated
+/// rank-one accumulation looks like. So the write is large, structureless and
+/// free to discard -- the signature of many unrelated facts writing the same
+/// edge.
+///
+/// That predicts the value of learning tracks address consistency rather than
+/// data volume. Content entry raised consistency, so the freeze contrast is
+/// re-run on top of it, crossed with the gap walk since switching that off is
+/// currently the better configuration and it changes how often each edge is
+/// written.
+pub fn freeze2(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for nodes in [64usize, 256] {
+        for gap in [true, false] {
+            for frozen in [false, true] {
+                let mut c = Config::local();
+                c.seed = seed;
+                c.vocab = gcfg.vocab;
+                c.nodes = nodes;
+                c.route_query = RouteQuery::Bound;
+                c.read_entry_by_content = true;
+                c.walk_during_gap = gap;
+                c.freeze_operator = frozen;
+                c.derive();
+                arms.push((
+                    format!(
+                        "n={} {} {}",
+                        nodes,
+                        if gap { "gap-walk" } else { "no-gap" },
+                        if frozen { "FROZEN" } else { "learned" }
+                    ),
+                    c,
+                ));
+            }
+        }
+    }
+
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let cc = c.clone();
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let (ps, pn, _, _) = o.metrics.address_consistency_full(1);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        let (drift, share) = o.model.graph.operator_drift(&cc);
+        suite.note(format!(
+            "[freeze2] {:<26} Latin {:.4} | product {:.4} | retention {:.4} |              answer {:.4} bits | consistency {:.3}/{:.1}n | drift {:.4} share {:.3}",
+            name, la, pa, ret_acc, o.metrics.answer.mean(), ps, pn, drift, share
+        ) + &comp_tail(&o));
+    }
+    suite
+}
+
+/// The composition family, reported separately because it is the only place in
+/// the source where an answer requires chaining two stored facts.
+///
+/// The depth question was being read off `hop_slope`, which pools every charged
+/// event; composition is 14% of episodes, so the one family that needs more than
+/// one hop was diluted into the 86% that do not. It has had its own metric
+/// bucket all along and was never once printed.
+pub fn comp_tail(o: &Outcome) -> String {
+    let q = &o.metrics.composition_query;
+    let sup = &o.metrics.composition_support;
+    format!(
+        " | comp-query {:.4} ({:.2}b, n={}) | comp-support {:.4} (n={})",
+        q.accuracy(),
+        q.mean(),
+        q.n,
+        sup.accuracy(),
+        sup.n
+    )
 }
 
 pub struct Suite {
@@ -697,6 +795,9 @@ pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
     let mut nb = base.clone();
     nb.use_binding = false;
     nb.bind_mode = BindMode::Off;
+    // `derive()` carries the assertion that these two fields agree; every other
+    // driver calls it and this one did not.
+    nb.derive();
     arms.push(("bind off".into(), nb));
 
     // The residual scale. 1.5 came from a sweep later shown to be an artefact
@@ -717,9 +818,14 @@ pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
     arms.push(("eligibility on".into(), el));
 
     // Is the shared readout doing the work.
+    // Its codelength is meaningful (uniform over the vocabulary); its accuracy
+    // is not. With no readout `Scored.rows` is empty, `top()` returns None and
+    // `out.correct` is false on every event by construction, so the 0.000 in
+    // that row is a structural fact sitting in a column of measurements.
     let mut nr = base.clone();
     nr.no_readout = true;
-    arms.push(("no readout".into(), nr));
+    nr.derive();
+    arms.push(("no readout (acc is structural)".into(), nr));
 
     if wide {
         let mut nc = base.clone();
@@ -761,7 +867,7 @@ pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
             npts,
             o.model.store.occupied_rows(),
             o.model.graph.clamp_rate()
-        ));
+        ) + &comp_tail(&o));
         if name == "full" {
             o.metrics.print(&o.model, "full");
             o.metrics.csv_window("full", &mut suite.csv);
@@ -773,12 +879,12 @@ pub fn screen(ticks: usize, seed: u64, wide: bool) -> Suite {
     let like = baseline::run(&stream, 4, false);
     let upper = baseline::run(&stream, 4, true);
     suite.note(format!(
-        "[baseline] PPM-C order 4, same stream: {:.3} bits/ev, second-order {:.3} \
+        "[baseline] PPM-C order 4 on CHARGED events, same denominator as the mechanism: {:.3} bits/ev, second-order {:.3} \
          bits | silence removed (UPPER BOUND, handed the segmentation): {:.3} \
          bits/ev, second-order {:.3}",
-        like.ppm.bits_per_event(),
+        like.charged.mean(),
         like.second.mean(),
-        upper.ppm.bits_per_event(),
+        upper.charged.mean(),
         upper.second.mean()
     ));
 

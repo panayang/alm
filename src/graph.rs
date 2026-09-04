@@ -55,6 +55,8 @@ pub struct Graph {
     /// end up steering real weight updates.
     pub frozen: bool,
     key: u64,
+    /// Set from `cfg.freeze_operator`: no path may write `w`.
+    pub no_learn: bool,
     rank_clamped: std::cell::Cell<u64>,
     rank_selected: std::cell::Cell<u64>,
 }
@@ -108,6 +110,7 @@ impl Graph {
             read_cache: vec![None; m],
             frozen: false,
             key,
+            no_learn: cfg.freeze_operator,
             rank_clamped: std::cell::Cell::new(0),
             rank_selected: std::cell::Cell::new(0),
         }
@@ -171,6 +174,11 @@ impl Graph {
     pub fn clamp_rate(&self) -> f64 {
         let n = self.rank_selected.get();
         if n == 0 { 0.0 } else { self.rank_clamped.get() as f64 / n as f64 }
+    }
+
+    /// A uniformly random node: the matched control for content entry.
+    pub fn random_node(&self, nonce: u64) -> usize {
+        crate::num::uniform_below(self.key ^ 0x4E0D_E5, nonce, self.nodes as u64) as usize
     }
 
     /// A uniformly random out-edge, keyed by a counter so the run stays
@@ -264,8 +272,17 @@ impl Graph {
 
     /// The deterministic write walk: `hops` steps from the entry node, routed by
     /// the fixed keys on a payload that does not change between calls.
-    pub fn write_walk(&mut self, q: &[f32], p0: &[f32], hops: usize) -> Vec<WalkStep> {
-        let mut u = self.entry(q);
+    pub fn write_walk(
+        &mut self,
+        q: &[f32],
+        p0: &[f32],
+        hops: usize,
+        from: Option<usize>,
+    ) -> Vec<WalkStep> {
+        let mut u = match from {
+            Some(u) => u,
+            None => self.entry(q),
+        };
         let mut p = p0.to_vec();
         let mut steps = Vec::with_capacity(hops);
         for _ in 0..hops {
@@ -356,6 +373,13 @@ impl Graph {
     /// remembers. This is what lets gap-time computation be learned at all,
     /// without unrolling the gap.
     pub fn credit_traces(&mut self, grad_seed: &[f32], eta: f32, floor: f32) -> usize {
+        // `backward_step` writes `w`, so the freeze has to be honoured here too.
+        // It was not, and the moment an eligibility arm were crossed with a
+        // frozen one the frozen arm would have learned in silence and read as
+        // "freezing costs nothing" for a second, wrong reason.
+        if self.no_learn {
+            return 0;
+        }
         let mut touched = 0usize;
         for a in 0..self.edges() {
             let tr = self.trace[a];

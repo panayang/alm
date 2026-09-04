@@ -32,6 +32,17 @@ pub struct GenReport {
     /// these counts a sweep can compare "more facts, same practice" in one
     /// family against "same facts, more practice" in the other and read the
     /// difference as a property of the mechanism.
+    /// Best top-1 accuracy obtainable within a regime from ONE cue, per family:
+    /// [Second (Latin), Product], as (from cue A, from cue B).
+    ///
+    /// This is the number a Latin accuracy has to beat to be evidence of
+    /// conjunctive retrieval, and the suite never had it. With cue A Zipf and
+    /// cue B uniform it stood at 0.2745 while every reported Latin accuracy sat
+    /// between 0.19 and 0.246 -- so no arm ever cleared a predictor that ignores
+    /// half the challenge. Empirical rather than analytic, and therefore biased
+    /// upward at small samples in the same way a model's own estimate would be,
+    /// which is the comparison that matters.
+    pub single_cue_ceiling: [(f64, f64); 2],
     pub distinct_facts: [usize; 2],
     pub presentations_per_fact: [f64; 2],
 
@@ -372,7 +383,28 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
             _ => {}
         }
     }
-    let comp_query_leaked = queries.iter().filter(|q| support.contains(q)).count();
+    // A composition query leaks if its (cue, target) has been presented as a
+    // fact by *any* family, not only as one of its own supports. The old check
+    // compared query pairs against support pairs, and since the query carries
+    // relation r12 while supports carry r1/r2, it was structurally always zero
+    // and could never fire -- while chain k = 0 shared its (a, c) with
+    // `firsts[0]` outright.
+    let mut first_facts: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    for ep in stream.episodes.iter() {
+        if matches!(ep.kind, crate::gen::Kind::First) && !ep.cues.is_empty() {
+            first_facts.insert((ep.cues[0], ep.target));
+        }
+    }
+    let mut comp_query_leaked = queries.iter().filter(|q| support.contains(q)).count();
+    for ep in stream.episodes.iter() {
+        if matches!(ep.kind, crate::gen::Kind::CompQuery)
+            && !ep.cues.is_empty()
+            && first_facts.contains(&(ep.cues[0], ep.target))
+        {
+            comp_query_leaked += 1;
+        }
+    }
 
     // Distinct facts and practice per fact, straight off the stream: no
     // threshold, so this cannot be biased by looking only at a tail.
@@ -388,6 +420,57 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
             *fact_counts[fam].entry((ep.cues[0], ep.cues[1])).or_insert(0) += 1;
         }
     }
+    // Best within-regime single-cue accuracy, per family and per cue side --
+    // *prequential*, not in-sample.
+    //
+    // Predict from the counts accumulated so far, then update. An in-sample
+    // ceiling is an oracle: with about eighteen items per (regime, cue) group
+    // spread over six targets, its empirical mode alone reaches 0.27 by chance,
+    // which no model charged before it sees the answer can reach. The mechanism
+    // is scored prequentially, so its baseline has to be too.
+    let mut sc: [std::collections::HashMap<(usize, usize, usize), u64>; 4] = Default::default();
+    let mut sc_hit = [0u64; 4];
+    let mut sc_tot = [0u64; 2];
+    for ep in stream.episodes.iter() {
+        let fam = match ep.kind {
+            crate::gen::Kind::Second => 0usize,
+            crate::gen::Kind::Product => 1,
+            _ => continue,
+        };
+        if ep.cues.len() < 2 {
+            continue;
+        }
+        for side in 0..2 {
+            let slot = fam * 2 + side;
+            let mut best: Option<(u64, usize)> = None;
+            let mut keys: Vec<&(usize, usize, usize)> = sc[slot].keys().collect();
+            keys.sort_unstable();
+            for k in keys {
+                if k.0 == ep.domain && k.1 == ep.cues[side] {
+                    let c = sc[slot][k];
+                    match best {
+                        Some((bc, bt)) if bc > c || (bc == c && bt <= k.2) => {}
+                        _ => best = Some((c, k.2)),
+                    }
+                }
+            }
+            if let Some((_, t)) = best {
+                if t == ep.target {
+                    sc_hit[slot] += 1;
+                }
+            }
+            *sc[slot].entry((ep.domain, ep.cues[side], ep.target)).or_insert(0) += 1;
+        }
+        sc_tot[fam] += 1;
+    }
+    let acc = |slot: usize, tot: u64| -> f64 {
+        if tot == 0 { 0.0 } else { sc_hit[slot] as f64 / tot as f64 }
+    };
+    let single_cue_ceiling = [
+        (acc(0, sc_tot[0]), acc(1, sc_tot[0])),
+        (acc(2, sc_tot[1]), acc(3, sc_tot[1])),
+    ];
+
     let mut distinct_facts = [0usize; 2];
     let mut presentations_per_fact = [0.0f64; 2];
     for f in 0..2 {
@@ -398,6 +481,7 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
     }
 
     GenReport {
+        single_cue_ceiling,
         distinct_facts,
         presentations_per_fact,
         ticks: n,
@@ -434,6 +518,13 @@ pub fn check(stream: &Stream, answer_gap: u32, separations: &[u32]) -> GenReport
 
 impl GenReport {
     pub fn print(&self) {
+        println!(
+            "  single-cue baseline (prequential, within regime, one cue only):              latin A {:.4} B {:.4} | product A {:.4} B {:.4}  <-- a conjunction              result must beat these",
+            self.single_cue_ceiling[0].0,
+            self.single_cue_ceiling[0].1,
+            self.single_cue_ceiling[1].0,
+            self.single_cue_ceiling[1].1
+        );
         println!(
             "  facts presented: latin {} distinct, {:.1} presentations each |              product {} distinct, {:.1} each",
             self.distinct_facts[0],
@@ -498,6 +589,17 @@ impl GenReport {
             self.second_per_domain >= 2.0 * 36.0,
             "only {:.0} second-order items per regime against 36 cells: the              conjunction estimate is sample-limited and asserting on it would              be asserting on the sample size, not on the source",
             self.second_per_domain
+        );
+        // The assertion that would have caught the Zipf/uniform asymmetry. Both
+        // marginals being *small* was already checked and passed while cue B
+        // carried 0.067 bits that cue A did not, because the target inherited
+        // A's Zipf profile conditioned on B. A Latin square is zero-marginal
+        // only when its two margins agree, so agreement is the thing to assert.
+        assert!(
+            (self.mi_within_cue_a - self.mi_within_cue_b).abs() < 0.05,
+            "the two cue marginals disagree: {:.3} against {:.3} bits. A Latin              square with a skewed cue distribution on one side only is not              zero-marginal, and a single-cue predictor will beat the conjunction",
+            self.mi_within_cue_a,
+            self.mi_within_cue_b
         );
         assert!(
             self.mi_within_cue_a < 0.25 && self.mi_within_cue_b < 0.25,

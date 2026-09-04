@@ -83,6 +83,13 @@ fn main() {
                 );
             }
         }
+        "freeze2" => {
+            let suite = experiments::freeze2(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "depth" => {
             let suite = experiments::depth(ticks, seed, shard, shards);
             println!();

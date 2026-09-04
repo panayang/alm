@@ -134,7 +134,14 @@ impl Ladder {
                 };
                 self.deltas[k][i] = a - b;
             }
-            normalize(&mut self.deltas[k]);
+            // Direction only: every band is a unit vector however much or little
+        // the world has put into that rung. So elapsed time reaches the readout
+        // through the *rotation* of the band directions and not through their
+        // amplitude, the anchor pulls with constant strength on a fresh and an
+        // exhausted background alike, and "how much background is there" is not
+        // a feature. That is a design choice, not an oversight, but the rest of
+        // this file reads as though the bands carried energy.
+        normalize(&mut self.deltas[k]);
         }
     }
 

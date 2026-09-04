@@ -80,6 +80,14 @@ pub struct Config {
     /// INHERITED. Random shortcuts per node, on top of the two ring neighbours.
     pub shortcuts: usize,
     /// INHERITED. Hops on the write walk.
+    /// Steps on the write walk. It has to match what a read does in one tick.
+    ///
+    /// A read takes one hop per tick, so the states reads ever present to an
+    /// edge are "one hop from entry". At `hops = 2` the write walk's second step
+    /// was fed the output of its own first hop -- a region of state space no
+    /// read produces -- and only that second edge learned, so the operator was
+    /// taught a mapping on an input distribution disjoint from the one it is
+    /// evaluated on.
     pub hops: usize,
 
     // ---- allocation ------------------------------------------------------
@@ -310,7 +318,7 @@ impl Config {
             horizon,
             nodes: 32,
             shortcuts: 2,
-            hops: 2,
+            hops: 1,
             eta: 0.5,
             neg_samples: 16,
             trace_lambda: 0.9,
