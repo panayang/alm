@@ -270,7 +270,28 @@ pub struct Config {
     /// superposition. If the Latin window does not move when this is switched
     /// on, the binding is not what was missing.
     pub use_binding: bool,
-    /// Decay of the binding trace across a response.
+    /// Per-tick decay of the binding trace. Measured: it must be 1.0.
+    ///
+    /// Declared at 0.5 and referenced nowhere for the life of the project. Wired
+    /// up, 0.5 applies per tick, so across an answer gap of six the trace
+    /// retains 1.6% and the conjunction is annihilated before anything reads it.
+    /// The sweep is monotone and there is no interior optimum:
+    ///
+    /// ```text
+    ///   decay   Latin    product  retention  answer bits
+    ///   1.00    0.1448   0.6884   0.2163     6.249
+    ///   0.99    0.1326   0.6690   0.2123     6.507
+    ///   0.95    0.0682   0.6349   0.1429     7.362
+    ///   0.85    0.0192   0.4612   0.1091     8.877
+    ///   0.50    0.0100   0.2845   0.0536     9.773
+    /// ```
+    ///
+    /// The audit wanted this wired because a trace that never decays leaks across
+    /// episodes. It does leak, but decay is not the cure: `rebind` overwrites
+    /// every slot wholesale on each event, so what leaks is the interleaved token
+    /// `event_hist` carries into the lag-1 block, and only a change there fixes
+    /// it. Kept as a field rather than deleted so the measurement stays attached
+    /// to the number.
     pub bind_decay: f32,
 
     /// Initialisation scale of the edge transforms. Small values leave the tanh
@@ -342,7 +363,7 @@ impl Config {
             use_binding: true,
             bind_mode: BindMode::Both,
             bind_lags: 2,
-            bind_decay: 0.5,
+            bind_decay: 1.0,
             // 1.5, because the sweep measured it: the payload chain needs to
             // be out of the tanh's linear regime before it transforms
             // anything, and both conjunctions peak here.

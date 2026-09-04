@@ -711,6 +711,53 @@ pub fn comp_tail(o: &Outcome) -> String {
     )
 }
 
+/// How fast may a bound trace decay?
+///
+/// `bind_decay` was declared at 0.5 and never referenced. Wiring it at that value
+/// applies it per tick, so across an answer gap of six the trace retains 1.6% --
+/// the conjunction is gone before anything reads it, and binding is the single
+/// most load-bearing mechanism in the system. The knob's declared value only
+/// makes sense per response, not per tick, and having never run it was never
+/// calibrated.
+///
+/// The constraint is two-sided: the trace has to survive the gap it is read
+/// across, and fade before the next episode's answer.
+pub fn binddecay(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+    for (i, bd) in [1.0f32, 0.99, 0.95, 0.85, 0.5].into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = gcfg.vocab;
+        c.nodes = 64;
+        c.route_query = RouteQuery::Bound;
+        c.read_entry_by_content = true;
+        c.bind_decay = bd;
+        c.derive();
+        let name = format!("bind_decay={}", bd);
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let (ps, pn, _, _) = o.metrics.address_consistency_full(1);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(
+            format!(
+                "[bd] {:<18} Latin {:.4} | product {:.4} | retention {:.4} |                  answer {:.4} bits | consistency {:.3}/{:.1}n",
+                name, la, pa, ret_acc, o.metrics.answer.mean(), ps, pn
+            ) + &comp_tail(&o),
+        );
+    }
+    suite
+}
+
 pub struct Suite {
     pub csv: String,
     pub summary: Vec<String>,

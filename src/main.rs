@@ -83,6 +83,13 @@ fn main() {
                 );
             }
         }
+        "binddecay" => {
+            let suite = experiments::binddecay(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "freeze2" => {
             let suite = experiments::freeze2(ticks, seed, shard, shards);
             println!();
