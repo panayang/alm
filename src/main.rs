@@ -83,6 +83,20 @@ fn main() {
                 );
             }
         }
+        "worth" => {
+            let suite = experiments::worth(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
+        "grid" => {
+            let suite = experiments::grid(ticks, seed, shard, shards);
+            println!();
+            for line in suite.summary.iter() {
+                println!("{}", line);
+            }
+        }
         "negatives" => {
             let suite = experiments::negatives(ticks, seed, shard, shards);
             println!();

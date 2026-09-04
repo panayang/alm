@@ -918,6 +918,166 @@ pub fn negatives(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite 
     suite
 }
 
+/// The core grid, re-run on everything that has been repaired.
+///
+/// Every ablation before this one was measured through a readout that could not
+/// separate the candidates inside a regime, so none of them said what they were
+/// read as saying. Four axes, crossed, so the interactions are visible rather
+/// than assumed:
+///
+/// * `freeze_operator` -- is there operator memory, now that a readout exists
+///   that could show it,
+/// * `route_random` -- does the address carry information, against a control
+///   that randomises the entry node too rather than being pinned to a local walk,
+/// * `walk_during_gap` -- does iterating through the gap pay, now that
+///   composition is reachable at all,
+/// * `nodes` -- what the marginal address buys.
+///
+/// Reported against the prequential single-cue baselines the generator prints:
+/// Latin 0.161, product 0.486. Composition has no such baseline -- nothing short
+/// of chaining answers it.
+pub fn grid(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::RouteQuery;
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, shard == 0);
+
+    let mut arms: Vec<(String, Config)> = Vec::new();
+    for nodes in [64usize, 256] {
+        for gap in [true, false] {
+            for rnd in [false, true] {
+                for frozen in [false, true] {
+                    let mut c = Config::local();
+                    c.seed = seed;
+                    c.vocab = gcfg.vocab;
+                    c.nodes = nodes;
+                    c.route_query = RouteQuery::Bound;
+                    c.read_entry_by_content = true;
+                    c.route_random = rnd;
+                    c.walk_during_gap = gap;
+                    c.freeze_operator = frozen;
+                    c.derive();
+                    arms.push((
+                        format!(
+                            "n={} {} {} {}",
+                            nodes,
+                            if gap { "gap" } else { "nogap" },
+                            if rnd { "RAND" } else { "content" },
+                            if frozen { "FROZEN" } else { "learned" }
+                        ),
+                        c,
+                    ));
+                }
+            }
+        }
+    }
+
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let (ps, pn, _, _) = o.metrics.address_consistency_full(1);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(
+            format!(
+                "[grid] {:<28} Latin {:.4} | product {:.4} | retention {:.4} |                  answer {:.4} bits | consist {:.3}/{:.1}n",
+                name, la, pa, ret_acc, o.metrics.answer.mean(), ps, pn
+            ) + &comp_tail(&o),
+        );
+    }
+    suite
+}
+
+/// The cell the grid does not contain: is the graph worth anything at all?
+///
+/// Crossing freeze, routing, gap-walking and node count left sixteen arms inside
+/// a 0.68-0.69 band on Latin and 0.922-0.926 on the product code -- every axis
+/// inert, while the consistency instrument says content entry really does
+/// concentrate a fact onto 5.9 nodes against a random control's 21.2. The
+/// address works and does not matter. That makes the untested question the
+/// blunt one: remove the hop entirely.
+///
+/// `bind off` and `no readout` ride along as the anchors that must collapse; if
+/// they do not, the run says nothing about anything.
+pub fn worth(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
+    use crate::config::{BindMode, RouteQuery};
+    let mut suite = Suite::new();
+    let mut gcfg = GenConfig::fast();
+    gcfg.seed = seed ^ 0xA11CE;
+    let stream = build_stream(&gcfg, ticks, 20, false);
+
+    let base = |seed: u64, vocab: usize| {
+        let mut c = Config::local();
+        c.seed = seed;
+        c.vocab = vocab;
+        c.nodes = 64;
+        c.route_query = RouteQuery::Bound;
+        c.read_entry_by_content = true;
+        c.walk_during_gap = false;
+        c.freeze_operator = true;
+        c
+    };
+    let mut arms: Vec<(String, Config)> = Vec::new();
+
+    let mut c = base(seed, gcfg.vocab);
+    c.derive();
+    arms.push(("best from the grid".into(), c));
+
+    let mut c = base(seed, gcfg.vocab);
+    c.bypass_graph = true;
+    c.derive();
+    arms.push(("NO GRAPH at all".into(), c));
+
+    let mut c = base(seed, gcfg.vocab);
+    c.bypass_graph = true;
+    c.anchor = 0.0;
+    c.derive();
+    arms.push(("no graph, no anchor".into(), c));
+
+    let mut c = base(seed, gcfg.vocab);
+    c.use_binding = false;
+    c.bind_mode = BindMode::Off;
+    c.derive();
+    arms.push(("bind off (must collapse)".into(), c));
+
+    let mut c = base(seed, gcfg.vocab);
+    c.no_readout = true;
+    c.derive();
+    arms.push(("no readout (must collapse)".into(), c));
+
+    let mut c = base(seed, gcfg.vocab);
+    c.feedback_write = false;
+    c.feedback_covert = false;
+    c.feedback_overt = false;
+    c.derive();
+    arms.push(("all three streams off".into(), c));
+
+    for (i, (name, c)) in arms.into_iter().enumerate() {
+        if shards > 1 && i % shards != shard {
+            continue;
+        }
+        let o = run_one(&name, c, &gcfg, &stream);
+        let (_, la) = window_mean(&o.metrics.window);
+        let (_, pa) = window_mean(&o.metrics.window_product);
+        let ret: (u64, u64) =
+            o.metrics.retention.iter().fold((0, 0), |a, b| (a.0 + b.n, a.1 + b.hits));
+        let ret_acc = if ret.0 == 0 { 0.0 } else { ret.1 as f64 / ret.0 as f64 };
+        suite.note(
+            format!(
+                "[worth] {:<28} Latin {:.4} | product {:.4} | retention {:.4} | answer {:.4} bits",
+                name, la, pa, ret_acc, o.metrics.answer.mean()
+            ) + &comp_tail(&o),
+        );
+    }
+    suite
+}
+
 pub struct Suite {
     pub csv: String,
     pub summary: Vec<String>,
