@@ -28,6 +28,8 @@
 //! Prototypes are placed, priors are counted, addresses are never trained.
 
 pub mod baseline;
+pub mod budget;
+pub mod chainmem;
 pub mod code;
 pub mod config;
 
@@ -40,5 +42,6 @@ pub mod ladder;
 pub mod metrics;
 pub mod model;
 pub mod num;
+pub mod partial;
 pub mod scan;
 pub mod store;

@@ -27,6 +27,15 @@ fn main() {
     let mut label = String::from("trace");
     let mut limit: usize = 0;
     let mut gran = String::from("line");
+    let mut bankses: Vec<usize> = vec![4096, 8192, 16384, 32768];
+    let mut queries: usize = 2000;
+    let mut sample: usize = 16;
+    let mut data: Option<String> = None;
+    let mut bins: usize = 16;
+    let mut max_given: usize = 3;
+    let mut min_info: f64 = 0.05;
+    let mut budgets: Vec<usize> = vec![64 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20];
+    let mut widths: Vec<usize> = vec![32, 64, 128, 256, 512, 1024, 2048];
 
     let mut i = 1;
     while i < args.len() {
@@ -58,6 +67,46 @@ fn main() {
                 label = args[i + 1].clone();
                 i += 2;
             }
+            "--banks" => {
+                bankses = args[i + 1].split(',').map(|x| x.parse().expect("banks")).collect();
+                i += 2;
+            }
+            "--data" => {
+                data = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--bins" => {
+                bins = args[i + 1].parse().expect("--bins wants a number");
+                i += 2;
+            }
+            "--max-given" => {
+                max_given = args[i + 1].parse().expect("--max-given wants a number");
+                i += 2;
+            }
+            "--min-info" => {
+                min_info = args[i + 1].parse().expect("--min-info wants a number");
+                i += 2;
+            }
+            "--sample" => {
+                sample = args[i + 1].parse().expect("--sample wants a number");
+                i += 2;
+            }
+            "--budgets" => {
+                budgets = args[i + 1]
+                    .split(',')
+                    .map(|x| x.trim_end_matches(['K', 'M']).parse::<usize>().expect("budget")
+                        * if x.ends_with('M') { 1 << 20 } else { 1 << 10 })
+                    .collect();
+                i += 2;
+            }
+            "--queries" => {
+                queries = args[i + 1].parse().expect("--queries wants a number");
+                i += 2;
+            }
+            "--widths" => {
+                widths = args[i + 1].split(',').map(|x| x.parse().expect("width")).collect();
+                i += 2;
+            }
             "--gran" => {
                 gran = args[i + 1].clone();
                 i += 2;
@@ -76,6 +125,24 @@ fn main() {
         "scan" => {
             let t = trace.expect("scan wants --trace PATH (or --trace - for stdin)");
             alm::scan::run(&t, &label, limit, &gran);
+        }
+        // What a record table costs to answer from every direction at once.
+        // Runs no model; this is a property of the table.
+        "partial" => {
+            let f = data.expect("partial wants --data FILE");
+            alm::partial::run(&f, &label, bins, max_given, &widths, min_info);
+        }
+        // Same metadata budget, spent two ways: our superposition against an
+        // exact table with LRU. The only comparison this domain cares about.
+        "budget" => {
+            let t = trace.expect("budget wants --trace PATH (or - for stdin)");
+            alm::budget::run(&t, &label, &gran, &budgets, &widths, limit, sample, seed);
+        }
+        // The same chain, but held in our own banked superposition instead of
+        // an exact table. Sweeps the width against the capacity law.
+        "chainmem" => {
+            let t = trace.expect("chainmem wants --trace PATH (or - for stdin)");
+            alm::chainmem::run(&t, &label, &gran, &widths, &bankses, limit, queries, seed);
         }
         "gencheck" => {
             // Both rungs of the load sweep, so the manipulation each family

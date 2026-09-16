@@ -149,7 +149,7 @@ fn sep(s: &[u8], i: &mut usize) -> bool {
 
 /// Hand-rolled field parser. `split(',').parse()` costs more than the rest of
 /// the scan put together at six million lines.
-fn parse_line(s: &[u8], unit_shift: u32) -> Option<Record> {
+pub fn parse_line(s: &[u8], unit_shift: u32) -> Option<Record> {
     let mut i = 0usize;
     let _id = dec(s, &mut i);
     if !sep(s, &mut i) {
