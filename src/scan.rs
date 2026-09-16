@@ -195,6 +195,15 @@ struct Counts {
 
 const TOPK: usize = 4;
 
+/// New contexts a single PPM level may create. Unbounded, this scanner needs
+/// 22GB on 429.mcf -- fifty million accesses over sixteen million distinct
+/// lines, 99.1% of them touched exactly once, so the order-3 delta model
+/// creates very nearly one context per access. Past the cap, existing contexts
+/// still update and new ones are simply not created, which is what a real
+/// bounded predictor does. Every trace here except mcf stays well under it, so
+/// for those the cap changes nothing; where it binds, the report says so.
+const MAX_CONTEXTS: usize = 4 << 20;
+
 impl Counts {
     /// Place `sym`, whose count has just become `c`, into the running top-k.
     /// Ordered by count, ties to the smaller symbol, so a scan is reproducible.
@@ -252,6 +261,8 @@ struct Ppm {
     /// Top-1 hits and trials, split by how often the target had been seen.
     by_rec_hit: [u64; 5],
     by_rec_n: [u64; 5],
+    /// Contexts refused because a level was full.
+    capped: u64,
 }
 
 impl Ppm {
@@ -266,6 +277,7 @@ impl Ppm {
             top1: 0,
             by_rec_hit: [0; 5],
             by_rec_n: [0; 5],
+            capped: 0,
         }
     }
 
@@ -314,7 +326,12 @@ impl Ppm {
 
     fn update(&mut self, keys: &[u64], sym: u64) {
         for (lvl, &k) in keys.iter().enumerate() {
-            let cs = self.levels[lvl].entry(k).or_default();
+            let lv = &mut self.levels[lvl];
+            if lv.len() >= MAX_CONTEXTS && !lv.contains_key(&k) {
+                self.capped += 1;
+                continue;
+            }
+            let cs = lv.entry(k).or_default();
             let c = cs.m.entry(sym).or_insert(0);
             *c += 1;
             let c = *c;
@@ -408,12 +425,14 @@ fn entropy_mm(counts: &[u64]) -> f64 {
 // whether there is slack in which to compute at all.
 
 const KS: [usize; 4] = [1, 2, 4, 8];
-/// Units a modelled cache holds. A prefetch for something already resident is
-/// not a prefetch -- real hardware checks the cache before issuing, and
-/// counting a self-prediction as a hit is how a walk that merely says "the
-/// thing you just touched" scores well while buying nothing. Sized for the 2MB
-/// LLC these traces were collected behind.
-const CACHE_UNITS: usize = 32768;
+/// Bytes the modelled cache holds -- the 2MB LLC these traces were collected
+/// behind. A prefetch for something already resident is not a prefetch: real
+/// hardware checks the cache before issuing, and without that check a walk
+/// that merely says "the thing you just touched" scores well while buying
+/// nothing. The capacity has to be counted in whatever unit is under test; a
+/// cache of 32768 *pages* is 128MB and holds every working set here, which
+/// suppresses every prediction and reports zero for everything.
+const CACHE_BYTES: usize = 2 << 20;
 /// Entries a model may have outstanding at once, per lookahead distance. A
 /// prefetcher that may name anything at any time is not a prefetcher.
 const QCAP: usize = 256;
@@ -447,13 +466,14 @@ impl Queue {
 struct Resident {
     at: Map<u64, ()>,
     fifo: std::collections::VecDeque<u64>,
+    cap: usize,
 }
 
 impl Resident {
     fn touch(&mut self, line: u64) {
         if self.at.insert(line, ()).is_none() {
             self.fifo.push_back(line);
-            while self.fifo.len() > CACHE_UNITS {
+            while self.fifo.len() > self.cap {
                 if let Some(old) = self.fifo.pop_front() {
                     self.at.remove(&old);
                 }
@@ -523,6 +543,7 @@ struct Walker {
     /// How far the table could actually be iterated before running out.
     depth_sum: u64,
     depth_n: u64,
+    capped: u64,
 }
 
 impl Walker {
@@ -533,6 +554,7 @@ impl Walker {
             ahead: Default::default(),
             depth_sum: 0,
             depth_n: 0,
+            capped: 0,
         }
     }
     #[inline]
@@ -540,6 +562,10 @@ impl Walker {
         self.tbl.get(&key).filter(|c| c.total > 0).map(|c| c.top[0].0)
     }
     fn learn(&mut self, key: u64, sym: u64) {
+        if self.tbl.len() >= MAX_CONTEXTS && !self.tbl.contains_key(&key) {
+            self.capped += 1;
+            return;
+        }
         let cs = self.tbl.entry(key).or_default();
         let c = cs.m.entry(sym).or_insert(0);
         *c += 1;
@@ -629,10 +655,16 @@ pub fn run(path: &str, label: &str, limit: usize, gran: &str) {
     // The per-PC chain walk. `chain` stores what this PC touched next;
     // `stride` stores what delta it took next. Both are iterated the same way.
     let mut chain = Walker::new("referential  (pc,unit)->unit");
+    // The control. Same PC, same budget, same queue, same cache filter -- but
+    // it never looks at where the cursor is, so it cannot walk. It names this
+    // PC's j-th most popular unit at step j. If the chain's advantage is real,
+    // it has to beat this; if it does not, the addresses were doing no work
+    // and only the PC was.
+    let mut blind = Walker::new("blind        (pc)->popular");
     let mut stride = Walker::new("local        (pc,delta)->delta");
     let mut pc_last: Map<u64, u64> = Map::default();
     let mut pc_last_d: Map<u64, i64> = Map::default();
-    let mut cache = Resident::default();
+    let mut cache = Resident { cap: CACHE_BYTES >> unit_shift, ..Default::default() };
 
     loop {
         raw.clear();
@@ -754,11 +786,15 @@ pub fn run(path: &str, label: &str, limit: usize, gran: &str) {
         for a in stride.ahead.iter_mut() {
             a.check(r.line, r.cycle);
         }
+        for a in blind.ahead.iter_mut() {
+            a.check(r.line, r.cycle);
+        }
         if let Some(&b) = pc_last.get(&r.pc) {
             let d = (r.line as i64).wrapping_sub(b as i64);
             chain.learn(mix2(r.pc, b), r.line);
             let pd = *pc_last_d.get(&r.pc).unwrap_or(&0);
             stride.learn(mix2(r.pc, pd as u64), d as u64);
+            blind.learn(r.pc, r.line);
             pc_last_d.insert(r.pc, d);
         }
         pc_last.insert(r.pc, r.line);
@@ -803,6 +839,19 @@ pub fn run(path: &str, label: &str, limit: usize, gran: &str) {
             }
             stride.depth_sum += reached as u64;
             stride.depth_n += 1;
+
+            // Control: no cursor, so no walk -- just this PC's favourites.
+            if let Some(cs) = blind.tbl.get(&r.pc) {
+                let picks: Vec<u64> = (0..TOPK)
+                    .filter(|&i| cs.top[i].1 != 0)
+                    .map(|i| cs.top[i].0)
+                    .collect();
+                for (slot, _) in KS.iter().enumerate() {
+                    if let Some(&x) = picks.get(slot) {
+                        blind.ahead[slot].issue(x, r.cycle, &cache);
+                    }
+                }
+            }
         }
 
         *seen.entry(r.line).or_insert(0) += 1;
@@ -832,7 +881,7 @@ pub fn run(path: &str, label: &str, limit: usize, gran: &str) {
         cls_marg: &cls_marg,
         gap_marg: &gap_marg,
         comp: &comp,
-        walkers: [&stride, &chain],
+        walkers: [&stride, &chain, &blind],
         loc_k: &loc_k,
         ref_k: &ref_k,
         hybrid,
@@ -861,7 +910,7 @@ struct Report<'a> {
     /// local-hit x referential-hit: neither / ref-only / local-only / both.
     comp: &'a [u64; 4],
     /// The local walker first, the referential one second.
-    walkers: [&'a Walker; 2],
+    walkers: [&'a Walker; 3],
     /// Coverage at prefetch degree 1..=4, best local model and referential.
     loc_k: &'a [u64; TOPK],
     ref_k: &'a [u64; TOPK],
@@ -1039,6 +1088,14 @@ impl Report<'_> {
             self.walkers[1].mean_depth()
         );
         println!("  how far each table could be iterated before it ran out of chain.");
+        let capped: u64 = self.models.iter().map(|m| m.capped).sum::<u64>()
+            + self.walkers.iter().map(|w| w.capped).sum::<u64>();
+        if capped > 0 {
+            println!(
+                "  NOTE: {} contexts refused, a table hit the {} cap -- every model here is bounded.",
+                capped, MAX_CONTEXTS
+            );
+        }
 
         println!("\n-- does the gap carry information? --");
         let hc = entropy_mm(self.cls_marg);
