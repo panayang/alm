@@ -377,6 +377,185 @@ fn entropy_mm(counts: &[u64]) -> f64 {
 // The scan
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Running ahead of the world
+// ---------------------------------------------------------------------------
+//
+// Naming the next access is worth nothing to a prefetcher: by the time the
+// line arrives it has already been demanded. Value comes from running *ahead*,
+// and the way to run ahead is to iterate the prediction -- feed what you named
+// back in and name the next one.
+//
+// For a stride, iterating is free: a + k*delta, exact at any distance, which
+// is why the hardware solved that case decades ago. For an irregular chain it
+// requires having stored the chain and walking it, one link per step. That is
+// this architecture's tick loop, and it is the only part of the prefetching
+// problem where we have anything distinctive to offer -- so it is the part the
+// scanner has to measure.
+//
+// The chain is per-PC, not global. A pointer-chasing loop is one instruction
+// executed over and over: `p = p->next` holds a single PC while the addresses
+// march. In our terms the PC is the operator that stays on the field while the
+// world is quiet, and the addresses are the cursor. The global access stream
+// interleaves every PC at once and is therefore not a chain at all, which is
+// what the first version of this scanner was walking.
+//
+// Both hypotheses iterate identically, emit into a bounded prefetch queue of
+// the same size, and are scored the same way: a prediction counts when the
+// line it named is actually demanded, and the lead time is how many cycles
+// early it was. That second number is the one our design cares about -- not
+// whether the gap predicts the answer, which is a question we never asked, but
+// whether there is slack in which to compute at all.
+
+const KS: [usize; 4] = [1, 2, 4, 8];
+/// Units a modelled cache holds. A prefetch for something already resident is
+/// not a prefetch -- real hardware checks the cache before issuing, and
+/// counting a self-prediction as a hit is how a walk that merely says "the
+/// thing you just touched" scores well while buying nothing. Sized for the 2MB
+/// LLC these traces were collected behind.
+const CACHE_UNITS: usize = 32768;
+/// Entries a model may have outstanding at once, per lookahead distance. A
+/// prefetcher that may name anything at any time is not a prefetcher.
+const QCAP: usize = 256;
+
+#[derive(Default)]
+struct Queue {
+    at: Map<u64, u64>,
+    fifo: std::collections::VecDeque<u64>,
+}
+
+impl Queue {
+    fn push(&mut self, line: u64, cycle: u64) {
+        if self.at.contains_key(&line) {
+            return;
+        }
+        self.at.insert(line, cycle);
+        self.fifo.push_back(line);
+        while self.fifo.len() > QCAP {
+            if let Some(old) = self.fifo.pop_front() {
+                self.at.remove(&old);
+            }
+        }
+    }
+    fn take(&mut self, line: u64) -> Option<u64> {
+        self.at.remove(&line)
+    }
+}
+
+/// What the modelled cache is currently holding, by recency.
+#[derive(Default)]
+struct Resident {
+    at: Map<u64, ()>,
+    fifo: std::collections::VecDeque<u64>,
+}
+
+impl Resident {
+    fn touch(&mut self, line: u64) {
+        if self.at.insert(line, ()).is_none() {
+            self.fifo.push_back(line);
+            while self.fifo.len() > CACHE_UNITS {
+                if let Some(old) = self.fifo.pop_front() {
+                    self.at.remove(&old);
+                }
+            }
+        }
+    }
+    fn holds(&self, line: u64) -> bool {
+        self.at.contains_key(&line)
+    }
+}
+
+#[derive(Default)]
+struct Ahead {
+    q: Queue,
+    hits: u64,
+    issued: u64,
+    /// Named something the cache already had.
+    suppressed: u64,
+    /// log2 lead time in cycles.
+    lead: [u64; 24],
+}
+
+impl Ahead {
+    fn check(&mut self, line: u64, now: u64) {
+        if let Some(t0) = self.q.take(line) {
+            self.hits += 1;
+            let lead = now.saturating_sub(t0).max(1);
+            let b = ((64 - lead.leading_zeros()) as usize).min(23);
+            self.lead[b] += 1;
+        }
+    }
+    fn issue(&mut self, line: u64, now: u64, cache: &Resident) {
+        // Already resident: hardware would drop this, so it is neither a
+        // prefetch nor a miss against us.
+        if cache.holds(line) {
+            self.suppressed += 1;
+            return;
+        }
+        self.issued += 1;
+        self.q.push(line, now);
+    }
+    /// Median lead time, read off the log2 histogram.
+    fn lead_p50(&self) -> u64 {
+        let tot: u64 = self.lead.iter().sum();
+        if tot == 0 {
+            return 0;
+        }
+        let mut acc = 0u64;
+        for (b, &c) in self.lead.iter().enumerate() {
+            acc += c;
+            if acc * 2 >= tot {
+                return 1u64 << b.saturating_sub(1);
+            }
+        }
+        0
+    }
+}
+
+/// The per-PC chain walk, for one hypothesis.
+struct Walker {
+    name: &'static str,
+    /// (pc, unit) -> the unit this PC touched next, or (pc, delta) -> the delta
+    /// it took next. Which one depends on the hypothesis; the iteration does
+    /// not.
+    tbl: Map<u64, Counts>,
+    ahead: [Ahead; KS.len()],
+    /// How far the table could actually be iterated before running out.
+    depth_sum: u64,
+    depth_n: u64,
+}
+
+impl Walker {
+    fn new(name: &'static str) -> Self {
+        Walker {
+            name,
+            tbl: Map::default(),
+            ahead: Default::default(),
+            depth_sum: 0,
+            depth_n: 0,
+        }
+    }
+    #[inline]
+    fn top1(&self, key: u64) -> Option<u64> {
+        self.tbl.get(&key).filter(|c| c.total > 0).map(|c| c.top[0].0)
+    }
+    fn learn(&mut self, key: u64, sym: u64) {
+        let cs = self.tbl.entry(key).or_default();
+        let c = cs.m.entry(sym).or_insert(0);
+        *c += 1;
+        let c = *c;
+        cs.total += 1;
+        cs.promote(sym, c);
+    }
+    fn mean_depth(&self) -> f64 {
+        if self.depth_n == 0 {
+            0.0
+        } else {
+            self.depth_sum as f64 / self.depth_n as f64
+        }
+    }
+}
+
 const REC_LABEL: [&str; 5] = ["novel", "1", "2-3", "4-8", "9+"];
 const CLASS_LABEL: [&str; 4] = ["local-hit", "known-succ", "novel", "other"];
 const GAP_BUCKETS: usize = 18;
@@ -446,6 +625,14 @@ pub fn run(path: &str, label: &str, limit: usize, gran: &str) {
 
     let mut prev: Option<Record> = None;
     let mut dhist: [i64; 3] = [0; 3];
+
+    // The per-PC chain walk. `chain` stores what this PC touched next;
+    // `stride` stores what delta it took next. Both are iterated the same way.
+    let mut chain = Walker::new("referential  (pc,unit)->unit");
+    let mut stride = Walker::new("local        (pc,delta)->delta");
+    let mut pc_last: Map<u64, u64> = Map::default();
+    let mut pc_last_d: Map<u64, i64> = Map::default();
+    let mut cache = Resident::default();
 
     loop {
         raw.clear();
@@ -558,6 +745,66 @@ pub fn run(path: &str, label: &str, limit: usize, gran: &str) {
             dhist[0] = d;
         }
 
+        // --- run ahead -----------------------------------------------------
+        // Demand first, so a prediction can never satisfy itself, then learn,
+        // then issue. Exactly the order a prefetcher sees the world in.
+        for a in chain.ahead.iter_mut() {
+            a.check(r.line, r.cycle);
+        }
+        for a in stride.ahead.iter_mut() {
+            a.check(r.line, r.cycle);
+        }
+        if let Some(&b) = pc_last.get(&r.pc) {
+            let d = (r.line as i64).wrapping_sub(b as i64);
+            chain.learn(mix2(r.pc, b), r.line);
+            let pd = *pc_last_d.get(&r.pc).unwrap_or(&0);
+            stride.learn(mix2(r.pc, pd as u64), d as u64);
+            pc_last_d.insert(r.pc, d);
+        }
+        pc_last.insert(r.pc, r.line);
+        cache.touch(r.line);
+
+        {
+            // Referential: the retrieved unit becomes the next query, under a
+            // PC that stays on the field.
+            let mut x = r.line;
+            let mut reached = 0usize;
+            let mut slot = 0usize;
+            for step in 1..=KS[KS.len() - 1] {
+                match chain.top1(mix2(r.pc, x)) {
+                    Some(nx) => x = nx,
+                    None => break,
+                }
+                reached = step;
+                if slot < KS.len() && KS[slot] == step {
+                    chain.ahead[slot].issue(x, r.cycle, &cache);
+                    slot += 1;
+                }
+            }
+            chain.depth_sum += reached as u64;
+            chain.depth_n += 1;
+
+            // Local: the same iteration, over deltas.
+            let mut x = r.line;
+            let mut d = *pc_last_d.get(&r.pc).unwrap_or(&0);
+            let mut reached = 0usize;
+            let mut slot = 0usize;
+            for step in 1..=KS[KS.len() - 1] {
+                match stride.top1(mix2(r.pc, d as u64)) {
+                    Some(nd) => d = nd as i64,
+                    None => break,
+                }
+                x = (x as i64).wrapping_add(d) as u64;
+                reached = step;
+                if slot < KS.len() && KS[slot] == step {
+                    stride.ahead[slot].issue(x, r.cycle, &cache);
+                    slot += 1;
+                }
+            }
+            stride.depth_sum += reached as u64;
+            stride.depth_n += 1;
+        }
+
         *seen.entry(r.line).or_insert(0) += 1;
         if n >= next_mark {
             heaps.push((n, seen.len() as u64));
@@ -585,6 +832,7 @@ pub fn run(path: &str, label: &str, limit: usize, gran: &str) {
         cls_marg: &cls_marg,
         gap_marg: &gap_marg,
         comp: &comp,
+        walkers: [&stride, &chain],
         loc_k: &loc_k,
         ref_k: &ref_k,
         hybrid,
@@ -612,6 +860,8 @@ struct Report<'a> {
     gap_marg: &'a [u64; GAP_BUCKETS],
     /// local-hit x referential-hit: neither / ref-only / local-only / both.
     comp: &'a [u64; 4],
+    /// The local walker first, the referential one second.
+    walkers: [&'a Walker; 2],
     /// Coverage at prefetch degree 1..=4, best local model and referential.
     loc_k: &'a [u64; TOPK],
     ref_k: &'a [u64; TOPK],
@@ -754,6 +1004,41 @@ impl Report<'_> {
             hyb,
             hyb - loc2
         );
+
+        // --- can either hypothesis run ahead of the world? -------------------
+        println!("\n-- can the chain be walked ahead of the world? --");
+        println!(
+            "{:<32} {:>9} {:>9} {:>9} {:>9}",
+            "lookahead k =", KS[0], KS[1], KS[2], KS[3]
+        );
+        for w in self.walkers {
+            print!("{:<32}", w.name);
+            for a in w.ahead.iter() {
+                print!("{:>9.4}", a.hits as f64 / nf);
+            }
+            println!("   <- coverage");
+            print!("{:<32}", "  lead time p50 (cycles)");
+            for a in w.ahead.iter() {
+                print!("{:>9}", a.lead_p50());
+            }
+            println!();
+            print!("{:<32}", "  accuracy of what it named");
+            for a in w.ahead.iter() {
+                print!("{:>9.4}", a.hits as f64 / a.issued.max(1) as f64);
+            }
+            println!();
+            print!("{:<32}", "  suppressed (already cached)");
+            for a in w.ahead.iter() {
+                print!("{:>9.4}", a.suppressed as f64 / (a.issued + a.suppressed).max(1) as f64);
+            }
+            println!();
+        }
+        println!(
+            "\nreachable walk depth (mean, of 8)   local {:.2}   referential {:.2}",
+            self.walkers[0].mean_depth(),
+            self.walkers[1].mean_depth()
+        );
+        println!("  how far each table could be iterated before it ran out of chain.");
 
         println!("\n-- does the gap carry information? --");
         let hc = entropy_mm(self.cls_marg);
