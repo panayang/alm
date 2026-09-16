@@ -40,4 +40,5 @@ pub mod ladder;
 pub mod metrics;
 pub mod model;
 pub mod num;
+pub mod scan;
 pub mod store;

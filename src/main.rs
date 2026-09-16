@@ -23,6 +23,10 @@ fn main() {
     let mut seed: u64 = 0x5EED_1234;
     let mut out: Option<String> = None;
     let (mut shard, mut shards) = (0usize, 1usize);
+    let mut trace: Option<String> = None;
+    let mut label = String::from("trace");
+    let mut limit: usize = 0;
+    let mut gran = String::from("line");
 
     let mut i = 1;
     while i < args.len() {
@@ -46,11 +50,33 @@ fn main() {
                 shards = b.parse().expect("shard count");
                 i += 2;
             }
+            "--trace" => {
+                trace = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--label" => {
+                label = args[i + 1].clone();
+                i += 2;
+            }
+            "--gran" => {
+                gran = args[i + 1].clone();
+                i += 2;
+            }
+            "--limit" => {
+                limit = args[i + 1].parse().expect("--limit wants a number");
+                i += 2;
+            }
             other => panic!("unknown argument {}", other),
         }
     }
 
     match cmd {
+        // Properties of a candidate stream, before any ingest is written for
+        // it. Runs nothing of the model.
+        "scan" => {
+            let t = trace.expect("scan wants --trace PATH (or --trace - for stdin)");
+            alm::scan::run(&t, &label, limit, &gran);
+        }
         "gencheck" => {
             // Both rungs of the load sweep, so the manipulation each family
             // actually received is visible side by side.
