@@ -143,7 +143,7 @@ fn main() {
         // runs on a source it was not written for.
         "physio" => {
             let dd = data.expect("physio wants --data DIR");
-            alm::physio::run(&dd, &label, &widths, limit, seed, max_given);
+            alm::physio::run(&dd, &label, &widths, limit, seed, max_given, &gran);
         }
         // What a concept-drift stream is made of, and whether it has any
         // inter-arrival structure for us to spend. Runs no model.

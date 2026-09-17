@@ -594,3 +594,59 @@ pub fn next_event(dir: &str, label: &str, order: usize) {
     println!("  beating the gap-blind one would only re-prove that the gap is informative.");
     println!();
 }
+
+/// The same records at parameter granularity.
+///
+/// Panels are the honest unit of *arrival* -- one observation minute is one
+/// event -- but they are a bad unit of *prediction*: 3600 distinct sets over
+/// forty thousand events leaves most of them seen a handful of times, which is
+/// the regime where exact counting wins and a distributed code cannot. At
+/// parameter granularity the vocabulary is 37.
+///
+/// Parameters within one minute keep their recorded order and carry a gap of
+/// zero, so the arrival structure is unchanged: the silence still sits exactly
+/// where the world was silent, and a panel becomes a burst of adjacent ticks.
+pub fn flat_streams(dir: &str) -> (Vec<Vec<(u32, u32)>>, usize) {
+    let mut param_id: HashMap<String, u32> = HashMap::new();
+    let mut streams: Vec<Vec<(u32, u32)>> = Vec::new();
+
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {}", dir, e))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    files.sort();
+    for path in files.iter() {
+        let body = match std::fs::read_to_string(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let mut seq: Vec<(u32, u32)> = Vec::new();
+        let mut last_t = 0u32;
+        for (i, line) in body.lines().enumerate() {
+            if i == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split(',').collect();
+            if f.len() < 3 {
+                continue;
+            }
+            let (hh, mm) = match f[0].split_once(':') {
+                Some((a, b)) => (a.parse::<u32>().unwrap_or(0), b.parse::<u32>().unwrap_or(0)),
+                None => continue,
+            };
+            let t = hh * 60 + mm;
+            if t == 0 {
+                continue;
+            }
+            let n = param_id.len() as u32;
+            let pid = *param_id.entry(f[1].to_string()).or_insert(n);
+            seq.push((t.saturating_sub(last_t), pid));
+            last_t = t;
+        }
+        if seq.len() >= 3 {
+            streams.push(seq);
+        }
+    }
+    let v = param_id.len();
+    (streams, v)
+}

@@ -30,7 +30,7 @@
 //! nothing, then this architecture's temporal commitment is decoration here as
 //! it was everywhere else, whatever the number against PPM turns out to be.
 
-use crate::clinical::{panel_streams, ppm_bar};
+use crate::clinical::{flat_streams, panel_streams, ppm_bar};
 use crate::config::Config;
 use crate::model::Model;
 
@@ -54,15 +54,30 @@ struct Arm {
     ticks: u64,
 }
 
-pub fn run(dir: &str, label: &str, ds: &[usize], patients: usize, seed: u64, cap: usize) {
-    let (mut streams, n_param, vp) = panel_streams(dir);
+pub fn run(
+    dir: &str,
+    label: &str,
+    ds: &[usize],
+    patients: usize,
+    seed: u64,
+    cap: usize,
+    gran: &str,
+) {
+    let (mut streams, n_param, vp) = match gran {
+        "panel" => panel_streams(dir),
+        "param" => {
+            let (s, v) = flat_streams(dir);
+            (s, v, v)
+        }
+        other => panic!("--gran wants panel or param, got {}", other),
+    };
     if patients > 0 && streams.len() > patients {
         streams.truncate(patients);
     }
     let events: usize = streams.iter().map(|s| s.len()).sum();
-    println!("==================== {}   [tick loop] ====================", label);
+    println!("==================== {}   [tick loop, {} granularity] ====================", label, gran);
     println!(
-        "patients {}   events {}   parameters {}   panel vocabulary {}",
+        "patients {}   events {}   parameters {}   vocabulary {}",
         streams.len(),
         events,
         n_param,
@@ -76,6 +91,13 @@ pub fn run(dir: &str, label: &str, ds: &[usize], patients: usize, seed: u64, cap
         cfg.seed = seed;
         cfg.vocab = vp;
         cfg.d = d;
+        // The threshold this project shipped was measured wrong on real data:
+        // swept per cell at matched precision on omnetpp, the best multiplier
+        // runs 1.00 deep inside the operating region to 1.17 at its edge, and
+        // 1.6 costs up to forty-seven points of recall for four tenths of a
+        // point of precision. Leaving it at 1.6 here would understate the
+        // mechanism for a reason already known to be an error.
+        cfg.cleanup_floor_mult = 1.1;
         cfg.derive();
         let mut model = Model::new(cfg);
 
@@ -117,26 +139,49 @@ pub fn run(dir: &str, label: &str, ds: &[usize], patients: usize, seed: u64, cap
             a.ticks
         );
     }
-    // The bar, measured on exactly these patients. A bar from a different
-    // subset is not a bar: PPM sees more context with more patients and the
-    // number moves.
-    let (b_blind, a_blind) = ppm_bar(&streams, vp, 3, false, 16);
-    let (b_gap, a_gap) = ppm_bar(&streams, vp, 3, true, 16);
-    println!("{:<36} {:>12.4} {:>10.4}", "PPM-C order 3, gap-blind  (the bar)", b_blind, a_blind);
-    println!("{:<36} {:>12.4} {:>10.4}", "PPM-C order 3, gap in context", b_gap, a_gap);
-
-    if arms.len() == 2 {
-        println!(
-            "\n  silence is worth {:+.4} bits/event to us, against the {:.4} the joint entropy says",
-            arms[1].bits / arms[1].events.max(1) as f64
-                - arms[0].bits / arms[0].events.max(1) as f64,
-            0.4848
-        );
-        println!("  is there. That internal difference is the claim; the PPM row is the bar.");
+    // The bar, on exactly these patients -- a bar from a different subset is
+    // not a bar, because PPM sees more context with more patients and its
+    // number moves. And its order is swept rather than fixed at the first
+    // setting that was tried, because a baseline held at one setting is not a
+    // baseline either.
+    let mut best_blind = (f64::MAX, 0.0, 0usize);
+    let mut best_gap = (f64::MAX, 0.0, 0usize);
+    for o in 1..=6 {
+        let (b, a) = ppm_bar(&streams, vp, o, false, 16);
+        println!("{:<36} {:>12.4} {:>10.4}", format!("PPM-C order {}, gap-blind", o), b, a);
+        if b < best_blind.0 {
+            best_blind = (b, a, o);
+        }
+        let (b, a) = ppm_bar(&streams, vp, o, true, 16);
+        if b < best_gap.0 {
+            best_gap = (b, a, o);
+        }
     }
     println!(
-        "\n  NOTE: the bar was measured on all {} patients. Compare only at the same subset.",
-        3990
+        "{:<36} {:>12.4} {:>10.4}   <- the bar",
+        format!("PPM-C best, order {}, gap-blind", best_blind.2),
+        best_blind.0,
+        best_blind.1
     );
+    println!(
+        "{:<36} {:>12.4} {:>10.4}",
+        format!("PPM-C best, order {}, gap in context", best_gap.2),
+        best_gap.0,
+        best_gap.1
+    );
+
+    println!("\n  what the silence is worth to us, per width:");
+    for (i, &d) in ds.iter().enumerate() {
+        let with = arms[2 * i].bits / arms[2 * i].events.max(1) as f64;
+        let without = arms[2 * i + 1].bits / arms[2 * i + 1].events.max(1) as f64;
+        println!(
+            "    d = {:<6} {:+.4} bits/event    best margin over the bar {:+.4}",
+            d,
+            without - with,
+            best_blind.0 - with
+        );
+    }
+    println!("  against the 0.4848 the joint entropy says is available. That internal");
+    println!("  difference is the claim; the swept PPM row is the bar.");
     println!();
 }
