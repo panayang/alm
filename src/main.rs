@@ -139,6 +139,12 @@ fn main() {
             let d = data.expect("clinical-next wants --data DIR");
             alm::clinical::next_event(&d, &label, max_given);
         }
+        // The tick loop on a real irregular stream. The first time the model
+        // runs on a source it was not written for.
+        "physio" => {
+            let dd = data.expect("physio wants --data DIR");
+            alm::physio::run(&dd, &label, &widths, limit, seed, max_given);
+        }
         // What a concept-drift stream is made of, and whether it has any
         // inter-arrival structure for us to spend. Runs no model.
         "stream" => {

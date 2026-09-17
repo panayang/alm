@@ -325,7 +325,7 @@ fn gap_bucket(g: u32) -> usize {
 }
 
 /// Panel streams, rebuilt at the granularity the tick loop runs at.
-fn panel_streams(dir: &str) -> (Vec<Vec<(u32, u32)>>, usize, usize) {
+pub fn panel_streams(dir: &str) -> (Vec<Vec<(u32, u32)>>, usize, usize) {
     let mut param_id: HashMap<String, u32> = HashMap::new();
     let mut panel_id: HashMap<Vec<u32>, u32> = HashMap::new();
     let mut streams: Vec<Vec<(u32, u32)>> = Vec::new();
@@ -385,6 +385,66 @@ fn panel_streams(dir: &str) -> (Vec<Vec<(u32, u32)>>, usize, usize) {
         }
     }
     (streams, param_id.len(), panel_id.len())
+}
+
+/// Prequential PPM-C over a panel sequence. Split out so that any subset of
+/// patients can be priced with exactly the bar it will be compared against --
+/// a bar measured on a different number of patients is not a bar.
+pub fn ppm_bar(
+    streams: &[Vec<(u32, u32)>],
+    vp: usize,
+    order: usize,
+    use_gap: bool,
+    nb: usize,
+) -> (f64, f64) {
+    let mut ctx: HashMap<u64, HashMap<u32, u32>> = HashMap::new();
+    let (mut bits, mut n_ev, mut hits) = (0.0f64, 0u64, 0u64);
+    for s in streams.iter() {
+        let mut hist: Vec<(u32, usize)> = Vec::new();
+        for &(g, pan) in s.iter() {
+            let gb = gap_bucket(g).min(nb - 1);
+            let key = |o: usize, hist: &[(u32, usize)]| -> u64 {
+                let mut k = 0xcbf2_9ce4_8422_2325u64 ^ o as u64;
+                for &(h, hg) in hist[hist.len() - o..].iter() {
+                    k = (k ^ h as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                    if use_gap {
+                        k = (k ^ hg as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                }
+                if use_gap {
+                    k = (k ^ (gb as u64) << 32).wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                k
+            };
+            let mut p = 0.0f64;
+            let mut esc = 1.0f64;
+            let mut best: Option<u32> = None;
+            for o in (0..=order.min(hist.len())).rev() {
+                if let Some(c) = ctx.get(&key(o, &hist)) {
+                    let tot: u32 = c.values().sum();
+                    if tot > 0 {
+                        let e = c.len() as f64 / (c.len() as f64 + tot as f64);
+                        p += esc * (1.0 - e) * (*c.get(&pan).unwrap_or(&0) as f64 / tot as f64);
+                        if best.is_none() {
+                            best = c.iter().max_by_key(|(_, &v)| v).map(|(&s, _)| s);
+                        }
+                        esc *= e;
+                    }
+                }
+            }
+            p += esc / vp as f64;
+            bits += -p.max(f64::MIN_POSITIVE).log2();
+            n_ev += 1;
+            if best == Some(pan) {
+                hits += 1;
+            }
+            for o in 0..=order.min(hist.len()) {
+                *ctx.entry(key(o, &hist)).or_default().entry(pan).or_insert(0) += 1;
+            }
+            hist.push((pan, gb));
+        }
+    }
+    (bits / n_ev as f64, hits as f64 / n_ev as f64)
 }
 
 pub fn next_event(dir: &str, label: &str, order: usize) {
@@ -461,7 +521,8 @@ pub fn next_event(dir: &str, label: &str, order: usize) {
     // gap before an event is known when the event is predicted: in an online
     // setting you know how long you have been waiting, which is exactly what
     // the tick loop is given.
-    let run_ppm = |use_gap: bool| -> (f64, f64) {
+    let run_ppm = |use_gap: bool| -> (f64, f64) { ppm_bar(&streams, vp, order, use_gap, nb) };
+    let _unused = |use_gap: bool| -> (f64, f64) {
         let mut ctx: HashMap<u64, HashMap<u32, u32>> = HashMap::new();
         let (mut bits, mut n_ev, mut hits) = (0.0f64, 0u64, 0u64);
         for s in streams.iter() {

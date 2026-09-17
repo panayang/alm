@@ -44,6 +44,7 @@ pub mod metrics;
 pub mod model;
 pub mod num;
 pub mod partial;
+pub mod physio;
 pub mod scan;
 pub mod store;
 pub mod stream;
