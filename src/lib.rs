@@ -27,6 +27,7 @@
 //! Everything learned is either an edge transform or a sparse readout row.
 //! Prototypes are placed, priors are counted, addresses are never trained.
 
+pub mod acquire;
 pub mod baseline;
 pub mod budget;
 pub mod chainmem;
@@ -44,6 +45,7 @@ pub mod metrics;
 pub mod model;
 pub mod num;
 pub mod partial;
+pub mod patient;
 pub mod physio;
 pub mod scan;
 pub mod store;

@@ -885,3 +885,100 @@ fn a_superposed_record_cannot_answer_with_two_factors_unknown() {
         truth_two
     );
 }
+
+/// The readout must at least learn the marginal.
+///
+/// On PhysioNet the model charged 8.04 bits/event where the marginal token
+/// distribution is 7.18 and the uniform is 8.21 -- nearer to knowing nothing
+/// than to counting, on 1.7M events, inside the capacity region. That is not a
+/// property of any source, so it is checked here on a stream with no structure
+/// whatsoever: tokens drawn i.i.d. from a fixed skewed distribution, no
+/// context, no order, nothing to walk. A readout that works must approach
+/// H(marginal); one that cannot has nothing to do with memory.
+/// Marked ignored because it FAILS and is meant to: it records a defect, not a
+/// property. Run it with `cargo test -- --ignored`. It should be un-ignored the
+/// day the emission path can represent a marginal.
+#[test]
+#[ignore]
+fn the_readout_learns_the_marginal_on_a_structureless_stream() {
+    use alm::config::Config;
+    use alm::model::Model;
+    use alm::num::cbrng;
+
+    let v = 64usize;
+    // Zipf-ish weights, so the marginal is well clear of the uniform.
+    let w: Vec<f64> = (0..v).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+    let tot: f64 = w.iter().sum();
+    let p: Vec<f64> = w.iter().map(|x| x / tot).collect();
+    let h_marg: f64 = -p.iter().map(|q| q * q.log2()).sum::<f64>();
+    let uniform = (v as f64).log2();
+
+    // Both negative-sampling rules, because the suspicion is specific: the
+    // delta rule takes its negatives from whatever currently ranks highest,
+    // which is exactly the frequent tokens, so it pushes down precisely what
+    // the marginal says to push up. The generator this project validated on has
+    // zero marginals by construction -- the Latin square was built that way on
+    // purpose -- so a readout unable to represent a marginal would pass every
+    // test there and fail on any real stream.
+    let mut got = [0.0f64; 2];
+    for (arm, hard) in [(0usize, true), (1, false)] {
+    let mut cfg = Config::local();
+    cfg.seed = 0x51D;
+    cfg.vocab = v;
+    cfg.d = 128;
+    cfg.mem_banks = 4096;
+    cfg.cleanup_floor_mult = 1.1;
+    cfg.hard_negatives = hard;
+    cfg.derive();
+    let mut m = Model::new(cfg);
+
+    let n = 120_000usize;
+    let mut bits = 0.0f64;
+    let mut charged = 0u64;
+    for i in 0..n {
+        // Inverse-CDF sample, deterministic in the counter.
+        let u = (cbrng(0xDA7A, i as u64) >> 11) as f64 / (1u64 << 53) as f64;
+        let mut acc = 0.0;
+        let mut tok = v - 1;
+        for (k, q) in p.iter().enumerate() {
+            acc += q;
+            if u <= acc {
+                tok = k;
+                break;
+            }
+        }
+        // Silence between events: this architecture is specified around gap
+        // periods, so a stream of back-to-back event ticks does not exercise
+        // it as designed. Two quiet ticks per event, which is what the
+        // generator this project was built on supplies.
+        for _ in 0..2 {
+            m.tick(None, false);
+        }
+        let out = m.tick(Some(tok), false);
+        // Score the last fifth only, so this is about what it converged to.
+        if out.charged && i * 5 >= n * 4 {
+            bits += out.bits;
+            charged += 1;
+        }
+    }
+    got[arm] = bits / charged.max(1) as f64;
+    println!(
+        "structureless stream, hard_negatives={}: {:.4} bits/event   H(marginal) {:.4}   uniform {:.4}",
+        hard, got[arm], h_marg, uniform
+    );
+    }
+    let got = got[0].min(got[1]);
+    assert!(
+        got < uniform,
+        "the readout is no better than knowing nothing: {:.4} against uniform {:.4}",
+        got,
+        uniform
+    );
+    assert!(
+        got < h_marg + 0.5,
+        "the readout never reached the marginal: {:.4} against H(marginal) {:.4} (uniform {:.4})",
+        got,
+        h_marg,
+        uniform
+    );
+}

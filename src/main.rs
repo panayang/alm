@@ -139,6 +139,19 @@ fn main() {
             let d = data.expect("clinical-next wants --data DIR");
             alm::clinical::next_event(&d, &label, max_given);
         }
+        // What the N+1-th thing costs given the N already stored, split by
+        // whether a counter could have helped at all.
+        "acquire" => {
+            let dd = data.clone().expect("acquire wants --data DIR");
+            alm::acquire::run(&dd, &label, widths[0], limit, seed, max_given, bins, bankses[0]);
+        }
+        // The model's state read as a patient, scored on the benchmark's own
+        // task against its own baselines.
+        "patient" => {
+            let dd = data.clone().expect("patient wants --data DIR");
+            let o = out.clone().expect("patient wants --out OUTCOMES.txt");
+            alm::patient::run(&dd, &o, &label, widths[0], limit, seed, max_given, bins, gran == "paramval");
+        }
         // The tick loop on a real irregular stream. The first time the model
         // runs on a source it was not written for.
         "physio" => {

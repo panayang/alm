@@ -607,8 +607,15 @@ pub fn next_event(dir: &str, label: &str, order: usize) {
 /// zero, so the arrival structure is unchanged: the silence still sits exactly
 /// where the world was silent, and a panel becomes a burst of adjacent ticks.
 pub fn flat_streams(dir: &str) -> (Vec<Vec<(u32, u32)>>, usize) {
+    let (s, _, v) = flat_streams_ids(dir);
+    (s, v)
+}
+
+/// The same, keeping each record's id so outcomes can be joined to it.
+pub fn flat_streams_ids(dir: &str) -> (Vec<Vec<(u32, u32)>>, Vec<u32>, usize) {
     let mut param_id: HashMap<String, u32> = HashMap::new();
     let mut streams: Vec<Vec<(u32, u32)>> = Vec::new();
+    let mut ids: Vec<u32> = Vec::new();
 
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("{}: {}", dir, e))
@@ -620,6 +627,11 @@ pub fn flat_streams(dir: &str) -> (Vec<Vec<(u32, u32)>>, usize) {
             Ok(b) => b,
             Err(_) => continue,
         };
+        let rid: u32 = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let mut seq: Vec<(u32, u32)> = Vec::new();
         let mut last_t = 0u32;
         for (i, line) in body.lines().enumerate() {
@@ -645,8 +657,109 @@ pub fn flat_streams(dir: &str) -> (Vec<Vec<(u32, u32)>>, usize) {
         }
         if seq.len() >= 3 {
             streams.push(seq);
+            ids.push(rid);
         }
     }
     let v = param_id.len();
-    (streams, v)
+    (streams, ids, v)
+}
+
+/// The same records, with the measured value carried in the token.
+///
+/// Parameter granularity told the model *that* something was measured and never
+/// *what it said*. That is the observation process alone, and it reached AUROC
+/// 0.6301 pooled -- above the best timing-only feature and just under SAPS-I,
+/// which clinicians compute from the values. This adds the values: the token
+/// becomes parameter x quantile bin, so the vocabulary is 37 * bins.
+///
+/// Cuts are per-parameter quantiles over the whole set. That is a fixed
+/// discretisation and not a label-dependent one, but it does see every patient,
+/// so it is preprocessing of the kind the baselines also do rather than
+/// something the model learned. PhysioNet writes -1 for a missing value, which
+/// is not a measurement and is dropped.
+pub fn flat_streams_valued(dir: &str, bins: usize) -> (Vec<Vec<(u32, u32)>>, Vec<u32>, usize) {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {}", dir, e))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    files.sort();
+
+    // First pass: per-parameter value distributions, for the cuts.
+    let mut param_id: HashMap<String, u32> = HashMap::new();
+    let mut vals: Vec<Vec<f64>> = Vec::new();
+    let mut parsed: Vec<(u32, Vec<(u32, u32, f64)>)> = Vec::new();
+    for path in files.iter() {
+        let body = match std::fs::read_to_string(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let rid: u32 = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut seq: Vec<(u32, u32, f64)> = Vec::new();
+        for (i, line) in body.lines().enumerate() {
+            if i == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split(',').collect();
+            if f.len() < 3 {
+                continue;
+            }
+            let (hh, mm) = match f[0].split_once(':') {
+                Some((a, b)) => (a.parse::<u32>().unwrap_or(0), b.parse::<u32>().unwrap_or(0)),
+                None => continue,
+            };
+            let t = hh * 60 + mm;
+            if t == 0 {
+                continue;
+            }
+            let v: f64 = match f[2].trim().parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v < 0.0 {
+                continue; // -1 is PhysioNet's missing marker, not a reading.
+            }
+            let n = param_id.len() as u32;
+            let pid = *param_id.entry(f[1].to_string()).or_insert(n);
+            if vals.len() <= pid as usize {
+                vals.resize(pid as usize + 1, Vec::new());
+            }
+            vals[pid as usize].push(v);
+            seq.push((t, pid, v));
+        }
+        if seq.len() >= 3 {
+            parsed.push((rid, seq));
+        }
+    }
+
+    let cuts: Vec<Vec<f64>> = vals
+        .iter()
+        .map(|v| {
+            let mut s = v.clone();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if s.is_empty() {
+                return Vec::new();
+            }
+            (1..bins).map(|b| s[(s.len() - 1) * b / bins]).collect()
+        })
+        .collect();
+
+    let mut streams = Vec::with_capacity(parsed.len());
+    let mut ids = Vec::with_capacity(parsed.len());
+    for (rid, seq) in parsed {
+        let mut out: Vec<(u32, u32)> = Vec::with_capacity(seq.len());
+        let mut last_t = 0u32;
+        for (t, pid, v) in seq {
+            let b = cuts[pid as usize].iter().filter(|&&c| v > c).count().min(bins - 1);
+            out.push((t.saturating_sub(last_t), pid * bins as u32 + b as u32));
+            last_t = t;
+        }
+        streams.push(out);
+        ids.push(rid);
+    }
+    let v = param_id.len() * bins;
+    (streams, ids, v)
 }
