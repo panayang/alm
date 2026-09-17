@@ -295,3 +295,241 @@ pub fn run(dir: &str, outcomes: &str, label: &str, bins: usize) {
     println!("  carrying information.");
     println!();
 }
+
+// ---------------------------------------------------------------------------
+// What the two streams say about each other
+// ---------------------------------------------------------------------------
+//
+// The outcome gate passed: when measurements happen carries nearly as much
+// about in-hospital death as what they said. That licenses the source, but it
+// does not yet say there is anything here for a *sequential* mechanism, which
+// is what this architecture is. So before any model code, the label-free
+// question:
+//
+//   * does the gap help predict what arrives next?
+//   * does what arrived help predict how long the next silence will be?
+//
+// This project's design assumes both -- the input and output streams interleave
+// as one context, and the silence is where the work happens. If the two are
+// independent here, then the gaps are informative about the *patient*, which
+// the outcome gate already showed, while being useless *sequentially*, and the
+// tick loop would have nothing to do with the reason this source looked right.
+//
+// A panel is the set of parameters recorded at one observation time, hashed to
+// an id: one observation event, one tick, which is the granularity the tick
+// loop actually runs at.
+
+fn gap_bucket(g: u32) -> usize {
+    // Minutes, log2. p50 is 31 and p99 is 120, so this spreads the mass.
+    (32 - (g.max(1)).leading_zeros()) as usize
+}
+
+/// Panel streams, rebuilt at the granularity the tick loop runs at.
+fn panel_streams(dir: &str) -> (Vec<Vec<(u32, u32)>>, usize, usize) {
+    let mut param_id: HashMap<String, u32> = HashMap::new();
+    let mut panel_id: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut streams: Vec<Vec<(u32, u32)>> = Vec::new();
+
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {}", dir, e))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    files.sort();
+    for path in files.iter() {
+        let body = match std::fs::read_to_string(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let mut seq: Vec<(u32, u32)> = Vec::new();
+        let mut cur: Vec<u32> = Vec::new();
+        let mut cur_t = u32::MAX;
+        let mut last_t = 0u32;
+        for (i, line) in body.lines().enumerate() {
+            if i == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split(',').collect();
+            if f.len() < 3 {
+                continue;
+            }
+            let (hh, mm) = match f[0].split_once(':') {
+                Some((a, b)) => (a.parse::<u32>().unwrap_or(0), b.parse::<u32>().unwrap_or(0)),
+                None => continue,
+            };
+            let t = hh * 60 + mm;
+            if t == 0 {
+                continue;
+            }
+            if t != cur_t && !cur.is_empty() {
+                cur.sort_unstable();
+                cur.dedup();
+                let n = panel_id.len() as u32;
+                let pid = *panel_id.entry(cur.clone()).or_insert(n);
+                seq.push((cur_t.saturating_sub(last_t), pid));
+                last_t = cur_t;
+                cur.clear();
+            }
+            cur_t = t;
+            let n = param_id.len() as u32;
+            cur.push(*param_id.entry(f[1].to_string()).or_insert(n));
+        }
+        if !cur.is_empty() {
+            cur.sort_unstable();
+            cur.dedup();
+            let n = panel_id.len() as u32;
+            let pid = *panel_id.entry(cur.clone()).or_insert(n);
+            seq.push((cur_t.saturating_sub(last_t), pid));
+        }
+        if seq.len() >= 3 {
+            streams.push(seq);
+        }
+    }
+    (streams, param_id.len(), panel_id.len())
+}
+
+pub fn next_event(dir: &str, label: &str, order: usize) {
+    let (streams, n_param, vp) = panel_streams(dir);
+    let events: usize = streams.iter().map(|s| s.len()).sum();
+    println!("==================== {}   [next-event] ====================", label);
+    println!(
+        "patients {}   observation events {}   distinct parameters {}   distinct panels {}",
+        streams.len(),
+        events,
+        n_param,
+        vp
+    );
+
+    let nb = 16usize;
+    let mut m_panel = vec![0u64; vp];
+    let mut m_gap = vec![0u64; nb];
+    let mut by_prev: HashMap<u32, Vec<u64>> = HashMap::new();
+    let mut by_prev_gap: HashMap<(u32, usize), Vec<u64>> = HashMap::new();
+    let mut gap_by_prev: HashMap<u32, Vec<u64>> = HashMap::new();
+    for s in streams.iter() {
+        for w in s.windows(2) {
+            let g = gap_bucket(w[1].0).min(nb - 1);
+            let pan = w[1].1 as usize;
+            let prev = w[0].1;
+            m_panel[pan] += 1;
+            m_gap[g] += 1;
+            by_prev.entry(prev).or_insert_with(|| vec![0; vp])[pan] += 1;
+            by_prev_gap.entry((prev, g)).or_insert_with(|| vec![0; vp])[pan] += 1;
+            gap_by_prev.entry(prev).or_insert_with(|| vec![0; nb])[g] += 1;
+        }
+    }
+    let total: u64 = m_panel.iter().sum::<u64>().max(1);
+    let mut hp_prev = 0.0;
+    for c in by_prev.values() {
+        hp_prev += (c.iter().sum::<u64>() as f64 / total as f64) * entropy_mm(c);
+    }
+    let mut hp_prev_gap = 0.0;
+    for c in by_prev_gap.values() {
+        hp_prev_gap += (c.iter().sum::<u64>() as f64 / total as f64) * entropy_mm(c);
+    }
+    let mut hg_prev = 0.0;
+    for c in gap_by_prev.values() {
+        hg_prev += (c.iter().sum::<u64>() as f64 / total as f64) * entropy_mm(c);
+    }
+    let hp = entropy_mm(&m_panel);
+    let hg = entropy_mm(&m_gap);
+
+    println!("\n-- does the gap help predict what arrives next? --");
+    println!("  H(panel)                      {:.4} bits", hp);
+    println!("  H(panel | prev panel)         {:.4} bits", hp_prev);
+    println!("  H(panel | prev panel, gap)    {:.4} bits", hp_prev_gap);
+    println!(
+        "  I(panel ; gap | prev panel) = {:.4} bits   ({:.2}% of H(panel|prev))",
+        hp_prev - hp_prev_gap,
+        100.0 * (hp_prev - hp_prev_gap) / hp_prev.max(1e-9)
+    );
+
+    println!("\n-- does what arrived help predict how long the silence will be? --");
+    println!("  H(gap)                        {:.4} bits", hg);
+    println!("  H(gap | prev panel)           {:.4} bits", hg_prev);
+    println!(
+        "  I(gap ; prev panel) = {:.4} bits   ({:.2}% of H(gap))",
+        hg - hg_prev,
+        100.0 * (hg - hg_prev) / hg.max(1e-9)
+    );
+
+    // --- the bar ----------------------------------------------------------
+    //
+    // Two of them, and the second is the one that matters. Beating a gap-blind
+    // predictor would prove nothing about a gap-native mechanism -- it would
+    // only prove that the gap is informative, which the table above already
+    // says. So the honest bar is a PPM that gets the gap in its context. The
+    // gap before an event is known when the event is predicted: in an online
+    // setting you know how long you have been waiting, which is exactly what
+    // the tick loop is given.
+    let run_ppm = |use_gap: bool| -> (f64, f64) {
+        let mut ctx: HashMap<u64, HashMap<u32, u32>> = HashMap::new();
+        let (mut bits, mut n_ev, mut hits) = (0.0f64, 0u64, 0u64);
+        for s in streams.iter() {
+            let mut hist: Vec<(u32, usize)> = Vec::new();
+            for &(g, pan) in s.iter() {
+                let gb = gap_bucket(g).min(nb - 1);
+                let key = |o: usize, hist: &[(u32, usize)]| -> u64 {
+                    let mut k = 0xcbf2_9ce4_8422_2325u64 ^ o as u64;
+                    for &(h, hg) in hist[hist.len() - o..].iter() {
+                        k = (k ^ h as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                        if use_gap {
+                            k = (k ^ hg as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                        }
+                    }
+                    if use_gap {
+                        k = (k ^ (gb as u64) << 32).wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                    k
+                };
+                let mut p = 0.0f64;
+                let mut esc = 1.0f64;
+                let mut best: Option<u32> = None;
+                for o in (0..=order.min(hist.len())).rev() {
+                    if let Some(c) = ctx.get(&key(o, &hist)) {
+                        let tot: u32 = c.values().sum();
+                        if tot > 0 {
+                            let e = c.len() as f64 / (c.len() as f64 + tot as f64);
+                            p += esc * (1.0 - e) * (*c.get(&pan).unwrap_or(&0) as f64 / tot as f64);
+                            if best.is_none() {
+                                best = c.iter().max_by_key(|(_, &v)| v).map(|(&s, _)| s);
+                            }
+                            esc *= e;
+                        }
+                    }
+                }
+                p += esc / vp as f64;
+                bits += -p.max(f64::MIN_POSITIVE).log2();
+                n_ev += 1;
+                if best == Some(pan) {
+                    hits += 1;
+                }
+                for o in 0..=order.min(hist.len()) {
+                    *ctx.entry(key(o, &hist)).or_default().entry(pan).or_insert(0) += 1;
+                }
+                hist.push((pan, gb));
+            }
+        }
+        (bits / n_ev as f64, hits as f64 / n_ev as f64)
+    };
+
+    let (b_blind, a_blind) = run_ppm(false);
+    let (b_gap, a_gap) = run_ppm(true);
+    println!("
+-- the bar: prequential PPM-C over the panel sequence, order {} --", order);
+    println!("{:<28} {:>12} {:>10}", "", "bits/event", "top-1");
+    println!("{:<28} {:>12.4} {:>10.4}", "gap-blind", b_blind, a_blind);
+    println!("{:<28} {:>12.4} {:>10.4}", "gap in the context", b_gap, a_gap);
+    println!(
+        "{:<28} {:>12.4}",
+        "marginal H(panel)", hp
+    );
+    println!(
+        "
+  the gap is worth {:.4} bits/event to PPM, against the {:.4} the table above",
+        b_blind - b_gap,
+        hp_prev - hp_prev_gap
+    );
+    println!("  says is there. The gap-aware row is the number a gap-native mechanism has to beat;");
+    println!("  beating the gap-blind one would only re-prove that the gap is informative.");
+    println!();
+}

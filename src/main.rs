@@ -133,6 +133,12 @@ fn main() {
             let o = out.clone().expect("clinical wants --out OUTCOMES.txt");
             alm::clinical::run(&d, &o, &label, bins);
         }
+        // The label-free question: do the event stream and the gap stream
+        // inform each other? Still no model.
+        "clinical-next" => {
+            let d = data.expect("clinical-next wants --data DIR");
+            alm::clinical::next_event(&d, &label, max_given);
+        }
         // What a concept-drift stream is made of, and whether it has any
         // inter-arrival structure for us to spend. Runs no model.
         "stream" => {
