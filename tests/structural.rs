@@ -777,3 +777,111 @@ fn a_finished_walk_holds_its_answer_through_surplus_silence() {
         off[5]
     );
 }
+
+/// A superposed record answers only the query that leaves *one* factor unknown.
+///
+/// The partial-match plan for this architecture was to store each record as a
+/// single bound product and let one store answer all 2^n directions:
+///
+/// ```text
+///   M = sum_r  E_{x_1^r} (*) ... (*) E_{x_n^r}
+///   query fixing S:  M (/) (*)_{i in S} E_{q_i}
+/// ```
+///
+/// That is wrong, and the reason is structural rather than a matter of width.
+/// Unbinding the fields in S leaves the product of *every* field not in S, not
+/// the target alone, and a product of several unknown factors is orthogonal to
+/// any single codebook entry. So the store answers `S = everything but the
+/// target` and nothing else -- n directions, not 2^n.
+///
+/// The table below is built so the claim cannot be blamed on the data: field 2
+/// is an exact function of fields 0 and 1, so the pair determines the answer
+/// and dozens of records agree on it. The true value is still not the argmax.
+#[test]
+fn a_superposed_record_cannot_answer_with_two_factors_unknown() {
+    use alm::num::{circconv, dot, normalize, unbind, unitary_vector};
+
+    let (d, n, v, t) = (4096usize, 8usize, 8usize, 2000usize);
+    let code: Vec<Vec<Vec<f32>>> = (0..n)
+        .map(|f| {
+            (0..v)
+                .map(|x| {
+                    let mut e = unitary_vector(0x5157, (f * 64 + x) as u64, d);
+                    normalize(&mut e);
+                    e
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut rec = vec![vec![0usize; n]; t];
+    for (r, row) in rec.iter_mut().enumerate() {
+        for (f, cell) in row.iter_mut().enumerate() {
+            *cell = (r * 7 + f * 13 + r / v) % v;
+        }
+        row[2] = (row[0] + row[1]) % v;
+    }
+
+    let mut m = vec![0.0f32; d];
+    let (mut a, mut b) = (vec![0.0f32; d], vec![0.0f32; d]);
+    for row in rec.iter() {
+        a.copy_from_slice(&code[0][row[0]]);
+        for (f, &x) in row.iter().enumerate().skip(1) {
+            circconv(&a, &code[f][x], &mut b);
+            a.copy_from_slice(&b);
+        }
+        for (mi, ai) in m.iter_mut().zip(a.iter()) {
+            *mi += ai;
+        }
+    }
+
+    // Read field 2 back, given a set of fields.
+    let read = |given: &[usize]| -> (f32, f32) {
+        let mut q = code[given[0]][rec[0][given[0]]].clone();
+        for &g in given.iter().skip(1) {
+            circconv(&q.clone(), &code[g][rec[0][g]], &mut q);
+        }
+        normalize(&mut q);
+        let mut raw = vec![0.0f32; d];
+        unbind(&m, &q, &mut raw);
+        normalize(&mut raw);
+        let mut best = f32::MIN;
+        for cand in 0..v {
+            best = best.max(dot(&raw, &code[2][cand]));
+        }
+        (dot(&raw, &code[2][rec[0][2]]), best)
+    };
+
+    let floor = (2.0 * (v as f32).ln() / d as f32).sqrt();
+
+    // Fields 0 and 1 determine field 2 exactly, and five fields stay unknown.
+    let (truth_two, best_two) = read(&[0, 1]);
+    assert!(
+        truth_two < floor,
+        "two factors unknown should leave the answer at noise, got {} against floor {}",
+        truth_two,
+        floor
+    );
+    assert!(
+        truth_two < best_two,
+        "with two factors unknown the true value should not even win: {} vs {}",
+        truth_two,
+        best_two
+    );
+
+    // Everything but the target: exactly one unknown factor, and it is the argmax.
+    let all_but: Vec<usize> = (0..n).filter(|&f| f != 2).collect();
+    let (truth_one, best_one) = read(&all_but);
+    assert!(
+        (truth_one - best_one).abs() < 1e-6,
+        "one unknown factor should be the argmax: {} vs {}",
+        truth_one,
+        best_one
+    );
+    assert!(
+        truth_one > 4.0 * truth_two.abs(),
+        "one unknown factor should stand far above the two-unknown case: {} vs {}",
+        truth_one,
+        truth_two
+    );
+}

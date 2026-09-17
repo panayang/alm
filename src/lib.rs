@@ -30,6 +30,7 @@
 pub mod baseline;
 pub mod budget;
 pub mod chainmem;
+pub mod clinical;
 pub mod code;
 pub mod config;
 
@@ -45,3 +46,4 @@ pub mod num;
 pub mod partial;
 pub mod scan;
 pub mod store;
+pub mod stream;

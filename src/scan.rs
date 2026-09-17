@@ -26,11 +26,15 @@
 //!
 //! Input is the ML-DPC load-trace format, one access per line:
 //!
-//!     instr_id, cycle, load_address(hex), pc(hex), llc_hit
+//! ```text
+//! instr_id, cycle, load_address(hex), pc(hex), llc_hit
+//! ```
 //!
 //! Read from a path or from stdin, so a trace can stay compressed on disk:
 //!
-//!     xz -dc gap/bfs-3.txt.xz | alm scan --trace - --label bfs-3
+//! ```text
+//! xz -dc gap/bfs-3.txt.xz | alm scan --trace - --label bfs-3
+//! ```
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};

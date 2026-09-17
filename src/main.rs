@@ -126,6 +126,19 @@ fn main() {
             let t = trace.expect("scan wants --trace PATH (or --trace - for stdin)");
             alm::scan::run(&t, &label, limit, &gran);
         }
+        // Does the timing of a clinical record carry its outcome, on its own?
+        // The gate for this architecture's temporal commitment. Runs no model.
+        "clinical" => {
+            let d = data.expect("clinical wants --data DIR");
+            let o = out.clone().expect("clinical wants --out OUTCOMES.txt");
+            alm::clinical::run(&d, &o, &label, bins);
+        }
+        // What a concept-drift stream is made of, and whether it has any
+        // inter-arrival structure for us to spend. Runs no model.
+        "stream" => {
+            let f = data.expect("stream wants --data FILE");
+            alm::stream::run(&f, &label, bins, if limit > 0 { limit } else { 1000 });
+        }
         // What a record table costs to answer from every direction at once.
         // Runs no model; this is a property of the table.
         "partial" => {
