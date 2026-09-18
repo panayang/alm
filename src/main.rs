@@ -158,14 +158,20 @@ fn main() {
             let dd = data.expect("physio wants --data DIR");
             alm::physio::run(&dd, &label, &widths, limit, seed, max_given, &gran);
         }
-        // What a concept-drift stream is made of, and whether it has any
-        // inter-arrival structure for us to spend. Runs no model.
         // Does the readout converge or hover? Two streams with known answers,
         // priced by decile so a curve that turns around cannot read as a
         // plateau. This is what chose `eta` and retired `row_norm_cap`.
         "stepsize" => {
             alm::stepsize::run(if limit > 0 { limit } else { 120_000 });
         }
+        // Is the readout calibrated on rare tokens? The right charge on an
+        // i.i.d. stream is -log2 p exactly, so the excess by rarity bucket names
+        // whichever mechanism under-weights what it has seen rarely.
+        "rarity" => {
+            alm::rarity::run(if limit > 0 { limit } else { 120_000 });
+        }
+        // What a concept-drift stream is made of, and whether it has any
+        // inter-arrival structure for us to spend. Runs no model.
         "stream" => {
             let f = data.expect("stream wants --data FILE");
             alm::stream::run(&f, &label, bins, if limit > 0 { limit } else { 1000 });

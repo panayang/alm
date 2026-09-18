@@ -1556,3 +1556,90 @@ fn the_reported_entropy_is_the_entropy_of_the_distribution_that_is_charged() {
         );
     }
 }
+
+/// Excess over -log2 p on an i.i.d. Zipf stream, (commonest bucket, rarest
+/// bucket), for a given number of negatives.
+fn rarity_excess(neg: usize, v: usize, n: usize) -> (f64, f64) {
+    let w: Vec<f64> = (0..v).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+    let t: f64 = w.iter().sum();
+    let p: Vec<f64> = w.iter().map(|x| x / t).collect();
+    let mut cdf = Vec::with_capacity(v);
+    let mut a = 0.0;
+    for q in p.iter() {
+        a += q;
+        cdf.push(a);
+    }
+    let mut cfg = Config::local();
+    cfg.seed = 0x5A1E;
+    cfg.vocab = v;
+    cfg.d = 64;
+    cfg.mem_banks = 4096;
+    cfg.cleanup_floor_mult = 1.1;
+    cfg.neg_samples = neg;
+    cfg.derive();
+    let mut m = Model::new(cfg);
+    // (events, excess) for p >= 1/16 and for p < 1/1024.
+    let (mut cn, mut ce, mut rn, mut re) = (0u64, 0.0f64, 0u64, 0.0f64);
+    for i in 0..n {
+        let u = (alm::num::cbrng(0xDA7B, i as u64) >> 11) as f64 / (1u64 << 53) as f64;
+        let tok = cdf.iter().position(|c| *c >= u).unwrap_or(v - 1);
+        for _ in 0..2 {
+            m.tick(None, false);
+        }
+        let out = m.tick(Some(tok), false);
+        if out.charged && i * 2 >= n {
+            let e = out.bits + p[tok].log2();
+            if p[tok] >= 1.0 / 16.0 {
+                cn += 1;
+                ce += e;
+            } else if p[tok] < 1.0 / 1024.0 {
+                rn += 1;
+                re += e;
+            }
+        }
+    }
+    (ce / cn.max(1) as f64, re / rn.max(1) as f64)
+}
+
+#[test]
+fn the_readout_does_not_write_off_what_it_has_seen_rarely() {
+    // On an i.i.d. stream the right charge for a token of probability p is
+    // -log2 p exactly, so any excess is miscalibration and its dependence on p
+    // is measurable against a known answer.
+    //
+    // With the write's negatives truncated to the sixteen highest-scoring
+    // tokens, a vocabulary of 296 was enough to break this completely: tokens
+    // rarer than 1/1024 were charged 41.7 bits *more* than -log2 p, i.e. given
+    // a probability near 2^-50 -- written off. On PhysioNet this was the whole
+    // of our loss, concentrated on targets seen 1-99 times before, and it was
+    // invisible on every stream this project had used because at V = 64 sixteen
+    // negatives is a quarter of the vocabulary.
+    //
+    // The exact softmax gradient -- every token pushed by its own -q -- is flat
+    // across rarity. What is asserted is flatness, not zero: a constant offset
+    // across buckets is a separate question and is not this one. The one bit
+    // of tolerance is mine; measured at full size, the rare-minus-common spread
+    // is -0.22 dense and +22.5 truncated.
+    let (v, n) = (296usize, 30_000usize);
+    let ((c16, r16), (c0, r0)) = std::thread::scope(|s| {
+        let a = s.spawn(|| rarity_excess(16, v, n));
+        let b = s.spawn(|| rarity_excess(0, v, n));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    println!(
+        "excess over -log2 p, common / rare:  top-16 {:+.3} / {:+.3}   dense {:+.3} / {:+.3}",
+        c16, r16, c0, r0
+    );
+    assert!(
+        r0 - c0 < 1.0,
+        "the dense write charges rare tokens {:.3} bits more than common ones",
+        r0 - c0
+    );
+    // And the instrument can see the defect it exists for.
+    assert!(
+        r16 - c16 > 1.0,
+        "a truncated write was expected to write off rare tokens and did not ({:.3}); \
+         the instrument has lost its sensitivity",
+        r16 - c16
+    );
+}

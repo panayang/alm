@@ -47,6 +47,7 @@ pub mod num;
 pub mod partial;
 pub mod patient;
 pub mod physio;
+pub mod rarity;
 pub mod scan;
 pub mod store;
 pub mod stepsize;

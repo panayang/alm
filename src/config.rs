@@ -128,25 +128,6 @@ pub struct Config {
     /// marginal. That is the price of having no counted prior, named in
     /// `store.rs`, and it is a decision rather than a defect.
     pub eta: f32,
-    /// INHERITED. Sampled negatives per write, drawn from the leaf's own
-    /// emitted targets. Zero recovers the dense update.
-    /// Draw the write's negatives from the top of the current distribution
-    /// instead of uniformly from every known token.
-    ///
-    /// Uniform sampling takes 16 of 685 rows, so the five in-domain rivals that
-    /// share a Latin square's six targets are each drawn about 2.3% of the time.
-    /// A target appears roughly eighteen times in a regime's life, so a rival
-    /// receives a negative gradient on it about 0.4 times: the readout is never
-    /// taught to separate the six candidates and settles at 1/6, which is
-    /// exactly where the Latin family sits. The product code is unaffected
-    /// because it is answerable from marginals, where ranking on positives alone
-    /// suffices.
-    ///
-    /// It also breaks the rule `code.rs` states: the ledger charges an exact
-    /// softmax over every row while the write was fitted against a random
-    /// subset, so the two saw different distributions. Correcting what the model
-    /// would actually have said is both error-driven and the same distribution
-    /// the charge came from.
     /// Hold a superposed memory that speech writes into and silence reads out of.
     ///
     /// The two operations are opposites and the tick already says which one is
@@ -344,7 +325,59 @@ pub struct Config {
     /// exactly untouched and occupancy still measures stored content.
     pub row_decay: f32,
     pub readout_bias: bool,
+    /// Draw the write's negatives from the top of the current distribution
+    /// instead of uniformly from every known token.
+    ///
+    /// Uniform sampling takes 16 of 685 rows, so the five in-domain rivals that
+    /// share a Latin square's six targets are each drawn about 2.3% of the time.
+    /// A target appears roughly eighteen times in a regime's life, so a rival
+    /// receives a negative gradient on it about 0.4 times: the readout is never
+    /// taught to separate the six candidates and settles at 1/6, which is
+    /// exactly where the Latin family sits. The product code is unaffected
+    /// because it is answerable from marginals, where ranking on positives alone
+    /// suffices.
+    ///
+    /// It also breaks the rule `code.rs` states: the ledger charges an exact
+    /// softmax over every row while the write was fitted against a random
+    /// subset, so the two saw different distributions. Correcting what the model
+    /// would actually have said is both error-driven and the same distribution
+    /// the charge came from.
+    ///
+    /// Irrelevant when `neg_samples` is zero, which is now the default.
     pub hard_negatives: bool,
+    /// How many negatives a write pushes down. Zero means every token: the
+    /// exact softmax gradient.
+    ///
+    /// Sixteen was inherited, and its cost scales with the vocabulary rather
+    /// than with anything in the stream. Truncating the negative update to the
+    /// k highest-scoring tokens is a biased estimate of the gradient, and on an
+    /// i.i.d. Zipf stream -- where the right charge for a token of probability p
+    /// is exactly -log2 p -- the bias lands entirely on rare tokens. V = 296,
+    /// 120k events, excess over -log2 p:
+    ///
+    /// ```text
+    ///   negatives    overall    p in [2^-10, 2^-8)    p < 2^-10
+    ///   top 16        +6.015          +8.065            +41.747
+    ///   top 32        +1.949          +0.504            +15.530
+    ///   top 64        +0.671          +0.151             +2.312
+    ///   top 128       +0.537          +0.443             +0.093
+    ///   all (0)       +0.537          +0.441             +0.348    <- here
+    ///   16 sampled   +63.264         +90.667            +89.230
+    /// ```
+    ///
+    /// Tokens rarer than 1/1024 were being charged forty bits over their true
+    /// cost -- given a probability near 2^-50, written off. At V = 64, where
+    /// every earlier diagnostic ran, sixteen is a quarter of the vocabulary and
+    /// the defect does not show. On PhysioNet it was the whole of our loss:
+    /// targets seen 1-99 times before, charged three bits more than a counter.
+    ///
+    /// The exact gradient is also simply the rule `code.rs` states -- fit the
+    /// write against the distribution the ledger charged -- which a truncated
+    /// write never did. The scoring pass is already O(V), so this is at most
+    /// twice the cost.
+    ///
+    /// The overall +0.54 that remains is flat across rarity and is a different
+    /// question.
     pub neg_samples: usize,
     /// DERIVED. Eligibility decay, matched to the mean inter-event interval.
     pub trace_lambda: f32,
@@ -603,7 +636,7 @@ impl Config {
             row_decay: 0.0,
             readout_bias: false,
             hard_negatives: true,
-            neg_samples: 16,
+            neg_samples: 0,
             trace_lambda: 0.9,
             visit_decay: 0.9,
             calib_bins: 10,

@@ -180,13 +180,15 @@ impl Store {
         eta: f32,
     ) {
         let d = self.fw.min(phi.len());
-        let mut touched: Vec<u32> = Vec::with_capacity(negatives.len() + 1);
+        // Sorted and deduplicated rather than checked one by one: a dense write
+        // hands over the whole vocabulary, and a linear `contains` per entry
+        // made that quadratic.
+        let mut negs: Vec<u32> = negatives.iter().copied().filter(|&n| n != target).collect();
+        negs.sort_unstable();
+        negs.dedup();
+        let mut touched: Vec<u32> = Vec::with_capacity(negs.len() + 1);
         touched.push(target);
-        for &n in negatives {
-            if n != target && !touched.contains(&n) {
-                touched.push(n);
-            }
-        }
+        touched.extend(negs);
         for &t in touched.iter() {
             let q = sc.prob_of(self, t);
             let err = if t == target { 1.0 - q } else { -q };

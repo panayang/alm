@@ -1268,7 +1268,14 @@ impl Model {
                         // charged, so the rows are fitted against the
                         // distribution that was actually settled.
                         let sc_neg = code::score_with(&self.store, &phi, !self.cfg.no_readout, Some(&p0), self.cfg.readout_codebook, Some(&self.emb));
-                        let negs = if self.cfg.hard_negatives {
+                        // Zero means every token the distribution scored: the
+                        // exact softmax gradient, against exactly the
+                        // distribution the ledger charged. The documentation
+                        // always said zero recovered the dense update; the code
+                        // took it to mean no negatives at all.
+                        let negs = if self.cfg.neg_samples == 0 {
+                            sc_neg.rows.iter().map(|(t, _)| *t).filter(|t| *t != x as u32).collect()
+                        } else if self.cfg.hard_negatives {
                             self.top_negatives(&sc_neg, x as u32, self.cfg.neg_samples)
                         } else {
                             self.sample_negatives(x as u32, self.cfg.neg_samples)
