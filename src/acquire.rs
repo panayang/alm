@@ -165,11 +165,21 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
     );
     let mut model = Model::new(cfg);
     let blank = model.volatile();
-    let mut ppm = Ppm::new(3, vp);
+
+    // Every order, not a pinned one.
+    //
+    // This used to run PPM-C at order 3 and report it as "the counter". That
+    // breaks the rule the rest of this project runs on -- both sides sweep
+    // their own hyperparameters or the number is not reported -- and it has
+    // already reversed a result once: on the clinical subset the best order was
+    // 1, and pinning 3 turned a 0.158-bit loss into a 0.010-bit win. So run all
+    // of them and hand the baseline its best.
+    const ORDERS: usize = 6;
+    let mut ppms: Vec<Ppm> = (1..=ORDERS).map(|o| Ppm::new(o, vp)).collect();
 
     // [novel?][decile]
     let mut ours = [[Cell::default(); DECILES]; 2];
-    let mut theirs = [[Cell::default(); DECILES]; 2];
+    let mut theirs_all = vec![[[Cell::default(); DECILES]; 2]; ORDERS];
     // Which order-2 contexts have been seen, for the split only. This is a
     // property of the stream and is shared by both models, so neither is
     // scored on a different population than the other.
@@ -178,7 +188,9 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
 
     for s in streams.iter() {
         model.restore(blank.clone());
-        ppm.reset_hist();
+        for p in ppms.iter_mut() {
+            p.reset_hist();
+        }
         let mut p2: Option<u32> = None;
         let mut p1: Option<u32> = None;
         for &(gap, tok) in s.iter() {
@@ -198,10 +210,14 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
                 model.tick(None, false);
             }
             let out = model.tick(Some(tok as usize), false);
-            let b_ppm = ppm.observe(tok);
+            for (oi, p) in ppms.iter_mut().enumerate() {
+                let b = p.observe(tok);
+                if out.charged {
+                    theirs_all[oi][novel as usize][dec].push(b);
+                }
+            }
             if out.charged {
                 ours[novel as usize][dec].push(out.bits);
-                theirs[novel as usize][dec].push(b_ppm);
             }
 
             if let Some(c) = ctx {
@@ -213,9 +229,39 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
         }
     }
 
+    // The baseline is the best order over the whole stream, chosen once and
+    // used for both columns, so it cannot pick a different order per column.
+    let mut best_order = 0usize;
+    let mut best_bits = f64::INFINITY;
+    for (oi, t) in theirs_all.iter().enumerate() {
+        let (mut b, mut n) = (0.0f64, 0u64);
+        for k in 0..2 {
+            for d in 0..DECILES {
+                b += t[k][d].bits;
+                n += t[k][d].n;
+            }
+        }
+        let m = b / n.max(1) as f64;
+        println!("PPM-C order {}: {:.4} bits overall", oi + 1, m);
+        if m < best_bits {
+            best_bits = m;
+            best_order = oi;
+        }
+    }
+    println!("baseline: PPM-C order {} at {:.4} bits
+", best_order + 1, best_bits);
+    let theirs = theirs_all[best_order];
+
     for (k, name) in [(1usize, "NOVEL context (counter has nothing)"), (0, "seen context")] {
         println!("\n-- {} --", name);
-        println!("{:>8} {:>10} {:>12} {:>12} {:>10}", "decile", "events", "ours", "PPM-C o3", "margin");
+        println!(
+            "{:>8} {:>10} {:>12} {:>12} {:>10}",
+            "decile",
+            "events",
+            "ours",
+            format!("PPM-C o{}", best_order + 1),
+            "margin"
+        );
         for t in 0..DECILES {
             let (o, p) = (ours[k][t], theirs[k][t]);
             if o.n == 0 {

@@ -160,6 +160,12 @@ fn main() {
         }
         // What a concept-drift stream is made of, and whether it has any
         // inter-arrival structure for us to spend. Runs no model.
+        // Does the readout converge or hover? Two streams with known answers,
+        // priced by decile so a curve that turns around cannot read as a
+        // plateau. This is what chose `eta` and retired `row_norm_cap`.
+        "stepsize" => {
+            alm::stepsize::run(if limit > 0 { limit } else { 120_000 });
+        }
         "stream" => {
             let f = data.expect("stream wants --data FILE");
             alm::stream::run(&f, &label, bins, if limit > 0 { limit } else { 1000 });

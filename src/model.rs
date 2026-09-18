@@ -496,9 +496,22 @@ impl Model {
     }
 
     /// The emitted distribution as it stands, for the normalisation assertion.
+    ///
+    /// Scored exactly the way `emit` scores it, codebook term included. It used
+    /// to call `code::score`, which omits that term, so the distribution this
+    /// reported -- and the one the normalisation assertion checked -- was not
+    /// the distribution the model emits.
     pub fn spread_now(&self) -> code::Scored {
-        let phi = self.features(&self.p.clone());
-        code::score(&self.store, &phi, !self.cfg.no_readout)
+        let p = self.p.clone();
+        let phi = self.features(&p);
+        code::score_with(
+            &self.store,
+            &phi,
+            !self.cfg.no_readout,
+            Some(&p),
+            self.cfg.readout_codebook,
+            Some(&self.emb),
+        )
     }
 
     // ---- features -------------------------------------------------------
@@ -1152,7 +1165,17 @@ impl Model {
                 let p = self.p.clone();
                 let phi = self.features(&p);
                 if want_entropy {
-                    let sc = code::score(&self.store, &phi, !self.cfg.no_readout);
+                    // The same scoring `emit` is about to use, codebook term
+                    // included. Reporting the entropy of a distribution the
+                    // model does not emit is a diagnostic about nothing.
+                    let sc = code::score_with(
+                        &self.store,
+                        &phi,
+                        !self.cfg.no_readout,
+                        Some(&p),
+                        self.cfg.readout_codebook,
+                        Some(&self.emb),
+                    );
                     out.entropy_bits = Some(sc.entropy_bits());
                 }
                 self.emit(&mut out, &phi);

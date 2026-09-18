@@ -93,7 +93,40 @@ pub struct Config {
     // ---- allocation ------------------------------------------------------
 
     // ---- learning ---------------------------------------------------------
-    /// INHERITED. Learning rate.
+    /// Learning rate, for the readout row and the operator write alike.
+    ///
+    /// Not inherited any more: measured, together with `row_norm_cap`, because
+    /// the two were doing each other's job. At 0.5 the delta rule overshoots on
+    /// a stream it cannot predict, the row accumulates a random walk, and the
+    /// readout becomes confidently wrong -- 6.78 bits against a uniform of
+    /// 6.00, which is fabrication. Capping the norm hides that, and destroys
+    /// convergence on a stream it *can* predict: the charge on a deterministic
+    /// successor bottoms out around the second decile and then climbs for the
+    /// rest of the run.
+    ///
+    /// The step size is the actual knob. Bits per event by decile, 120k events,
+    /// V = 64; deterministic successor (true answer 0) over i.i.d. Zipf (true
+    /// marginal 4.864, uniform 6.000), reading the last decile:
+    ///
+    /// ```text
+    ///    eta   cap     deterministic          i.i.d.
+    ///    0.5    16     0.278  (rising)        5.751     <- was here
+    ///    0.3    64     0.055                  5.849
+    ///    0.2    64     0.049  (falling)       5.737
+    ///    0.2     0     0.049  (falling)       5.557     <- here
+    ///    0.1     0     0.067  (falling)       5.571
+    ///    0.5     0     0.047  (falling)       6.776     fabricates
+    /// ```
+    ///
+    /// 0.2 with no cap is better on both columns at once than 0.5 with a cap on
+    /// either -- five times cheaper on the structure it can learn and still a
+    /// fifth of a bit better on the noise it cannot. And at 0.2 the cap makes
+    /// no difference at all, which is the whole finding: the bound was never
+    /// buying anything except protection from a step that was too large.
+    ///
+    /// The i.i.d. column rises slowly in every row and is 0.69 bits above the
+    /// marginal. That is the price of having no counted prior, named in
+    /// `store.rs`, and it is a decision rather than a defect.
     pub eta: f32,
     /// INHERITED. Sampled negatives per write, drawn from the leaf's own
     /// emitted targets. Zero recovers the dense update.
@@ -250,6 +283,67 @@ pub struct Config {
     pub superpose: bool,
     /// Weight of the unbound result against the standing state.
     pub unbind_mix: f32,
+    /// Give the readout a per-token additive term.
+    ///
+    /// FREE, default false. The store's own rationale says counts were dropped
+    /// because a frequency estimate converges on the corpus unigram and so
+    /// stops discriminating as data grows. A bias is that estimate. It exists
+    /// as a switch because the readout was measured to carry no frequency
+    /// information whatsoever, which is either the design holding its line or a
+    /// broken emission path, and those two have to be told apart rather than
+    /// assumed.
+    /// Largest L2 norm a readout row may reach. Zero disables the bound.
+    ///
+    /// The delta rule is unregularised by design -- it is a write, not a fit,
+    /// and nothing upstream of a row may touch it. That was survivable only
+    /// while the softmax clamped, because saturation hid the growth; with the
+    /// clamp gone, rows reaching a norm of 350 against a feature norm of 3 make
+    /// the readout confidently wrong on anything it cannot predict, which
+    /// `store.rs` names as the price of dropping the count prior.
+    ///
+    /// A cap rather than weight decay, deliberately. Decay pulls every row
+    /// toward zero on every step, which is a forgetting rule and this
+    /// architecture does not have one; a cap does nothing at all until a row is
+    /// too large to be expressing anything but its own divergence.
+    ///
+    /// Swept on two streams at once, because one cannot choose it: a loose cap
+    /// learns structure and fabricates on noise, a tight one does the reverse.
+    /// The first sweep held `eta` at 0.5 and read a single endpoint, and on
+    /// that evidence 16.0 looked like the best available trade.
+    ///
+    /// Both halves of that were wrong. Reading the trajectory instead of the
+    /// endpoint shows the cap does not plateau, it *turns*: on a deterministic
+    /// successor the charge falls to 0.221 bits by the second decile and then
+    /// climbs back to 0.278 by the tenth. Once a row is pinned to the ball,
+    /// each update plus its projection is a rotation toward the current
+    /// features rather than an accumulation, so the row tracks the most recent
+    /// state and forgets the rest -- the readout un-learns.
+    ///
+    /// And sweeping `eta` alongside it shows the cap was only ever standing in
+    /// for a step size. See `eta` for the table: at 0.2 the capped and uncapped
+    /// runs are the same to three decimals, because the rows never reach the
+    /// bound. Zero, therefore, and the divergence it was added to prevent is
+    /// prevented where it comes from.
+    pub row_norm_cap: f32,
+
+    /// Shrink a row toward zero each time it is touched, before the update.
+    ///
+    /// Added while the norm bound was carrying the whole job, on the diagnosis
+    /// that the bound cannot tell a row that is confidently right from one that
+    /// is confidently wrong -- it caps both. That much was true. The conclusion
+    /// drawn from it was not: the fix is not a second shrinkage term, it is not
+    /// having a step size that needs a bound. See `eta`.
+    ///
+    /// Decay separates them. A row driven by a consistent gradient settles
+    /// where that gradient balances the shrinkage; a row accumulating a random
+    /// walk -- which is what an unpredictable stream produces, and what grew
+    /// the norms to 350 against a feature norm of 3 -- has no persistent
+    /// direction to hold it up and collapses toward nothing.
+    ///
+    /// Applied only to the rows a write touches, so rows outside that set stay
+    /// exactly untouched and occupancy still measures stored content.
+    pub row_decay: f32,
+    pub readout_bias: bool,
     pub hard_negatives: bool,
     pub neg_samples: usize,
     /// DERIVED. Eligibility decay, matched to the mean inter-event interval.
@@ -494,7 +588,7 @@ impl Config {
             nodes: 32,
             shortcuts: 2,
             hops: 1,
-            eta: 0.5,
+            eta: 0.2,
             event_locked_key: true,
             cleanup_floor_mult: 1.6,
             readout_codebook: 1.0,
@@ -505,6 +599,9 @@ impl Config {
             mem_banks: 64,
             superpose: true,
             unbind_mix: 0.7,
+            row_norm_cap: 0.0,
+            row_decay: 0.0,
+            readout_bias: false,
             hard_negatives: true,
             neg_samples: 16,
             trace_lambda: 0.9,

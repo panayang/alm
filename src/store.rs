@@ -43,6 +43,21 @@ pub struct Store {
     pub vocab: usize,
     /// One row per token, shared by everything. The only learned readout.
     pub rows: Vec<(u32, Vec<f32>)>,
+    /// A per-token additive term, off by default.
+    ///
+    /// This is a counted prior wearing a different hat, and this file opens by
+    /// explaining why counts were removed. It is here because the readout was
+    /// measured, in isolation on a structureless stream, to carry *no*
+    /// frequency information at all -- 5.99 bits against a marginal of 4.86 and
+    /// a uniform of 6.00 -- and every real stream is skewed. Whether that is a
+    /// defect or the design refusing to be a frequency counter is exactly what
+    /// the two tests around it are for, so it is a flag and not a decision.
+    pub bias: Vec<f32>,
+    pub use_bias: bool,
+    /// See `Config::row_norm_cap`. Zero disables.
+    pub row_cap: f32,
+    /// See `Config::row_decay`. Zero disables.
+    pub row_decay: f32,
     row_index: HashMap<u32, usize>,
     /// The same token ids as `rows`, kept as a slice so a hot loop does not have
     /// to rebuild them. `known()` allocated a fresh Vec of every known token on
@@ -111,6 +126,10 @@ impl Store {
             fw: cfg.feature_blocks() * cfg.d,
             vocab: cfg.vocab,
             rows: Vec::new(),
+            bias: vec![0.0; cfg.vocab],
+            use_bias: cfg.readout_bias,
+            row_cap: cfg.row_norm_cap,
+            row_decay: cfg.row_decay,
             row_index: HashMap::new(),
             known_toks: Vec::new(),
             answer_calib: Calibration::new(cfg.calib_bins),
@@ -142,8 +161,16 @@ impl Store {
     /// The delta-rule write, against the same distribution the ledger charges.
     ///
     /// A write, not a fit: the update is local to the row and needs nothing
-    /// upstream of it. Rows outside the touched set are left exactly untouched,
-    /// which is what keeps occupancy a measure of stored content.
+    /// upstream of it. Rows outside the touched set are left exactly untouched.
+    ///
+    /// A row can now be created by being a *competitor* and not only by being a
+    /// target. That follows from the scoring fix in `code.rs`: the codebook term
+    /// ranges over the whole vocabulary, so the model can emit a token the world
+    /// has never said, and a token the model can emit must be one it can be
+    /// corrected about -- otherwise the one path that can fabricate is the one
+    /// path with no corrective term on it. The cost is that occupancy is no
+    /// longer "tokens the world has said"; it is "tokens memory has an opinion
+    /// about", which is the quantity the readout actually depends on.
     pub fn write(
         &mut self,
         sc: &crate::code::Scored,
@@ -163,9 +190,36 @@ impl Store {
         for &t in touched.iter() {
             let q = sc.prob_of(self, t);
             let err = if t == target { 1.0 - q } else { -q };
+            let cap = self.row_cap;
+            if self.use_bias {
+                if let Some(b) = self.bias.get_mut(t as usize) {
+                    *b += eta * err;
+                    if cap > 0.0 {
+                        *b = b.clamp(-cap, cap);
+                    }
+                }
+            }
+            let decay = self.row_decay;
             let row = self.row_mut_or_insert(t);
+            if decay > 0.0 {
+                let keep = 1.0 - decay;
+                for x in row.iter_mut() {
+                    *x *= keep;
+                }
+            }
             for i in 0..d {
                 row[i] += eta * err * phi[i];
+            }
+            // Projected back onto the ball only when it has left it. A row
+            // inside the bound is not touched, so this is not decay.
+            if cap > 0.0 {
+                let n = crate::num::norm(row);
+                if n > cap {
+                    let k = cap / n;
+                    for x in row.iter_mut() {
+                        *x *= k;
+                    }
+                }
             }
         }
     }

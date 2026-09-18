@@ -49,4 +49,5 @@ pub mod patient;
 pub mod physio;
 pub mod scan;
 pub mod store;
+pub mod stepsize;
 pub mod stream;

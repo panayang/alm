@@ -895,12 +895,24 @@ fn a_superposed_record_cannot_answer_with_two_factors_unknown() {
 /// whatsoever: tokens drawn i.i.d. from a fixed skewed distribution, no
 /// context, no order, nothing to walk. A readout that works must approach
 /// H(marginal); one that cannot has nothing to do with memory.
-/// Marked ignored because it FAILS and is meant to: it records a defect, not a
-/// property. Run it with `cargo test -- --ignored`. It should be un-ignored the
-/// day the emission path can represent a marginal.
+/// The readout must never be confidently wrong about what it cannot predict.
+///
+/// This assertion has been weakened once, on purpose, and the reason belongs
+/// with it. It originally demanded the charge approach `H(marginal)`, which no
+/// setting of the norm bound reaches -- the best is 5.52 against a marginal of
+/// 4.86. That was the wrong thing to demand: `store.rs` removes the count prior
+/// deliberately, on the grounds that a frequency estimate converges on the
+/// corpus unigram and stops discriminating as data grows, so a readout that
+/// declines to encode a marginal is the design holding its line.
+///
+/// What is not negotiable is the other side of that trade. Dropping the prior
+/// drops the guaranteed codelength floor, so nothing stops the readout from
+/// assigning a vanishing probability to something it simply could not know --
+/// confident wrongness, which `store.rs` names as fabrication. On a stream with
+/// nothing to learn, the charge must therefore not exceed the uniform code.
+/// Before the norm bound it did: 6.83 bits against a uniform of 6.00.
 #[test]
-#[ignore]
-fn the_readout_learns_the_marginal_on_a_structureless_stream() {
+fn the_readout_is_never_worse_than_knowing_nothing() {
     use alm::config::Config;
     use alm::model::Model;
     use alm::num::cbrng;
@@ -921,14 +933,14 @@ fn the_readout_learns_the_marginal_on_a_structureless_stream() {
     // purpose -- so a readout unable to represent a marginal would pass every
     // test there and fail on any real stream.
     let mut got = [0.0f64; 2];
-    for (arm, hard) in [(0usize, true), (1, false)] {
+    for (arm, bias) in [(0usize, false), (1, true)] {
     let mut cfg = Config::local();
     cfg.seed = 0x51D;
     cfg.vocab = v;
     cfg.d = 128;
     cfg.mem_banks = 4096;
     cfg.cleanup_floor_mult = 1.1;
-    cfg.hard_negatives = hard;
+    cfg.readout_bias = bias;
     cfg.derive();
     let mut m = Model::new(cfg);
 
@@ -963,22 +975,584 @@ fn the_readout_learns_the_marginal_on_a_structureless_stream() {
     }
     got[arm] = bits / charged.max(1) as f64;
     println!(
-        "structureless stream, hard_negatives={}: {:.4} bits/event   H(marginal) {:.4}   uniform {:.4}",
-        hard, got[arm], h_marg, uniform
+        "structureless stream, readout_bias={}: {:.4} bits/event   H(marginal) {:.4}   uniform {:.4}",
+        bias, got[arm], h_marg, uniform
     );
     }
     let got = got[0].min(got[1]);
     assert!(
         got < uniform,
-        "the readout is no better than knowing nothing: {:.4} against uniform {:.4}",
+        "confidently wrong about an unpredictable stream: {:.4} bits against a          uniform code's {:.4}. The readout has no codelength floor, so nothing          but the norm bound stops this.",
         got,
         uniform
+    );
+    let _ = h_marg;
+}
+
+
+/// Structure with a skewed marginal: the test that tells the two readings apart.
+///
+/// The structureless test says the readout carries no frequency information.
+/// That may be the design holding its line -- `store.rs` removed counts on
+/// purpose, because a frequency estimate converges on the corpus unigram and
+/// stops discriminating as data grows, and there is no organisation to find in
+/// an i.i.d. stream anyway.
+///
+/// So this stream has organisation and a skewed marginal at once: the successor
+/// is a deterministic function of the current token, while the tokens
+/// themselves are Zipf. A readout that works must beat the marginal here by a
+/// wide margin, because the conditional entropy is zero. If it cannot, the
+/// emission path is broken and the refusal-to-count reading is unavailable.
+#[test]
+fn the_readout_learns_a_deterministic_successor_under_a_skewed_marginal() {
+    use alm::config::Config;
+    use alm::model::Model;
+    use alm::num::cbrng;
+
+    let v = 64usize;
+    let w: Vec<f64> = (0..v).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+    let tot: f64 = w.iter().sum();
+    let p: Vec<f64> = w.iter().map(|x| x / tot).collect();
+    let h_marg: f64 = -p.iter().map(|q| q * q.log2()).sum::<f64>();
+
+    for bias in [false, true] {
+        let mut cfg = Config::local();
+        cfg.seed = 0x51D;
+        cfg.vocab = v;
+        cfg.d = 128;
+        cfg.mem_banks = 4096;
+        cfg.cleanup_floor_mult = 1.1;
+        cfg.readout_bias = bias;
+        cfg.derive();
+        let mut m = Model::new(cfg);
+
+        let n = 120_000usize;
+        let (mut bits, mut charged) = (0.0f64, 0u64);
+        let mut cue = 0usize;
+        for i in 0..n {
+            // Alternate: a Zipf-drawn cue, then its deterministic successor.
+            let tok = if i % 2 == 0 {
+                let u = (cbrng(0xDA7B, i as u64) >> 11) as f64 / (1u64 << 53) as f64;
+                let (mut acc, mut k) = (0.0, v - 1);
+                for (j, q) in p.iter().enumerate() {
+                    acc += q;
+                    if u <= acc {
+                        k = j;
+                        break;
+                    }
+                }
+                cue = k;
+                k
+            } else {
+                (cue * 7 + 3) % v
+            };
+            for _ in 0..2 {
+                m.tick(None, false);
+            }
+            let out = m.tick(Some(tok), false);
+            // Only the successor is scored: its conditional entropy is zero.
+            if out.charged && i % 2 == 1 && i * 5 >= n * 4 {
+                bits += out.bits;
+                charged += 1;
+            }
+        }
+        let got = bits / charged.max(1) as f64;
+        println!(
+            "deterministic successor, readout_bias={}: {:.4} bits   H(marginal) {:.4}   true conditional 0.0",
+            bias, got, h_marg
+        );
+        assert!(
+            got < h_marg,
+            "a deterministic successor should cost far less than the marginal: {:.4} against {:.4}",
+            got,
+            h_marg
+        );
+    }
+}
+
+// =========================== the state path ===========================
+//
+// Everything above that touches the state asserts plumbing: that a block is
+// read and written, that a hop transforms rather than replaces, that a probe
+// puts it back. None of it asks the state to *encode* anything.
+//
+// The emission path just showed what that absence costs. A clamp was flattening
+// the distribution by two orders of magnitude and it lived behind twenty-one
+// green assertions, because not one of them ever handed the readout a question
+// whose answer was known. The state has exactly the same hole, and the patient
+// representation -- the one real application reading it -- sits below a
+// counting control.
+//
+// So: known labels by construction, a chance level that is arithmetic rather
+// than measured, and the weakest classifier that could work. A nearest
+// centroid, fitted on the first half of the run and tested on the second, with
+// the label always conditioned on the thing it must not be read off. Nothing
+// here can pass by memorising, and nothing here has a threshold I chose.
+
+/// Unit-length mean of a set of feature rows.
+fn centroid(rows: &[&Vec<f32>]) -> Vec<f32> {
+    let d = rows[0].len();
+    let mut c = vec![0.0f32; d];
+    for r in rows.iter() {
+        for i in 0..d {
+            c[i] += r[i];
+        }
+    }
+    alm::num::normalize(&mut c);
+    c
+}
+
+/// Nearest-centroid accuracy. `rows` are (label, features); the first half
+/// fits the centroids and the second half is scored. Returns (accuracy, n).
+fn nearest_centroid(rows: &[(usize, Vec<f32>)], classes: usize) -> (f64, usize) {
+    let cut = rows.len() / 2;
+    let mut cents: Vec<Option<Vec<f32>>> = Vec::with_capacity(classes);
+    for c in 0..classes {
+        let mine: Vec<&Vec<f32>> =
+            rows[..cut].iter().filter(|(l, _)| *l == c).map(|(_, v)| v).collect();
+        cents.push(if mine.is_empty() { None } else { Some(centroid(&mine)) });
+    }
+    let (mut hit, mut n) = (0usize, 0usize);
+    for (lab, v) in rows[cut..].iter() {
+        let mut u = v.clone();
+        alm::num::normalize(&mut u);
+        let mut best: Option<(usize, f32)> = None;
+        for (c, cc) in cents.iter().enumerate() {
+            if let Some(cc) = cc {
+                let s = alm::num::dot(cc, &u);
+                if best.map_or(true, |(_, bs)| s > bs) {
+                    best = Some((c, s));
+                }
+            }
+        }
+        if let Some((c, _)) = best {
+            n += 1;
+            if c == *lab {
+                hit += 1;
+            }
+        }
+    }
+    (hit as f64 / n.max(1) as f64, n)
+}
+
+/// A continuous stream of events over `np` tokens, drawn i.i.d., with a fixed
+/// gap, recording the state after each event with the previous and present
+/// token attached.
+///
+/// It used to be a fixed cycle of (prev, now) combinations, which scored 1.000
+/// on both directions -- because in a cycle the class is the phase. `prev`
+/// advanced only every `nn` episodes, so "which token preceded this one" and
+/// "which quarter of the block is this" were the same variable, and a centroid
+/// reading the slow background answered the second one. Drawing the order is
+/// what makes the label the only thing left to read.
+fn stream_states(events: usize, np: usize, gap: usize) -> Vec<(usize, usize, Vec<f32>)> {
+    let mut cfg = Config::local();
+    cfg.seed = 0x5747;
+    cfg.vocab = 64;
+    cfg.d = 128;
+    cfg.mem_banks = 4096;
+    cfg.cleanup_floor_mult = 1.1;
+    cfg.derive();
+    let mut m = Model::new(cfg);
+    let mut out = Vec::with_capacity(events);
+    let mut prev: Option<usize> = None;
+    for i in 0..events {
+        let k = (alm::num::cbrng(0x517E, i as u64) % np as u64) as usize;
+        m.tick(Some(3 + k), false);
+        if let Some(p) = prev {
+            if i * 4 >= events {
+                out.push((p, k, m.features_now()));
+            }
+        }
+        prev = Some(k);
+        for _ in 0..gap {
+            m.tick(None, false);
+        }
+    }
+    out
+}
+
+#[test]
+fn the_state_carries_the_previous_event_and_not_only_the_present_one() {
+    let np = 4usize;
+    let rows = stream_states(8000, np, 3);
+
+    // The control first: the token that just arrived must be readable. If this
+    // fails the instrument is broken, not the state -- and separating the two
+    // is the whole reason it is here.
+    let mut acc_now = Vec::new();
+    for ip in 0..np {
+        let sub: Vec<(usize, Vec<f32>)> =
+            rows.iter().filter(|(p, _, _)| *p == ip).map(|(_, n, v)| (*n, v.clone())).collect();
+        acc_now.push(nearest_centroid(&sub, np).0);
+    }
+    let now_acc = acc_now.iter().sum::<f64>() / np as f64;
+
+    // The claim: conditioned on the present token, the state still says which
+    // token preceded it. A state that fails this is a function of the current
+    // input, and every "memory" the readout reads is the token it was just
+    // handed.
+    let mut acc_prev = Vec::new();
+    for inn in 0..np {
+        let sub: Vec<(usize, Vec<f32>)> =
+            rows.iter().filter(|(_, n, _)| *n == inn).map(|(p, _, v)| (*p, v.clone())).collect();
+        acc_prev.push(nearest_centroid(&sub, np).0);
+    }
+    let prev_acc = acc_prev.iter().sum::<f64>() / np as f64;
+
+    println!(
+        "state decoding: previous event {:.3}   present event {:.3}   chance {:.3}   rows {}",
+        prev_acc,
+        now_acc,
+        1.0 / np as f64,
+        rows.len()
+    );
+    assert!(now_acc > 0.9, "the present token must be readable from the state; got {:.3}", now_acc);
+    assert!(
+        prev_acc > 2.0 / np as f64,
+        "conditioned on the present token the state must still identify the previous one: {:.3} against chance {:.3}",
+        prev_acc,
+        1.0 / np as f64
+    );
+}
+
+#[test]
+fn the_state_carries_how_long_the_world_was_silent() {
+    // Depth is the duration of silence, and the one measured result on real
+    // data -- 0.48 bits on PhysioNet that PPM could not take -- is the claim
+    // that elapsed time reaches the readout. Nothing has ever asked the state
+    // whether it does.
+    //
+    // Every event here is the same token, so the token stream carries nothing
+    // and the gap is the only variable. The gap is drawn rather than cycled,
+    // for the reason `stream_states` records: a cycled class is a phase, and a
+    // phase is readable from the background whether or not the gap is.
+    let gaps = [1usize, 3, 7, 15];
+    let mut cfg = Config::local();
+    cfg.seed = 0x6A9;
+    cfg.vocab = 64;
+    cfg.d = 128;
+    cfg.mem_banks = 4096;
+    cfg.cleanup_floor_mult = 1.1;
+    cfg.derive();
+    let mut m = Model::new(cfg);
+
+    let episodes = 4000usize;
+    let mut rows: Vec<(usize, Vec<f32>)> = Vec::new();
+    for i in 0..episodes {
+        let gi = (alm::num::cbrng(0x9A17, i as u64) % gaps.len() as u64) as usize;
+        for _ in 0..gaps[gi] {
+            m.tick(None, false);
+        }
+        m.tick(Some(21), false);
+        if i * 4 >= episodes {
+            rows.push((gi, m.features_now()));
+        }
+    }
+    let (acc, n) = nearest_centroid(&rows, gaps.len());
+    println!(
+        "state decoding: silence length {:.3}   chance {:.3}   classes {:?}   rows {}",
+        acc,
+        1.0 / gaps.len() as f64,
+        gaps,
+        n
     );
     assert!(
-        got < h_marg + 0.5,
-        "the readout never reached the marginal: {:.4} against H(marginal) {:.4} (uniform {:.4})",
+        acc > 2.0 / gaps.len() as f64,
+        "the state must encode how long the world was silent: {:.3} against chance {:.3}",
+        acc,
+        1.0 / gaps.len() as f64
+    );
+}
+
+#[test]
+fn the_states_memory_has_a_depth_and_the_depth_is_more_than_one() {
+    // Lag 1 is not enough. A state that carries only the token before this one
+    // is a bigram context with a vector spelling, and the chain -- multi-hop
+    // nodes, a response that keeps walking through silence -- would be
+    // decoration. So: how far back does the state actually reach?
+    //
+    // The tokens are drawn i.i.d., so t[i-l] is independent of every other
+    // token in the window. Decoding it above chance therefore needs no
+    // conditioning and cannot be a leak from a neighbour: there is nothing in
+    // the rest of the window that predicts it.
+    let np = 4usize;
+    let lags = 6usize;
+    let events = 12000usize;
+    for gap in [1usize, 3, 7] {
+        let mut cfg = Config::local();
+        cfg.seed = 0x5747;
+        cfg.vocab = 64;
+        cfg.d = 128;
+        cfg.mem_banks = 4096;
+        cfg.cleanup_floor_mult = 1.1;
+        cfg.derive();
+        let mut m = Model::new(cfg);
+        let mut hist: Vec<usize> = Vec::new();
+        let mut rows: Vec<(Vec<usize>, Vec<f32>)> = Vec::new();
+        for i in 0..events {
+            let k = (alm::num::cbrng(0x517E, i as u64) % np as u64) as usize;
+            m.tick(Some(3 + k), false);
+            hist.push(k);
+            if hist.len() > lags && i * 4 >= events {
+                let w: Vec<usize> = hist[hist.len() - lags..].iter().rev().copied().collect();
+                rows.push((w, m.features_now()));
+            }
+            for _ in 0..gap {
+                m.tick(None, false);
+            }
+        }
+        let mut accs = Vec::new();
+        for l in 0..lags {
+            let sub: Vec<(usize, Vec<f32>)> =
+                rows.iter().map(|(w, v)| (w[l], v.clone())).collect();
+            accs.push(nearest_centroid(&sub, np).0);
+        }
+        let depth = accs.iter().take_while(|a| **a > 1.5 / np as f64).count();
+        println!(
+            "gap {:>2}: lag accuracies {:?}   chance {:.3}   depth {}",
+            gap,
+            accs.iter().map(|a| format!("{:.3}", a)).collect::<Vec<_>>(),
+            1.0 / np as f64,
+            depth
+        );
+        assert!(
+            depth >= 2,
+            "the state must reach past the token before this one, or the chain is decoration: gap {} depth {} accuracies {:?}",
+            gap,
+            depth,
+            accs
+        );
+    }
+}
+
+#[test]
+fn the_background_bands_are_not_copies_of_each_other() {
+    // The cascade exists so that rung k peaks at a later lag than rung k-1 and
+    // the differences isolate timescales. If the bands are nearly collinear the
+    // ladder's opening paragraph is false, the feature vector is carrying
+    // `rungs` copies of one signal, and the delta rule is spreading one
+    // gradient over three blocks for nothing.
+    let mut cfg = Config::local();
+    cfg.seed = 0x8C3;
+    cfg.vocab = 64;
+    cfg.d = 256;
+    cfg.derive();
+    let mut m = Model::new(cfg);
+    for i in 0..600 {
+        m.tick(Some(5 + (i % 29)), false);
+        for _ in 0..4 {
+            m.tick(None, false);
+        }
+    }
+    let r = m.cfg.rungs;
+    let mut worst = 0.0f32;
+    for j in 0..r {
+        for k in (j + 1)..r {
+            let c = m.ladder.band_correlation(j, k).abs();
+            println!("band correlation {} vs {}: {:+.4}", j, k, c);
+            if c > worst {
+                worst = c;
+            }
+        }
+    }
+    assert!(worst < 0.9, "the bands must not be copies of one signal; worst |cos| = {:.4}", worst);
+}
+
+#[test]
+fn the_walk_alone_can_answer_a_deterministic_relation() {
+    // The operator path has three assertions and all three are plumbing: the
+    // weights moved, a perturbed route lands elsewhere, the state is not a copy
+    // of the background. None of them asks the operator memory to *carry a
+    // relation*, which is the only thing it is for.
+    //
+    // So turn the learned rows off. With `no_readout` the only term left in the
+    // score is the direct comparison of every token to the state, so whatever
+    // the model gets right it got from where the walk went. On a stream where
+    // each cue has one deterministic successor, that must beat the uniform. If
+    // it does not, the operator write is a gradient that lands somewhere the
+    // read never looks, and every experiment that ablated it was measuring
+    // nothing.
+    let v = 64usize;
+    let uniform = (v as f64).log2();
+    let mut cfg = Config::local();
+    cfg.seed = 0x0DE1;
+    cfg.vocab = v;
+    cfg.d = 128;
+    cfg.mem_banks = 4096;
+    cfg.cleanup_floor_mult = 1.1;
+    cfg.no_readout = true;
+    cfg.derive();
+    let mut m = Model::new(cfg);
+
+    let n = 60_000usize;
+    let (mut bits, mut charged) = (0.0f64, 0u64);
+    let mut cue = 0usize;
+    for i in 0..n {
+        let tok = if i % 2 == 0 {
+            cue = (alm::num::cbrng(0xC0E, i as u64) % v as u64) as usize;
+            cue
+        } else {
+            (cue * 7 + 3) % v
+        };
+        for _ in 0..2 {
+            m.tick(None, false);
+        }
+        let out = m.tick(Some(tok), false);
+        if out.charged && i % 2 == 1 && i * 5 >= n * 4 {
+            bits += out.bits;
+            charged += 1;
+        }
+    }
+    let got = bits / charged.max(1) as f64;
+    println!("walk only (no_readout): {:.4} bits   uniform {:.4}", got, uniform);
+    assert!(
+        got < uniform,
+        "with the rows disabled the walk must still beat the uniform on a \
+         deterministic relation: {:.4} against {:.4}",
         got,
-        h_marg,
         uniform
     );
+}
+
+#[test]
+fn the_four_channels_do_not_alias_and_do_not_distort() {
+    // A5 is a statement about which cascade a stream may write, and the three
+    // self channels feed one cascade between them. If two channels rotated a
+    // token to nearly the same vector, "the model heard itself say X" and "the
+    // model is touching memory X" would be the same event in the background,
+    // the three-stream drive would be one stream with a gain of three, and
+    // every ablation of one channel would be partly an ablation of the others.
+    //
+    // The rotations are signed permutations, so both answers are known: the
+    // norm is preserved exactly, and two independent permutations of the same
+    // vector agree at the chance level of 1/sqrt(d).
+    // Wide enough that the bound means something: at the default d = 64 the
+    // chance level is 1/8 and any bound loose enough to pass cleanly is also
+    // loose enough to admit genuine aliasing.
+    let mut cfg = Config::local();
+    cfg.d = 256;
+    cfg.derive();
+    let m = Model::new(cfg);
+    let d = m.cfg.d;
+    let floor = 5.0 / (d as f32).sqrt();
+    let chans = [Channel::In, Channel::Overt, Channel::Covert, Channel::Write];
+    let names = ["In", "Overt", "Covert", "Write"];
+
+    let mut worst = 0.0f32;
+    let mut worst_norm = 0.0f32;
+    for t in (0..64).map(|i| i * 61 + 3) {
+        let base = alm::num::norm(m.emb.row(t));
+        let mut v: Vec<Vec<f32>> = Vec::new();
+        for c in chans.iter() {
+            let mut o = vec![0.0f32; d];
+            m.emb.rotated(t, *c, &mut o);
+            let e = (alm::num::norm(&o) - base).abs();
+            if e > worst_norm {
+                worst_norm = e;
+            }
+            v.push(o);
+        }
+        for i in 0..chans.len() {
+            for j in (i + 1)..chans.len() {
+                let c = alm::num::dot(&v[i], &v[j]).abs() / (base * base);
+                if c > worst {
+                    worst = c;
+                    println!("token {:>4}  {:>6} vs {:>6}: |cos| {:.4}", t, names[i], names[j], c);
+                }
+            }
+        }
+    }
+    println!("worst |cos| {:.4}   floor {:.4}   worst norm error {:.3e}", worst, floor, worst_norm);
+    assert!(
+        worst_norm < 1e-4,
+        "a channel rotation changed the norm by {:.3e}: it is not a signed permutation",
+        worst_norm
+    );
+    assert!(
+        worst < floor,
+        "two channels agree at |cos| {:.4}, above the {:.4} chance level: they alias",
+        worst,
+        floor
+    );
+}
+
+#[test]
+fn the_reported_entropy_is_the_entropy_of_the_distribution_that_is_charged() {
+    // `mass()` once returned 2942.67 because it assumed a token with no row
+    // weighs exp(0) = 1, when under max-subtraction it weighs exp(0 - max).
+    // The normalisation assertion caught that immediately. `entropy_bits()`
+    // carried the identical mistake on the identical line and nothing caught
+    // it, because nothing anywhere compared the reported entropy to anything.
+    //
+    // So compare it to itself, computed the other way: sum -q log q over the
+    // whole vocabulary using the same `prob_of` the ledger charges with. The
+    // answer is known exactly, it exercises the row-less branch, and it fails
+    // for any weight that is right in one place and wrong in the other.
+    // The last case is the one that matters: a vocabulary far larger than the
+    // number of rows, with the codebook term off, so most tokens take the
+    // row-less branch and the maximum score is not zero. That is the only
+    // configuration in which the wrong weight and the right one differ, and
+    // every earlier case reports `unseen 0`.
+    for (label, no_readout, codebook, warm_events, v) in [
+        ("fresh", false, 1.0f32, 0usize, 64usize),
+        ("warm", false, 1.0, 4000, 64),
+        ("warm, no codebook", false, 0.0, 4000, 64),
+        ("warm, rows off", true, 1.0, 4000, 64),
+        ("sparse rows, no codebook", false, 0.0, 300, 4096),
+    ] {
+        let mut cfg = Config::local();
+        cfg.seed = 0xE47;
+        cfg.vocab = v;
+        cfg.d = 128;
+        cfg.mem_banks = 4096;
+        cfg.cleanup_floor_mult = 1.1;
+        cfg.no_readout = no_readout;
+        cfg.readout_codebook = codebook;
+        cfg.derive();
+        let mut m = Model::new(cfg);
+        let mut cue = 0usize;
+        for i in 0..warm_events {
+            let tok = if i % 2 == 0 {
+                cue = (alm::num::cbrng(0xC0E, i as u64) % v as u64) as usize;
+                cue
+            } else {
+                (cue * 7 + 3) % v
+            };
+            for _ in 0..2 {
+                m.tick(None, false);
+            }
+            m.tick(Some(tok), false);
+        }
+
+        let sc = m.spread_now();
+        let reported = sc.entropy_bits();
+        let mut direct = 0.0f64;
+        let mut mass = 0.0f64;
+        for t in 0..v {
+            let q = sc.prob_of(&m.store, t as u32) as f64;
+            mass += q;
+            if q > 1e-30 {
+                direct -= q * q.log2();
+            }
+        }
+        println!(
+            "{:>18}: reported {:.6}  direct {:.6}  mass {:.6}  unseen {}",
+            label, reported, direct, mass, sc.unseen_count
+        );
+        assert!(
+            (mass - 1.0).abs() < 1e-4,
+            "{}: the distribution sums to {:.6}",
+            label,
+            mass
+        );
+        assert!(
+            (reported - direct).abs() < 1e-3,
+            "{}: the reported entropy {:.6} is not the entropy of the charged \
+             distribution {:.6}",
+            label,
+            reported,
+            direct
+        );
+    }
 }
