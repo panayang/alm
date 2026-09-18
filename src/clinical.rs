@@ -575,8 +575,7 @@ pub fn next_event(dir: &str, label: &str, order: usize) {
 
     let (b_blind, a_blind) = run_ppm(false);
     let (b_gap, a_gap) = run_ppm(true);
-    println!("
--- the bar: prequential PPM-C over the panel sequence, order {} --", order);
+    println!("\n-- the bar: prequential PPM-C over the panel sequence, order {} --", order);
     println!("{:<28} {:>12} {:>10}", "", "bits/event", "top-1");
     println!("{:<28} {:>12.4} {:>10.4}", "gap-blind", b_blind, a_blind);
     println!("{:<28} {:>12.4} {:>10.4}", "gap in the context", b_gap, a_gap);

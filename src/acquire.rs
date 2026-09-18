@@ -112,6 +112,86 @@ impl Ppm {
     }
 }
 
+/// One charged event, for the split that separates novelty from rarity.
+struct Rec {
+    /// The order-2 context has not occurred before.
+    novel: bool,
+    /// The order-1 context has: a counter escaping from order 2 lands on a
+    /// conditional, not on the marginal.
+    s1: bool,
+    /// How often the target itself has been the target before, bucketed.
+    tb: u8,
+    ours: f32,
+    ppm: [f32; ORDERS],
+}
+
+const ORDERS: usize = 6;
+const RARITY: [&str; 5] = ["0", "1-9", "10-99", "100-999", "1000+"];
+
+fn rarity_bucket(c: u32) -> usize {
+    match c {
+        0 => 0,
+        1..=9 => 1,
+        10..=99 => 2,
+        100..=999 => 3,
+        _ => 4,
+    }
+}
+
+/// Separate the two things the novel column mixes.
+///
+/// The raw novel column conflates "a new combination of seen parts" with "a
+/// rare token", because new contexts are disproportionately made of rare
+/// tokens, and a model without a counted prior is expected to pay on rare
+/// tokens whatever it does with combinations. So compare novel against seen
+/// *inside* a rarity bucket of the target. If the margin is the same in both,
+/// the novel loss is rarity and says nothing about composition; if it is worse
+/// on novel at matched rarity, composition is where we lose.
+///
+/// And by what a counter falls back to. When the order-2 context is new but the
+/// order-1 context is not, PPM escapes to a conditional it has counted; only
+/// when both are new does it fall to the marginal.
+fn split_novelty(recs: &[Rec], best: usize) {
+    println!("\n-- novelty vs rarity: margin = PPM-C o{} minus ours, bits per event --", best + 1);
+    println!(
+        "{:>10} | {:>26} | {:>26} | {:>26}",
+        "target n",
+        "seen o2 context",
+        "novel o2, seen o1",
+        "novel o2, novel o1"
+    );
+    println!(
+        "{:>10} | {:>7} {:>8} {:>9} | {:>7} {:>8} {:>9} | {:>7} {:>8} {:>9}",
+        "", "events", "ours", "margin", "events", "ours", "margin", "events", "ours", "margin"
+    );
+    for tb in 0..RARITY.len() {
+        let mut line = format!("{:>10} |", RARITY[tb]);
+        for (novel, s1) in [(false, true), (true, true), (true, false)] {
+            let (mut n, mut o, mut p) = (0u64, 0.0f64, 0.0f64);
+            for r in recs.iter() {
+                if r.tb as usize == tb && r.novel == novel && (!novel || r.s1 == s1) {
+                    n += 1;
+                    o += r.ours as f64;
+                    p += r.ppm[best] as f64;
+                }
+            }
+            if n == 0 {
+                line += &format!(" {:>7} {:>8} {:>9} |", 0, "-", "-");
+            } else {
+                line += &format!(
+                    " {:>7} {:>8.3} {:>+9.3} |",
+                    n,
+                    o / n as f64,
+                    (p - o) / n as f64
+                );
+            }
+        }
+        println!("{}", line.trim_end_matches('|'));
+    }
+    println!("  read across a row: same rarity of the target, different novelty of the");
+    println!("  context. equal margins mean the novel loss is rarity, not composition.");
+}
+
 #[inline]
 fn silence_ticks(g: u32, cap: usize) -> usize {
     ((32 - g.max(1).leading_zeros()).saturating_sub(1) as usize).min(cap)
@@ -174,7 +254,6 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
     // already reversed a result once: on the clinical subset the best order was
     // 1, and pinning 3 turned a 0.158-bit loss into a 0.010-bit win. So run all
     // of them and hand the baseline its best.
-    const ORDERS: usize = 6;
     let mut ppms: Vec<Ppm> = (1..=ORDERS).map(|o| Ppm::new(o, vp)).collect();
 
     // [novel?][decile]
@@ -185,6 +264,13 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
     // scored on a different population than the other.
     let mut seen_ctx: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut idx = 0usize;
+
+    // For the split below: which order-1 contexts have been seen, and how many
+    // times each token has been the target so far. Properties of the stream,
+    // shared by both models.
+    let mut seen1: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut tcount: Vec<u32> = vec![0; vp.max(1)];
+    let mut recs: Vec<Rec> = Vec::with_capacity(total);
 
     for s in streams.iter() {
         model.restore(blank.clone());
@@ -205,6 +291,9 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
                 None => true,
             };
             let dec = (idx * DECILES / total.max(1)).min(DECILES - 1);
+            let s1 = p1.map_or(false, |b| seen1.contains(&b));
+            let tb = rarity_bucket(tcount.get(tok as usize).copied().unwrap_or(0));
+            let mut pb = [0.0f32; ORDERS];
 
             for _ in 0..silence_ticks(gap, cap) {
                 model.tick(None, false);
@@ -212,16 +301,24 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
             let out = model.tick(Some(tok as usize), false);
             for (oi, p) in ppms.iter_mut().enumerate() {
                 let b = p.observe(tok);
+                pb[oi] = b as f32;
                 if out.charged {
                     theirs_all[oi][novel as usize][dec].push(b);
                 }
             }
             if out.charged {
                 ours[novel as usize][dec].push(out.bits);
+                recs.push(Rec { novel, s1, tb: tb as u8, ours: out.bits as f32, ppm: pb });
             }
 
             if let Some(c) = ctx {
                 seen_ctx.insert(c);
+            }
+            if let Some(b) = p1 {
+                seen1.insert(b);
+            }
+            if let Some(c) = tcount.get_mut(tok as usize) {
+                *c += 1;
             }
             p2 = p1;
             p1 = Some(tok);
@@ -296,10 +393,13 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
         );
     }
 
-    println!("\n  the novel column is the one that matters. a counter is flat there by");
-    println!("  construction: a context it has never seen costs what it costs however much");
-    println!("  else it holds. if our margin there grows down the deciles, that is");
-    println!("  acquisition acceleration; if it is flat or negative, the organisation claim");
-    println!("  is empty and this is an expensive counter.");
+    split_novelty(&recs, best_order);
+
+    println!("\n  the raw novel column mixes composition with rarity, and with what a");
+    println!("  counter escapes to: new order-2 contexts are mostly made of rare tokens,");
+    println!("  and a counter with a seen order-1 context escapes to a counted");
+    println!("  conditional rather than to the marginal. read the table above, not the");
+    println!("  raw column: the composition claim is the margin on novel contexts at");
+    println!("  matched rarity, against the margin on seen ones.");
     println!();
 }

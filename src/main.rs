@@ -355,8 +355,7 @@ fn main() {
             }
             if let Some(path) = out {
                 fs::write(&path, &suite.csv).expect("could not write csv");
-                println!("
-csv written to {}", path);
+                println!("\ncsv written to {}", path);
             }
         }
         other => panic!("unknown command {} (try gencheck, baseline, capacity, screen, full)", other),
