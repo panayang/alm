@@ -203,16 +203,29 @@ fn run_arm(arm: &Arm, train_episodes: usize) -> (f64, f64, f64, f64) {
 
 pub fn run(train_episodes: usize, _gap: usize) {
     let arms = [
-        Arm { name: "default (gap 2)", gap: 2, set: |_c| {} },
-        Arm { name: "gap 6", gap: 6, set: |_c| {} },
-        Arm { name: "bind_decay 0.9", gap: 2, set: |c| c.bind_decay = 0.9 },
-        Arm { name: "bind_decay 0.5", gap: 2, set: |c| c.bind_decay = 0.5 },
-        Arm { name: "bind_self", gap: 2, set: |c| c.bind_self = true },
+        Arm { name: "default", gap: 2, set: |_c| {} },
         Arm {
-            name: "no binding",
+            name: "self + lag only",
+            gap: 2,
+            set: |c| c.bind_mode = crate::config::BindMode::EventLag,
+        },
+        Arm {
+            name: "self + band only",
+            gap: 2,
+            set: |c| c.bind_mode = crate::config::BindMode::Band,
+        },
+        Arm {
+            name: "self only",
+            gap: 2,
+            set: |c| c.bind_mode = crate::config::BindMode::Off,
+        },
+        Arm { name: "no self block", gap: 2, set: |c| c.bind_self = false },
+        Arm {
+            name: "no binding at all",
             gap: 2,
             set: |c| {
                 c.use_binding = false;
+                c.bind_self = false;
                 c.bind_mode = crate::config::BindMode::Off;
             },
         },

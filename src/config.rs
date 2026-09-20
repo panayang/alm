@@ -785,7 +785,11 @@ impl Config {
         }
         let extra = if self.bind_self { 1 } else { 0 };
         match self.bind_mode {
-            BindMode::Off => 0,
+            // Off means no conjunctions, not no blocks: the lag-zero block is
+            // the event itself and does not depend on the mode. Without this,
+            // "the parts without the whole" was not expressible, and `rebind`
+            // silently skipped the self block because `binds` was empty.
+            BindMode::Off => extra,
             BindMode::EventLag => self.bind_lags + extra,
             BindMode::Band => self.rungs + extra,
             BindMode::Both => self.bind_lags + self.rungs + extra,
