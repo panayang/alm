@@ -164,6 +164,11 @@ fn main() {
         "stepsize" => {
             alm::stepsize::run(if limit > 0 { limit } else { 120_000 });
         }
+        // Can the readout answer from a part when the whole is new? The one
+        // cell PhysioNet still loses, with a known answer of zero bits.
+        "compose" => {
+            alm::compose::run(if limit > 0 { limit } else { 40_000 }, max_given.min(8));
+        }
         // Is the readout calibrated on rare tokens? The right charge on an
         // i.i.d. stream is -log2 p exactly, so the excess by rarity bucket names
         // whichever mechanism under-weights what it has seen rarely.

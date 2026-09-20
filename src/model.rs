@@ -766,6 +766,16 @@ impl Model {
         let d = self.cfg.d;
         let ex = self.emb.row(x).to_vec();
         let mut slot = 0usize;
+        // Lag zero: the event bound with the convolution identity, which is the
+        // event. See `Config::bind_self` -- the family the lag blocks form
+        // started at lag one, so the parts of a conjunction were never present
+        // alongside it.
+        if self.cfg.bind_self {
+            let mut b = ex.clone();
+            normalize(&mut b);
+            self.binds[slot] = b;
+            slot += 1;
+        }
         if matches!(self.cfg.bind_mode, BindMode::EventLag | BindMode::Both) {
             for j in 0..self.cfg.bind_lags {
                 if let Some(&prev) = self.event_hist.get(j) {

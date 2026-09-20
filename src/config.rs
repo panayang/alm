@@ -551,6 +551,42 @@ pub struct Config {
     /// superposition. If the Latin window does not move when this is switched
     /// on, the binding is not what was missing.
     pub use_binding: bool,
+    /// Give the features the event itself, not only its conjunctions.
+    ///
+    /// `rebind` fills one block per lag with `E_prev_j (*) E_x` and one per band
+    /// with `band_k (*) E_x`. Every one of them is a conjunction; not one of
+    /// them is the token. So when a pair is new, the lag blocks are
+    /// near-orthogonal to everything the readout was fitted on and contribute
+    /// nothing, the band blocks carry the cue only through a vector that drifts,
+    /// and the readout has to fall back on whatever weight the state block
+    /// happened to accumulate -- which is little, because while the pair was
+    /// familiar the conjunction predicted perfectly and the delta rule stops at
+    /// zero error.
+    ///
+    /// Measured on a stream where the answer depends on the cue alone and half
+    /// the (prev, cue) pairs are held out (48 cues, charge on first occurrence,
+    /// true conditional 0 bits):
+    ///
+    /// ```text
+    ///   arm                 seen     new    new/seen
+    ///   default           0.0339  0.4082      12.0
+    ///   gap 6             0.0353  0.3405       9.7
+    ///   bind_decay 0.9    0.0411  0.4692      11.4
+    ///   bind_decay 0.5    0.0724  0.6281       8.7
+    ///   no binding        0.0731  0.1721       2.4
+    /// ```
+    ///
+    /// A counter pays 0.0023 seen and 0.0032 new: it escapes the unseen pair
+    /// onto an order-1 conditional it has counted. Removing binding fixes the
+    /// ratio and costs the seen column, which is the trade of throwing away the
+    /// conjunction rather than completing it.
+    ///
+    /// Completing it is what this is. The convolution identity is delta, so
+    /// `E_x (*) delta = E_x`: the event on its own is the lag-zero member of the
+    /// family the lag blocks already form, and the implementation simply started
+    /// at lag one. The whole and its parts are then both present and the delta
+    /// rule can put weight wherever it pays.
+    pub bind_self: bool,
     /// Per-tick decay of the binding trace. Measured: it must be 1.0.
     ///
     /// Declared at 0.5 and referenced nowhere for the life of the project. Wired
@@ -656,6 +692,7 @@ impl Config {
             route_perturb: 0,
             write_toward_embedding: true,
             use_binding: true,
+            bind_self: true,
             bind_mode: BindMode::Both,
             bind_lags: 2,
             bind_decay: 1.0,
@@ -746,11 +783,12 @@ impl Config {
         if !self.use_binding {
             return 0;
         }
+        let extra = if self.bind_self { 1 } else { 0 };
         match self.bind_mode {
             BindMode::Off => 0,
-            BindMode::EventLag => self.bind_lags,
-            BindMode::Band => self.rungs,
-            BindMode::Both => self.bind_lags + self.rungs,
+            BindMode::EventLag => self.bind_lags + extra,
+            BindMode::Band => self.rungs + extra,
+            BindMode::Both => self.bind_lags + self.rungs + extra,
         }
     }
 

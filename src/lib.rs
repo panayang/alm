@@ -33,6 +33,7 @@ pub mod budget;
 pub mod chainmem;
 pub mod clinical;
 pub mod code;
+pub mod compose;
 pub mod config;
 
 pub mod embed;

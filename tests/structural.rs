@@ -430,9 +430,15 @@ fn the_bound_block_at_an_answer_is_the_episodes_own_conjunction() {
     let emb = alm::embed::Embeddings::new(&cfg);
     let mut m = alm::model::Model::new(cfg.clone());
 
+    // Which block is the lag-1 conjunction. `bind_self` puts the event itself
+    // in slot zero, so the conjunction sits one along -- and while we are here,
+    // the self block has a known answer too and gets checked with it.
+    let lag1 = if cfg.bind_self { 1 } else { 0 };
+
     let mut checked = 0usize;
     let mut worst = 1.0f32;
     let mut sum = 0.0f64;
+    let mut self_worst = 1.0f32;
     for t in 0..stream.len() {
         // Look before the tick is taken: the charge is settled on the features
         // standing at the top of the tick.
@@ -442,17 +448,35 @@ fn the_bound_block_at_an_answer_is_the_episodes_own_conjunction() {
                 let mut want = vec![0.0f32; cfg.d];
                 alm::num::circconv(emb.row(ep.cues[0]), emb.row(ep.cues[1]), &mut want);
                 alm::num::normalize(&mut want);
-                let got = m.bound_block(0);
+                let got = m.bound_block(lag1);
                 let cos = alm::num::dot(&want, got)
                     / (alm::num::dot(&want, &want).sqrt() * alm::num::dot(got, got).sqrt()).max(1e-9);
                 sum += cos as f64;
                 if cos < worst {
                     worst = cos;
                 }
+                if cfg.bind_self {
+                    // Slot zero is the last event bound with the convolution
+                    // identity, which is that event: here, the second cue.
+                    let mut e = emb.row(ep.cues[1]).to_vec();
+                    alm::num::normalize(&mut e);
+                    let sb = m.bound_block(0);
+                    let c = alm::num::dot(&e, sb) / alm::num::norm(sb).max(1e-9);
+                    if c < self_worst {
+                        self_worst = c;
+                    }
+                }
                 checked += 1;
             }
         }
         m.tick(stream.observe(t), false);
+    }
+    if cfg.bind_self {
+        assert!(
+            self_worst > 0.999,
+            "the lag-zero block is not the event itself: worst cosine {:.4}",
+            self_worst
+        );
     }
     assert!(checked > 50, "only {} answer ticks checked", checked);
     let mean = sum / checked as f64;
