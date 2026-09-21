@@ -36,6 +36,10 @@ fn main() {
     let mut min_info: f64 = 0.05;
     let mut budgets: Vec<usize> = vec![64 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20];
     let mut widths: Vec<usize> = vec![32, 64, 128, 256, 512, 1024, 2048];
+    // Overrides Config::local's step size, so a runner can be asked to choose
+    // it on real data rather than on the two diagnostic streams.
+    let mut eta: Option<f32> = None;
+    let mut verify_gate = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -111,6 +115,14 @@ fn main() {
                 gran = args[i + 1].clone();
                 i += 2;
             }
+            "--verify-gate" => {
+                verify_gate = true;
+                i += 1;
+            }
+            "--eta" => {
+                eta = Some(args[i + 1].parse().expect("--eta wants a number"));
+                i += 2;
+            }
             "--limit" => {
                 limit = args[i + 1].parse().expect("--limit wants a number");
                 i += 2;
@@ -143,7 +155,7 @@ fn main() {
         // whether a counter could have helped at all.
         "acquire" => {
             let dd = data.clone().expect("acquire wants --data DIR");
-            alm::acquire::run(&dd, &label, widths[0], limit, seed, max_given, bins, bankses[0]);
+            alm::acquire::run(&dd, &label, widths[0], limit, seed, max_given, bins, bankses[0], eta, verify_gate);
         }
         // The model's state read as a patient, scored on the benchmark's own
         // task against its own baselines.
@@ -168,6 +180,12 @@ fn main() {
         // cell PhysioNet still loses, with a known answer of zero bits.
         "compose" => {
             alm::compose::run(if limit > 0 { limit } else { 40_000 }, max_given.min(8));
+        }
+        // Does consolidation cost plasticity? A change-point stream whose right
+        // charge is zero on both sides, and three rules for how far a row still
+        // moves.
+        "plastic" => {
+            alm::plastic::run(if limit > 0 { limit } else { 200_000 });
         }
         // Is the readout calibrated on rare tokens? The right charge on an
         // i.i.d. stream is -log2 p exactly, so the excess by rarity bucket names

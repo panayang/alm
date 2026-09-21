@@ -48,6 +48,7 @@ pub mod num;
 pub mod partial;
 pub mod patient;
 pub mod physio;
+pub mod plastic;
 pub mod rarity;
 pub mod scan;
 pub mod store;

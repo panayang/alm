@@ -41,6 +41,15 @@
 //!
 //! # What it measures, on PhysioNet
 //!
+//! Read the following as what it is. The margin against a counter is a reading
+//! taken inside the counter's own frame -- the codelength of the next token,
+//! which is the autoregressive target function this file opens by refusing --
+//! and it is not the objective. It is useful for one thing: a margin that moves
+//! when a mechanism is repaired says the repair reached something real. It is
+//! not evidence that the architecture's own claim holds, and it must never
+//! become the thing being maximised, because a number maximised is a reward and
+//! this design has none.
+//!
 //! 3996 patients, 1733518 events, V = 296, d = 256, inside the capacity law,
 //! against PPM-C at its best order over the same stream (order 2, 4.0970 bits):
 //!
@@ -60,6 +69,11 @@
 //! appear to grow monotonically to the last decile, twice, and both times the
 //! full stream showed it flat. 175k events is entirely inside the learning
 //! phase, so a trend read at that size is a statement about the subset.
+//!
+//! What the split below is for is different and does not depend on a baseline:
+//! it says *where* a loss sits -- on rare targets, on new combinations, on
+//! neither -- and that is a question about how memory is organised, which is
+//! answerable without anyone keeping score.
 
 use std::collections::HashMap;
 
@@ -143,12 +157,28 @@ struct Rec {
     s1: bool,
     /// How often the target itself has been the target before, bucketed.
     tb: u8,
+    /// How often this exact (order-1 context, target) association has occurred
+    /// before. This is the evidence a counter escaping to order 1 actually has,
+    /// and counting it once is enough for the counter; the delta rule needs
+    /// several corrections to move the same mass.
+    o1c: u8,
     ours: f32,
     ppm: [f32; ORDERS],
 }
 
 const ORDERS: usize = 6;
 const RARITY: [&str; 5] = ["0", "1-9", "10-99", "100-999", "1000+"];
+const ASSOC: [&str; 5] = ["0", "1", "2-4", "5-19", "20+"];
+
+fn assoc_bucket(c: u32) -> usize {
+    match c {
+        0 => 0,
+        1 => 1,
+        2..=4 => 2,
+        5..=19 => 3,
+        _ => 4,
+    }
+}
 
 fn rarity_bucket(c: u32) -> usize {
     match c {
@@ -210,6 +240,41 @@ fn split_novelty(recs: &[Rec], best: usize) {
         }
         println!("{}", line.trim_end_matches('|'));
     }
+    // The cell that stays negative, opened by the evidence a counter has.
+    println!(
+        "
+-- the cell that stays negative: novel order-2, seen order-1, by how often --"
+    );
+    println!("-- this exact (order-1 context, target) association has occurred before --");
+    println!(
+        "{:>12} {:>10} {:>12} {:>12} {:>10}",
+        "assoc count", "events", "ours", format!("PPM-C o{}", best + 1), "margin"
+    );
+    for ab in 0..ASSOC.len() {
+        let (mut n, mut o, mut p) = (0u64, 0.0f64, 0.0f64);
+        for r in recs.iter() {
+            if r.novel && r.s1 && r.o1c as usize == ab {
+                n += 1;
+                o += r.ours as f64;
+                p += r.ppm[best] as f64;
+            }
+        }
+        if n == 0 {
+            continue;
+        }
+        println!(
+            "{:>12} {:>10} {:>12.3} {:>12.3} {:>+10.3}",
+            ASSOC[ab],
+            n,
+            o / n as f64,
+            p / n as f64,
+            (p - o) / n as f64
+        );
+    }
+    println!("  a counter needs one occurrence to hold an association; the delta rule");
+    println!("  needs several corrections to move the same mass. if the loss is at the");
+    println!("  low counts and gone by the high ones, that is what this cell is.");
+
     println!("  read across a row: same rarity of the target, different novelty of the");
     println!("  context. equal margins mean the novel loss is rarity, not composition.");
 }
@@ -219,7 +284,19 @@ fn silence_ticks(g: u32, cap: usize) -> usize {
     ((32 - g.max(1).leading_zeros()).saturating_sub(1) as usize).min(cap)
 }
 
-pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: usize, bins: usize, banks: usize) {
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    dir: &str,
+    label: &str,
+    d: usize,
+    patients: usize,
+    seed: u64,
+    cap: usize,
+    bins: usize,
+    banks: usize,
+    eta: Option<f32>,
+    verify_gate: bool,
+) {
     let (mut streams, _ids, vp) = flat_streams_valued(dir, bins);
     if patients > 0 && streams.len() > patients {
         streams.truncate(patients);
@@ -227,7 +304,15 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
     let total: usize = streams.iter().map(|s| s.len()).sum();
 
     println!("==================== {} ====================", label);
-    println!("patients {}   events {}   vocabulary {}   d = {}", streams.len(), total, vp, d);
+    println!(
+        "patients {}   events {}   vocabulary {}   d = {}   eta = {}   verify_gate = {}",
+        streams.len(),
+        total,
+        vp,
+        d,
+        eta.unwrap_or(Config::local().eta),
+        verify_gate
+    );
 
     let mut cfg = Config::local();
     cfg.seed = seed;
@@ -235,6 +320,10 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
     cfg.d = d;
     cfg.cleanup_floor_mult = 1.1;
     cfg.mem_banks = banks;
+    if let Some(e) = eta {
+        cfg.eta = e;
+    }
+    cfg.verify_gate = verify_gate;
     cfg.derive();
 
     // The capacity check this project derived and then never applied to this
@@ -291,6 +380,7 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
     // times each token has been the target so far. Properties of the stream,
     // shared by both models.
     let mut seen1: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut assoc: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
     let mut tcount: Vec<u32> = vec![0; vp.max(1)];
     let mut recs: Vec<Rec> = Vec::with_capacity(total);
 
@@ -315,6 +405,8 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
             let dec = (idx * DECILES / total.max(1)).min(DECILES - 1);
             let s1 = p1.map_or(false, |b| seen1.contains(&b));
             let tb = rarity_bucket(tcount.get(tok as usize).copied().unwrap_or(0));
+            let akey = p1.map(|b| (b as u64) << 32 | tok as u64);
+            let o1c = assoc_bucket(akey.and_then(|k| assoc.get(&k).copied()).unwrap_or(0));
             let mut pb = [0.0f32; ORDERS];
 
             for _ in 0..silence_ticks(gap, cap) {
@@ -330,7 +422,14 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
             }
             if out.charged {
                 ours[novel as usize][dec].push(out.bits);
-                recs.push(Rec { novel, s1, tb: tb as u8, ours: out.bits as f32, ppm: pb });
+                recs.push(Rec {
+                    novel,
+                    s1,
+                    tb: tb as u8,
+                    o1c: o1c as u8,
+                    ours: out.bits as f32,
+                    ppm: pb,
+                });
             }
 
             if let Some(c) = ctx {
@@ -338,6 +437,9 @@ pub fn run(dir: &str, label: &str, d: usize, patients: usize, seed: u64, cap: us
             }
             if let Some(b) = p1 {
                 seen1.insert(b);
+            }
+            if let Some(k) = akey {
+                *assoc.entry(k).or_insert(0) += 1;
             }
             if let Some(c) = tcount.get_mut(tok as usize) {
                 *c += 1;

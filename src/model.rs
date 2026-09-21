@@ -162,6 +162,10 @@ pub struct Model {
     last_self_token: Option<usize>,
     /// The background as it stood at the last event: the frozen half of the key.
     bands_locked: Vec<Vec<f32>>,
+    /// Whether memory actually holds the key the lag blocks are a conjunction
+    /// of. Recomputed when the event history changes, which is the only time it
+    /// can change. See `Config::verify_gate`.
+    bind_gate: f32,
     visit: Vec<f32>,
     hops: u32,
     /// The transform applied on the last tick, so the operator write is local
@@ -262,6 +266,7 @@ impl Model {
                 .collect(),
             last_self_token: None,
             bands_locked: vec![vec![0.0; d]; cfg_rungs],
+            bind_gate: 1.0,
             gnode: 0,
             visit: vec![0.0; n],
             hops: 0,
@@ -526,8 +531,25 @@ impl Model {
     fn features(&self, p: &[f32]) -> Vec<f32> {
         let mut f = Vec::with_capacity(self.cfg.feature_blocks() * self.cfg.d);
         f.extend_from_slice(p);
-        for b in self.binds.iter() {
-            f.extend_from_slice(b);
+        // The lag blocks are conjunctions of a key. When memory reports that
+        // the key was never written, what the unbinding of that address returns
+        // is a neighbour's content, and presenting it to the readout as though
+        // it were stored content is the readout leaning on something that is
+        // not there. The self block and the band blocks are unaffected: neither
+        // stands on a key.
+        let lag0 = if self.cfg.bind_self { 1 } else { 0 };
+        let lag_hi = lag0
+            + if matches!(self.cfg.bind_mode, BindMode::EventLag | BindMode::Both) {
+                self.cfg.bind_lags
+            } else {
+                0
+            };
+        for (i, b) in self.binds.iter().enumerate() {
+            if self.cfg.verify_gate && i >= lag0 && i < lag_hi && self.bind_gate == 0.0 {
+                f.extend(std::iter::repeat(0.0f32).take(b.len()));
+            } else {
+                f.extend_from_slice(b);
+            }
         }
         for k in 0..self.cfg.rungs {
             if self.cfg.event_locked_key && !self.bands_locked.is_empty() {
@@ -729,6 +751,40 @@ impl Model {
     /// Snap an unbound result to the nearest token the store has a row for, if
     /// anything is near enough. Returns false when nothing is, which is the
     /// signal that the chain has run out of links.
+    /// Does memory hold anything under this key?
+    ///
+    /// Unbind the bank the pair addresses, clean the result to a codebook
+    /// entry, bind it back and ask the bank whether that triple is there. The
+    /// three steps are the ones `step_cursors` already takes; what is new is
+    /// only that the answer reaches the features.
+    ///
+    /// This is a question about storage and not about probability. It needs no
+    /// counts, no sample space and no baseline -- an address was written or it
+    /// was not, and one convolution and one dot product settle it.
+    fn key_is_written(&self, prev2: usize, prev: usize) -> bool {
+        if !self.cfg.superpose || self.mem.is_empty() {
+            return true;
+        }
+        let d = self.cfg.d;
+        let mut q = vec![0.0f32; d];
+        crate::num::circconv(self.emb.row(prev2), self.emb.row(prev), &mut q);
+        normalize(&mut q);
+        let bank = self.bank_of_ids(prev2, prev);
+        let mut raw = vec![0.0f32; d];
+        crate::num::unbind(&self.mem[bank], &q, &mut raw);
+        normalize(&mut raw);
+        let mut clean = Vec::new();
+        let (ok, _, _) = self.cleanup(&raw, &mut clean);
+        if !ok {
+            return false;
+        }
+        let mut back = vec![0.0f32; d];
+        crate::num::circconv(&q, &clean, &mut back);
+        normalize(&mut back);
+        let mn = crate::num::norm(&self.mem[bank]).max(1e-9);
+        crate::num::dot(&self.mem[bank], &back) / mn >= self.cfg.verify_min()
+    }
+
     fn cleanup(&self, v: &[f32], out: &mut Vec<f32>) -> (bool, f32, usize) {
         let mut best = (self.cfg.cleanup_min_cos(), usize::MAX);
         let mut raw_best = 0.0f32;
@@ -800,6 +856,17 @@ impl Model {
         }
         self.event_hist.insert(0, x);
         self.event_hist.truncate(self.cfg.bind_lags.max(1));
+        // The key the lag blocks stand on has just changed, and it cannot
+        // change again until the world speaks again.
+        self.bind_gate = if !self.cfg.verify_gate {
+            1.0
+        } else {
+            match (self.event_hist.first().copied(), self.prev2) {
+                (Some(p1), Some(p2)) if self.key_is_written(p2, p1) => 1.0,
+                (Some(_), Some(_)) => 0.0,
+                _ => 1.0,
+            }
+        };
     }
 
     // ---- the walk --------------------------------------------------------

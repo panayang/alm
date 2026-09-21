@@ -22,6 +22,34 @@
 /// like.
 ///
 /// The two clean alternatives answer different questions, so both are here:
+/// How much a row still moves, and what decides it.
+///
+/// The delta rule already stops *pulling* when it is right -- `err` goes to
+/// zero -- but the step never shrinks, so a settled row keeps being shaken by
+/// the noise in every other event it appears in as a negative. Something has to
+/// say when a row is settled. What says it is the question.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StepRule {
+    /// One step size for every row, forever. Converges to a hover whose width
+    /// is set by `eta`.
+    Fixed,
+    /// `eta / (1 + corrections)`. This is not consolidation, it is frequency:
+    /// 1/n is exactly the weight that makes a running estimate the empirical
+    /// mean, so it relocates the counted prior from the emission into the step
+    /// size. It is also irreversible -- n only grows -- so a row that settles
+    /// on a world that then changes can never move again. Here to be measured,
+    /// not to be adopted.
+    InverseCount,
+    /// `eta * (running mean of |err| for this row)`. Consolidation measured by
+    /// whether the row is still wrong rather than by how often it has been
+    /// touched, which is what `store.rs` says a row is for. A row that keeps
+    /// being corrected stays plastic however many times it has been written; a
+    /// row whose error has gone silent takes small steps. The running mean is
+    /// updated from the raw error, not the scaled one, so when the world
+    /// changes the error returns, the mean rises, and the step grows back.
+    ErrorDriven,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BindMode {
     Off,
@@ -587,6 +615,38 @@ pub struct Config {
     /// at lag one. The whole and its parts are then both present and the delta
     /// rule can put weight wherever it pays.
     pub bind_self: bool,
+    /// Let the features say when a conjunction stands on nothing.
+    ///
+    /// A lag block is `E_prev_j (*) E_x`: a conjunction whose pair also names
+    /// the memory bank that pair's triples were written into. When that pair
+    /// was never written, unbinding the address does not return nothing -- it
+    /// returns a neighbour's content, at a strength the emission cannot
+    /// distinguish from stored content. That is address crowding, it is this
+    /// family's named weakness, and the design already carries the answer:
+    /// bind the retrieved candidate back onto the key and ask the bank whether
+    /// that triple is there.
+    ///
+    /// The check was wired to the walk -- `step_cursors` refuses a cursor that
+    /// fails it -- and never to the emission. Measured on the composition
+    /// stream, the read-back score for the pair the model is standing on is
+    /// 0.9311 when that pair was written and 0.0160 when it was not, against a
+    /// chance floor of 0.0884 and an acceptance threshold of 0.3536. The
+    /// separation is total, and the emission was throwing it away.
+    ///
+    /// So the lag blocks are zeroed when the key does not verify. The self
+    /// block and the band blocks are untouched, because neither stands on a
+    /// key.
+    ///
+    /// This is a claim about storage, not about frequency: the question is
+    /// whether an address was written, which one convolution settles, and it
+    /// would be the right thing to do even if it cost codelength. The
+    /// assertion that guards it is written in those terms and mentions no bits.
+    pub verify_gate: bool,
+    /// See `StepRule`. Fixed until a change-point measurement says otherwise.
+    pub step_rule: StepRule,
+    /// Floor on the error-driven step, so a settled row is never frozen
+    /// outright and can always feel a world that has changed.
+    pub step_floor: f32,
     /// Per-tick decay of the binding trace. Measured: it must be 1.0.
     ///
     /// Declared at 0.5 and referenced nowhere for the life of the project. Wired
@@ -693,6 +753,9 @@ impl Config {
             write_toward_embedding: true,
             use_binding: true,
             bind_self: true,
+            verify_gate: true,
+            step_rule: StepRule::Fixed,
+            step_floor: 0.02,
             bind_mode: BindMode::Both,
             bind_lags: 2,
             bind_decay: 1.0,

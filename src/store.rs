@@ -33,7 +33,7 @@
 
 use std::collections::HashMap;
 
-use crate::config::Config;
+use crate::config::{Config, StepRule};
 use crate::num::Running;
 
 pub struct Store {
@@ -58,6 +58,13 @@ pub struct Store {
     pub row_cap: f32,
     /// See `Config::row_decay`. Zero disables.
     pub row_decay: f32,
+    /// Per row: how many corrections it has had, and the running mean of the
+    /// size of those corrections. Neither reaches the emitted distribution --
+    /// they decide only how far a row still moves. See `StepRule`.
+    pub step_rule: StepRule,
+    pub step_floor: f32,
+    corrections: Vec<u32>,
+    err_ema: Vec<f32>,
     row_index: HashMap<u32, usize>,
     /// The same token ids as `rows`, kept as a slice so a hot loop does not have
     /// to rebuild them. `known()` allocated a fresh Vec of every known token on
@@ -119,6 +126,11 @@ impl Calibration {
     }
 }
 
+/// How fast a row's error history forgets. Slow enough that one lucky event
+/// does not unsettle a row, fast enough that a changed world is felt within a
+/// few dozen corrections.
+const ERR_EMA_RATE: f32 = 0.05;
+
 impl Store {
     pub fn new(cfg: &Config) -> Self {
         Store {
@@ -130,6 +142,10 @@ impl Store {
             use_bias: cfg.readout_bias,
             row_cap: cfg.row_norm_cap,
             row_decay: cfg.row_decay,
+            step_rule: cfg.step_rule,
+            step_floor: cfg.step_floor,
+            corrections: Vec::new(),
+            err_ema: Vec::new(),
             row_index: HashMap::new(),
             known_toks: Vec::new(),
             answer_calib: Calibration::new(cfg.calib_bins),
@@ -153,6 +169,9 @@ impl Store {
         let fw = self.fw;
         self.row_index.insert(tok, self.rows.len());
         self.known_toks.push(tok);
+        self.corrections.push(0);
+        // A row starts fully plastic: it has no error history to be settled by.
+        self.err_ema.push(1.0);
         self.rows.push((tok, vec![0.0; fw]));
         let i = self.rows.len() - 1;
         &mut self.rows[i].1
@@ -193,6 +212,22 @@ impl Store {
             let q = sc.prob_of(self, t);
             let err = if t == target { 1.0 - q } else { -q };
             let cap = self.row_cap;
+            // How far this row still moves. Both rules are bookkeeping about
+            // the row's own history of being wrong; neither is a term in the
+            // distribution the ledger charges.
+            let idx = self.row_index.get(&t).copied();
+            let scale = match self.step_rule {
+                StepRule::Fixed => 1.0,
+                StepRule::InverseCount => {
+                    let n = idx.map(|i| self.corrections[i]).unwrap_or(0);
+                    1.0 / (1.0 + n as f32)
+                }
+                StepRule::ErrorDriven => {
+                    let e = idx.map(|i| self.err_ema[i]).unwrap_or(1.0);
+                    e.max(self.step_floor)
+                }
+            };
+            let eta = eta * scale;
             if self.use_bias {
                 if let Some(b) = self.bias.get_mut(t as usize) {
                     *b += eta * err;
@@ -222,6 +257,18 @@ impl Store {
                         *x *= k;
                     }
                 }
+            }
+
+            // The row's own history of being wrong, updated from the raw error
+            // and not the scaled one. That is what lets the error-driven rule
+            // come back: a settled row whose world changes starts being wrong
+            // again, its mean rises, and its step grows with it. A count
+            // cannot do this, which is the whole difference between the two
+            // rules and the reason both are here.
+            if let Some(i) = self.row_index.get(&t).copied() {
+                self.corrections[i] = self.corrections[i].saturating_add(1);
+                let a = ERR_EMA_RATE;
+                self.err_ema[i] = (1.0 - a) * self.err_ema[i] + a * err.abs();
             }
         }
     }

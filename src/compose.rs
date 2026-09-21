@@ -109,6 +109,63 @@ struct Arm {
     name: &'static str,
     gap: usize,
     set: fn(&mut Config),
+    report_verify: bool,
+}
+
+/// Does memory know whether it holds what it is about to say?
+///
+/// The read-back check already exists and is already wired -- `step_cursors`
+/// uses it to refuse a cursor whose retrieval came from a neighbouring address
+/// rather than from something written. It is not wired to the emission. At the
+/// tick the world speaks, the score is `row . phi + codebook * <E_t, p>` and
+/// nothing in it has asked whether this key was ever written at all.
+///
+/// That question is not the counter's question. A counter backs off because it
+/// lacks the samples to estimate a conditional; this asks memory for a fact
+/// about storage, answerable in one convolution and one dot product, and it
+/// needs no ground truth -- only a candidate, which the emission already has.
+///
+/// So: take the model's own top-1 at the answer tick, bind it back onto the
+/// pair's key, and ask the bank whether that triple is there. If the score
+/// separates a candidate that is right from one that is wrong, there is a
+/// signal the emission is currently throwing away.
+struct Verify {
+    n: u64,
+    sum: f64,
+    /// How many fell below the acceptance threshold. On a pair that *was*
+    /// written this is a false negative, and it is what makes the gate cost
+    /// anything on familiar pairs.
+    below: u64,
+}
+
+impl Verify {
+    fn push(&mut self, x: f64, min: f64) {
+        self.n += 1;
+        self.sum += x;
+        if x < min {
+            self.below += 1;
+        }
+    }
+    fn mean(&self) -> f64 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.sum / self.n as f64
+        }
+    }
+}
+
+fn readback(m: &Model, prev2: usize, prev: usize, cand: usize) -> f32 {
+    let d = m.cfg.d;
+    let mut q = vec![0.0f32; d];
+    crate::num::circconv(m.emb.row(prev2), m.emb.row(prev), &mut q);
+    crate::num::normalize(&mut q);
+    let mut back = vec![0.0f32; d];
+    crate::num::circconv(&q, m.emb.row(cand), &mut back);
+    crate::num::normalize(&mut back);
+    let bank = m.bank_of_ids(prev2, prev);
+    let mn = crate::num::norm(&m.mem[bank]).max(1e-9);
+    crate::num::dot(&m.mem[bank], &back) / mn
 }
 
 /// (ours seen, ours novel, best counter seen, best counter novel).
@@ -147,6 +204,10 @@ fn run_arm(arm: &Arm, train_episodes: usize) -> (f64, f64, f64, f64) {
     let total = train_episodes + test.len();
     let first_test = train_episodes / 2;
     let mut next_test = 0usize;
+    // [novel pair?][top-1 was right?]
+    let z = || Verify { n: 0, sum: 0.0, below: 0 };
+    let mut ver = [[z(), z()], [z(), z()]];
+    let vmin = model.cfg.verify_min() as f64;
 
     for e in 0..total {
         // After the training half, interleave one held-out pair every few
@@ -179,6 +240,15 @@ fn run_arm(arm: &Arm, train_episodes: usize) -> (f64, f64, f64, f64) {
             for _ in 0..gap {
                 model.tick(None, false);
             }
+            if scored && e >= first_test {
+                // The model's own answer, before it is told, and what memory
+                // says about it under this pair's key.
+                if let Some((t, _)) = model.spread_now().top() {
+                    let sc = readback(&model, p0 + i, q0 + j, t as usize) as f64;
+                    let right = t as usize == z;
+                    ver[novel as usize][right as usize].push(sc, vmin);
+                }
+            }
             let out = model.tick(Some(tok), false);
             for (oi, pp) in ppms.iter_mut().enumerate() {
                 let b = pp.observe(tok as u32);
@@ -198,28 +268,69 @@ fn run_arm(arm: &Arm, train_episodes: usize) -> (f64, f64, f64, f64) {
             best = oi;
         }
     }
+    if arm.report_verify {
+        println!(
+            "
+-- read-back: does memory hold what the model is about to say? (floor 1/sqrt(d) = {:.4}, accept >= {:.4}) --",
+            1.0 / (model.cfg.d as f64).sqrt(),
+            model.cfg.verify_min()
+        );
+        println!(
+            "{:>18} {:>10} {:>12} {:>14}",
+            "pair", "n", "mean score", "below accept"
+        );
+        for (k, name) in [(0usize, "written"), (1, "never written")] {
+            let n = ver[k][0].n + ver[k][1].n;
+            let sum = ver[k][0].sum + ver[k][1].sum;
+            let below = ver[k][0].below + ver[k][1].below;
+            println!(
+                "{:>18} {:>10} {:>12.4} {:>13.1}%",
+                name,
+                n,
+                if n == 0 { 0.0 } else { sum / n as f64 },
+                100.0 * below as f64 / n.max(1) as f64
+            );
+        }
+        println!("  a written pair below the threshold is a false negative: the gate zeroes");
+        println!("  a conjunction that memory does hold, which is what it costs on familiar");
+        println!("  pairs.");
+    }
     (ours[0].mean(), ours[1].mean(), theirs[best][0].mean(), theirs[best][1].mean())
 }
 
 pub fn run(train_episodes: usize, _gap: usize) {
     let arms = [
-        Arm { name: "default", gap: 2, set: |_c| {} },
+        Arm { name: "default", gap: 2, set: |_c| {}, report_verify: true },
+        Arm {
+            name: "verify gate",
+            gap: 2,
+            set: |c| c.verify_gate = true,
+            report_verify: false,
+        },
         Arm {
             name: "self + lag only",
             gap: 2,
             set: |c| c.bind_mode = crate::config::BindMode::EventLag,
+            report_verify: false,
         },
         Arm {
             name: "self + band only",
             gap: 2,
             set: |c| c.bind_mode = crate::config::BindMode::Band,
+            report_verify: false,
         },
         Arm {
             name: "self only",
             gap: 2,
             set: |c| c.bind_mode = crate::config::BindMode::Off,
+            report_verify: false,
         },
-        Arm { name: "no self block", gap: 2, set: |c| c.bind_self = false },
+        Arm {
+            name: "no self block",
+            gap: 2,
+            set: |c| c.bind_self = false,
+            report_verify: false,
+        },
         Arm {
             name: "no binding at all",
             gap: 2,
@@ -228,6 +339,7 @@ pub fn run(train_episodes: usize, _gap: usize) {
                 c.bind_self = false;
                 c.bind_mode = crate::config::BindMode::Off;
             },
+            report_verify: false,
         },
     ];
     println!("compose: z = f(cue), independent of what preceded the cue.");

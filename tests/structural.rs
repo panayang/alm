@@ -329,9 +329,16 @@ fn the_operator_memory_is_not_inert() {
 /// A silent truncation like this produces a plausible null rather than an error.
 #[test]
 fn every_feature_block_is_read_and_written() {
-    let cfg = Config::local();
+    // This is a question about allocation: is every block a block something
+    // fills. `verify_gate` legitimately zeroes the lag blocks when memory says
+    // their key was never written, which would mask a block that nothing fills
+    // ever -- so the allocation check runs with the gate off, and the gated
+    // behaviour has its own assertion elsewhere.
+    let mut cfg = Config::local();
+    cfg.verify_gate = false;
+    cfg.derive();
     let expect = cfg.feature_blocks() * cfg.d;
-    let mut m = Model::new(Config::local());
+    let mut m = Model::new(cfg.clone());
     warm(&mut m, 120);
     let phi = m.features_now();
     assert_eq!(phi.len(), expect, "features() and the row width disagree");
@@ -343,6 +350,33 @@ fn every_feature_block_is_read_and_written() {
         assert!(
             blk.iter().any(|x| x.abs() > 1e-9),
             "feature block {} is entirely zero after warm-up",
+            b
+        );
+    }
+
+    // And with the gate on, a key memory *does* hold must leave every block
+    // present. Otherwise the gate is not suppressing an unwritten conjunction,
+    // it is suppressing the lag blocks generally.
+    let mut on = Config::local();
+    on.verify_gate = true;
+    on.derive();
+    let mut g = Model::new(on.clone());
+    for _ in 0..200 {
+        for t in [21usize, 33, 47] {
+            g.tick(Some(t), false);
+            g.tick(None, false);
+        }
+    }
+    // Stand on a pair this stream has written many times.
+    g.tick(Some(21), false);
+    g.tick(None, false);
+    g.tick(Some(33), false);
+    let phi = g.features_now();
+    for b in 0..on.feature_blocks() {
+        let blk = &phi[b * on.d..(b + 1) * on.d];
+        assert!(
+            blk.iter().any(|x| x.abs() > 1e-9),
+            "with the gate on, block {} is zero for a pair memory has written many times",
             b
         );
     }
@@ -1665,5 +1699,91 @@ fn the_readout_does_not_write_off_what_it_has_seen_rarely() {
         "a truncated write was expected to write off rare tokens and did not ({:.3}); \
          the instrument has lost its sensitivity",
         r16 - c16
+    );
+}
+
+/// Feed `pairs` as (prev2, prev, next) episodes, then stand the model on
+/// (a, b) and return the L2 norm of the lag-block region of its features.
+///
+/// The lag blocks sit after the state block and after the lag-zero self block,
+/// and there are `bind_lags` of them.
+fn lag_block_norm(cfg: &Config, pairs: &[(usize, usize, usize)], a: usize, b: usize) -> f32 {
+    let mut m = Model::new(cfg.clone());
+    for _ in 0..40 {
+        for &(p2, p1, z) in pairs.iter() {
+            for t in [p2, p1, z] {
+                m.tick(Some(t), false);
+                m.tick(None, false);
+                m.tick(None, false);
+            }
+        }
+    }
+    // Stand on the pair without telling the model anything else.
+    m.tick(Some(a), false);
+    m.tick(None, false);
+    m.tick(Some(b), false);
+    let f = m.features_now();
+    let d = cfg.d;
+    let lo = d + if cfg.bind_self { d } else { 0 };
+    let hi = lo + cfg.bind_lags * d;
+    alm::num::norm(&f[lo..hi.min(f.len())])
+}
+
+#[test]
+fn the_features_do_not_present_a_conjunction_that_memory_never_stored() {
+    // A lag block is a conjunction whose pair also names the bank that pair's
+    // triples were written into. When the pair was never written, unbinding
+    // that address does not return nothing -- it returns a neighbour's content,
+    // at a strength the emission cannot tell from stored content. The design
+    // already answers this: bind the candidate back onto the key and ask the
+    // bank whether the triple is there, which `step_cursors` does and the
+    // emission did not.
+    //
+    // This assertion is about storage and mentions no codelength on purpose.
+    // The claim is that the features must not offer the readout a conjunction
+    // standing on an address memory can say was never written, and that claim
+    // would hold whatever it did to any charge.
+    let mut cfg = Config::local();
+    cfg.seed = 0x6A7E;
+    cfg.vocab = 64;
+    cfg.d = 128;
+    cfg.mem_banks = 4096;
+    cfg.cleanup_floor_mult = 1.1;
+    cfg.verify_gate = true;
+    cfg.derive();
+
+    // Four pairs are written; the fifth shares both its tokens with them and
+    // has never occurred as a pair, so nothing distinguishes it except whether
+    // memory holds that address.
+    let written = [(3usize, 11usize, 40usize), (4, 12, 41), (5, 13, 42), (6, 14, 43)];
+    let seen = lag_block_norm(&cfg, &written, 3, 11);
+    let unseen = lag_block_norm(&cfg, &written, 3, 14);
+
+    let mut off = cfg.clone();
+    off.verify_gate = false;
+    off.derive();
+    let seen_off = lag_block_norm(&off, &written, 3, 11);
+    let unseen_off = lag_block_norm(&off, &written, 3, 14);
+
+    println!(
+        "lag-block norm   gate on: written {:.4} unwritten {:.4}   gate off: written {:.4} unwritten {:.4}",
+        seen, unseen, seen_off, unseen_off
+    );
+    assert!(
+        unseen == 0.0,
+        "the features still carry a conjunction for a pair memory never stored: norm {:.4}",
+        unseen
+    );
+    assert!(
+        seen > 0.5,
+        "the gate also suppressed a pair that was written: norm {:.4}",
+        seen
+    );
+    assert!(
+        unseen_off > 0.5 && seen_off > 0.5,
+        "with the gate off both must be present, or this measures the wrong thing: \
+         written {:.4} unwritten {:.4}",
+        seen_off,
+        unseen_off
     );
 }
