@@ -38,6 +38,28 @@
 //! costs, no matter how much else it has stored. If ours falls as experience
 //! accumulates, that is acquisition acceleration, and it is the thing the
 //! founding note was about.
+//!
+//! # What it measures, on PhysioNet
+//!
+//! 3996 patients, 1733518 events, V = 296, d = 256, inside the capacity law,
+//! against PPM-C at its best order over the same stream (order 2, 4.0970 bits):
+//!
+//! ```text
+//!                    ours      PPM      margin
+//!   overall        3.3842   4.0970      +0.713
+//!   seen context   3.3490   4.0698      +0.721
+//!   novel context  5.6695   5.8333      +0.164
+//! ```
+//!
+//! It is not acceleration. Both columns settle by the second decile and hold:
+//! seen runs +0.76 +0.74 +0.73 +0.73 +0.73 +0.74 +0.69 +0.71 +0.71, novel rises
+//! to +0.30 and comes back to +0.14 with no trend. What the measurement says is
+//! that we converge 0.71 bits below a counter and stay there.
+//!
+//! A warning that cost two rounds to learn: on a 400-patient subset both columns
+//! appear to grow monotonically to the last decile, twice, and both times the
+//! full stream showed it flat. 175k events is entirely inside the learning
+//! phase, so a trend read at that size is a statement about the subset.
 
 use std::collections::HashMap;
 
