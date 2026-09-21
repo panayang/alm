@@ -53,6 +53,21 @@ use crate::model::Model;
 
 /// Standardise columns, then L2-regularised logistic regression by plain
 /// gradient descent. Weak on purpose.
+pub fn logistic_pub(
+    x: &[Vec<f32>],
+    y: &[u8],
+    train: &[usize],
+    test: &[usize],
+    l2: f64,
+    iters: usize,
+) -> Vec<f64> {
+    logistic(x, y, train, test, l2, iters)
+}
+
+pub fn auroc_pub(score: &[f64], label: &[u8]) -> f64 {
+    auroc(score, label)
+}
+
 fn logistic(x: &[Vec<f32>], y: &[u8], train: &[usize], test: &[usize], l2: f64, iters: usize)
     -> Vec<f64> {
     let d = x[0].len();
@@ -97,8 +112,24 @@ fn logistic(x: &[Vec<f32>], y: &[u8], train: &[usize], test: &[usize], l2: f64, 
             }
         }
         let n = train.len() as f64;
+        // Shrinkage as the proximal step, not as an explicit decay term.
+        //
+        // `w -= lr * (grad + l2 * w)` multiplies the weight by `1 - lr*l2` each
+        // iteration, which passes through zero at l2 = 2/lr and reverses sign
+        // beyond it. At lr 0.5 that made the top of the sweep unusable: l2 = 4
+        // scored 0.3999 and l2 = 10 scored 0.2972 -- an anti-predictor, not a
+        // regularised one -- and l2 = 100 produced NaN and brought the
+        // instrument down inside `auroc`. The sweep never selected those
+        // values, so no wrong number was reported, but the usable ceiling was
+        // 1.0 while the grid claimed 10, and a set needing more regularisation
+        // than that could not reach it.
+        //
+        // The proximal form divides instead: stable for every non-negative l2,
+        // and monotone toward zero weights as l2 grows, which is what "more
+        // regularisation" is supposed to mean.
+        let shrink = 1.0 / (1.0 + lr * l2);
         for j in 0..d {
-            w[j] -= lr * (gw[j] / n + l2 * w[j]);
+            w[j] = (w[j] - lr * gw[j] / n) * shrink;
         }
         b -= lr * gb / n;
     }
@@ -142,7 +173,9 @@ fn auroc(score: &[f64], label: &[u8]) -> f64 {
 /// way, which is impossible for an information reason and was overfitting.
 fn cv_auroc_swept(x: &[Vec<f32>], y: &[u8], ids: &[u32], iters: usize) -> (f64, f64) {
     let mut best = (0.0f64, 0.0f64);
-    for &l2 in [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0].iter() {
+    // Reaching high enough to regularise a wide sparse set, which the old grid
+    // could not: its top two values diverged rather than shrank.
+    for &l2 in [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0, 1000.0].iter() {
         let a = cv_auroc(x, y, ids, l2, iters);
         if a > best.0 {
             best = (a, l2);
@@ -175,6 +208,7 @@ fn silence_ticks(g: u32, cap: usize) -> usize {
     ((32 - g.max(1).leading_zeros()).saturating_sub(1) as usize).min(cap)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     dir: &str,
     outcomes: &str,
@@ -185,6 +219,7 @@ pub fn run(
     cap: usize,
     bins: usize,
     valued: bool,
+    dump: Option<&str>,
 ) {
     let (mut streams, mut ids, vp) = if valued {
         flat_streams_valued(dir, bins)
@@ -354,6 +389,50 @@ pub fn run(
         .zip(f_order.iter())
         .map(|(a, b)| a.iter().chain(b.iter()).copied().collect())
         .collect();
+
+    // Writing the representation out, so probing it does not cost the tick
+    // loop again.
+    //
+    // Every sweep of a probe hyperparameter used to mean rebuilding 2.5M ticks
+    // of state -- four and a half hours to answer a question about a logistic
+    // regression. That makes the rule this project runs on unaffordable in
+    // practice: both sides sweep their own hyperparameters or the number is not
+    // reported. Producing the representation is expensive and deterministic;
+    // probing it is cheap and is where the hyperparameters live. They are now
+    // separate.
+    if let Some(p) = dump {
+        let sets: Vec<(&str, &Vec<Vec<f32>>)> = vec![
+            ("last", &f_last),
+            ("mean", &f_mean),
+            ("max", &f_max),
+            ("summary", &f_summary),
+            ("order", &f_order),
+            ("both", &f_both),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend((keep_ids.len() as u64).to_le_bytes());
+        buf.extend((sets.len() as u64).to_le_bytes());
+        for i in keep_ids.iter() {
+            buf.extend(i.to_le_bytes());
+        }
+        for l in y.iter() {
+            buf.push(*l);
+        }
+        for (name, m) in sets.iter() {
+            let nb = name.as_bytes();
+            buf.extend((nb.len() as u64).to_le_bytes());
+            buf.extend(nb);
+            let d = m.first().map(|r| r.len()).unwrap_or(0);
+            buf.extend((d as u64).to_le_bytes());
+            for row in m.iter() {
+                for v in row.iter() {
+                    buf.extend(v.to_le_bytes());
+                }
+            }
+        }
+        std::fs::write(p, &buf).unwrap_or_else(|e| panic!("{}: {}", p, e));
+        println!("representation written to {} ({:.1} MB)", p, buf.len() as f64 / 1e6);
+    }
 
     let (a_last, l2_last) = cv_auroc_swept(&f_last, &y, &keep_ids, 300);
     let (a_sum, l2_sum) = cv_auroc_swept(&f_summary, &y, &keep_ids, 300);

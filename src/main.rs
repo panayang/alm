@@ -40,6 +40,7 @@ fn main() {
     // it on real data rather than on the two diagnostic streams.
     let mut eta: Option<f32> = None;
     let mut verify_gate = false;
+    let mut held: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -115,6 +116,10 @@ fn main() {
                 gran = args[i + 1].clone();
                 i += 2;
             }
+            "--held" => {
+                held = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--verify-gate" => {
                 verify_gate = true;
                 i += 1;
@@ -162,7 +167,18 @@ fn main() {
         "patient" => {
             let dd = data.clone().expect("patient wants --data DIR");
             let o = out.clone().expect("patient wants --out OUTCOMES.txt");
-            alm::patient::run(&dd, &o, &label, widths[0], limit, seed, max_given, bins, gran == "paramval");
+            alm::patient::run(
+                &dd,
+                &o,
+                &label,
+                widths[0],
+                limit,
+                seed,
+                max_given,
+                bins,
+                gran == "paramval",
+                trace.as_deref(),
+            );
         }
         // The tick loop on a real irregular stream. The first time the model
         // runs on a source it was not written for.
@@ -180,6 +196,23 @@ fn main() {
         // cell PhysioNet still loses, with a known answer of zero bits.
         "compose" => {
             alm::compose::run(if limit > 0 { limit } else { 40_000 }, max_given.min(8));
+        }
+        // Sweep a probe's hyperparameters against a representation that was
+        // produced once, so the sweep costs minutes instead of hours.
+        "probe" => {
+            let f = data.expect("probe wants --data DUMPFILE");
+            alm::probe::run(&f);
+        }
+        // Is there anything left in this data that we have not taken? Replay
+        // three quarters of the patients, read only the quarter held back.
+        "epochs" => {
+            let dd = data.clone().expect("epochs wants --data DIR");
+            match held.clone() {
+                Some(h) => alm::epochs::run_held(
+                    &dd, &h, widths[0], limit, seed, max_given, bins, bankses[0],
+                ),
+                None => alm::epochs::run(&dd, widths[0], limit, seed, max_given, bins, bankses[0]),
+            }
         }
         // Does consolidation cost plasticity? A change-point stream whose right
         // charge is zero on both sides, and three rules for how far a row still

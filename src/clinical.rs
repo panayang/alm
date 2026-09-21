@@ -676,7 +676,117 @@ pub fn flat_streams_ids(dir: &str) -> (Vec<Vec<(u32, u32)>>, Vec<u32>, usize) {
 /// so it is preprocessing of the kind the baselines also do rather than
 /// something the model learned. PhysioNet writes -1 for a missing value, which
 /// is not a measurement and is dropped.
+/// The tokenisation itself: which parameter is which id, and where each
+/// parameter's quantile cuts fall.
+///
+/// This has to be separable from the reading, because both are derived from
+/// whatever directory is passed. Parameter ids are handed out in file-encounter
+/// order and the cuts are quantiles of that directory's values, so a second set
+/// of records tokenised on its own terms produces ids that mean something else
+/// and bins that fall somewhere else. Two runs compared across that boundary
+/// would be comparing nothing, and nothing in the numbers would say so.
+#[derive(Clone)]
+pub struct Vocab {
+    pub param_id: HashMap<String, u32>,
+    pub cuts: Vec<Vec<f64>>,
+    pub bins: usize,
+}
+
+impl Vocab {
+    pub fn size(&self) -> usize {
+        self.param_id.len() * self.bins
+    }
+}
+
+/// Read a directory under a vocabulary built elsewhere.
+///
+/// Returns the streams, their record ids, and how many readings were dropped
+/// because their parameter is not in that vocabulary -- a number worth printing
+/// rather than swallowing.
+pub fn flat_streams_under(
+    dir: &str,
+    vocab: &Vocab,
+) -> (Vec<Vec<(u32, u32)>>, Vec<u32>, usize) {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {}", dir, e))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    files.sort();
+    let bins = vocab.bins;
+    let mut streams = Vec::new();
+    let mut ids = Vec::new();
+    let mut dropped = 0usize;
+    for path in files.iter() {
+        let body = match std::fs::read_to_string(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let rid: u32 = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        let mut last_t = 0u32;
+        let mut n = 0usize;
+        for (i, line) in body.lines().enumerate() {
+            if i == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split(',').collect();
+            if f.len() < 3 {
+                continue;
+            }
+            let (hh, mm) = match f[0].split_once(':') {
+                Some((a, b)) => (a.parse::<u32>().unwrap_or(0), b.parse::<u32>().unwrap_or(0)),
+                None => continue,
+            };
+            let t = hh * 60 + mm;
+            if t == 0 {
+                continue;
+            }
+            let v: f64 = match f[2].trim().parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v < 0.0 {
+                continue;
+            }
+            let pid = match vocab.param_id.get(f[1]) {
+                Some(p) => *p,
+                None => {
+                    dropped += 1;
+                    continue;
+                }
+            };
+            let b = vocab.cuts[pid as usize].iter().filter(|&&c| v > c).count().min(bins - 1);
+            out.push((t.saturating_sub(last_t), pid * bins as u32 + b as u32));
+            last_t = t;
+            n += 1;
+        }
+        if n >= 3 {
+            streams.push(out);
+            ids.push(rid);
+        }
+    }
+    (streams, ids, dropped)
+}
+
+/// Build the vocabulary from a directory, without reading it into streams.
+pub fn build_vocab(dir: &str, bins: usize) -> Vocab {
+    let (_, _, _, vocab) = flat_streams_valued_inner(dir, bins);
+    vocab
+}
+
 pub fn flat_streams_valued(dir: &str, bins: usize) -> (Vec<Vec<(u32, u32)>>, Vec<u32>, usize) {
+    let (s, i, v, _) = flat_streams_valued_inner(dir, bins);
+    (s, i, v)
+}
+
+fn flat_streams_valued_inner(
+    dir: &str,
+    bins: usize,
+) -> (Vec<Vec<(u32, u32)>>, Vec<u32>, usize, Vocab) {
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("{}: {}", dir, e))
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -760,5 +870,6 @@ pub fn flat_streams_valued(dir: &str, bins: usize) -> (Vec<Vec<(u32, u32)>>, Vec
         ids.push(rid);
     }
     let v = param_id.len() * bins;
-    (streams, ids, v)
+    let vocab = Vocab { param_id, cuts, bins };
+    (streams, ids, v, vocab)
 }

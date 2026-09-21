@@ -1787,3 +1787,182 @@ fn the_features_do_not_present_a_conjunction_that_memory_never_stored() {
         unseen_off
     );
 }
+
+#[test]
+fn the_probe_is_converged_at_the_width_it_is_read_at() {
+    // The patient readout scores every feature set with the same 300 steps of
+    // full-batch gradient descent. Full-batch descent converges at a rate set
+    // by the conditioning of the features, and the sets differ by two orders of
+    // magnitude in width: a few dozen columns for the count-and-gap control,
+    // 2560 for the model state. If 300 steps settles one and not the other, the
+    // comparison is between two amounts of optimisation, and the bias runs one
+    // way -- always toward the narrower set.
+    //
+    // There is a symptom on record: adding bigrams to counts lowered the score
+    // from 0.7936 to 0.7544. A wider set contains the narrower one, so that
+    // cannot happen for an information reason, and the regularisation sweep it
+    // was blamed on chose an interior value.
+    //
+    // So plant a signal a linear probe can find, at the width the instrument
+    // actually reads, and require that the score at the reported iteration
+    // count is the score the representation deserves. This is a statement about
+    // the probe, not about any model.
+    // Correlated columns, because that is the variable. Independent columns
+    // give a covariance near the identity and full-batch descent walks them in
+    // a handful of steps whatever the width -- measured at 0.7180 for both 300
+    // and 3000 iterations at width 2560, which is why width alone was the wrong
+    // thing to test. A recurrent state is nothing like that: its blocks are
+    // views of one moving vector, so the columns are a low-rank structure plus
+    // noise, and the conditioning is bad however narrow or wide it is.
+    let (n, d, rank) = (3000usize, 2560usize, 24usize);
+    let mut x: Vec<Vec<f32>> = Vec::with_capacity(n);
+    let mut y: Vec<u8> = Vec::with_capacity(n);
+    let mut ids: Vec<u32> = Vec::with_capacity(n);
+    for i in 0..n {
+        // A small latent, then every column a fixed mixture of it plus a little
+        // noise of its own.
+        let z: Vec<f64> = (0..rank)
+            .map(|k| {
+                let u = (alm::num::cbrng(0x1A7 ^ k as u64, i as u64) >> 11) as f64
+                    / (1u64 << 53) as f64;
+                (u - 0.5) * 2.0
+            })
+            .collect();
+        let mut row = vec![0.0f32; d];
+        for j in 0..d {
+            let mut v = 0.0f64;
+            for (k, zk) in z.iter().enumerate() {
+                let w = (alm::num::cbrng(0x31D ^ (j as u64) << 8 ^ k as u64, 1) >> 11) as f64
+                    / (1u64 << 53) as f64;
+                v += (w - 0.5) * 2.0 * zk;
+            }
+            let e = (alm::num::cbrng(0xB10 ^ j as u64, i as u64) >> 11) as f64
+                / (1u64 << 53) as f64;
+            row[j] = (v / (rank as f64).sqrt() + 0.1 * (e - 0.5)) as f32;
+        }
+        // The label is a direction in the latent, so it is linearly findable.
+        let s: f64 = z.iter().take(4).sum();
+        let p = 1.0 / (1.0 + (-s).exp());
+        let u = (alm::num::cbrng(0x1AB, i as u64) >> 11) as f64 / (1u64 << 53) as f64;
+        y.push(if u < p { 1 } else { 0 });
+        x.push(row);
+        ids.push(i as u32);
+    }
+
+    let at = |iters: usize| -> f64 {
+        let folds = 5usize;
+        let mut score = vec![0.0f64; n];
+        for f in 0..folds {
+            let train: Vec<usize> = (0..n).filter(|&i| ids[i] as usize % folds != f).collect();
+            let test: Vec<usize> = (0..n).filter(|&i| ids[i] as usize % folds == f).collect();
+            let s = alm::patient::logistic_pub(&x, &y, &train, &test, 0.1, iters);
+            for (k, &i) in test.iter().enumerate() {
+                score[i] = s[k];
+            }
+        }
+        alm::patient::auroc_pub(&score, &y)
+    };
+
+    let short = at(300);
+    let long = at(3000);
+    println!(
+        "probe at width {}: 300 iters {:.4}, 3000 iters {:.4}, gap {:+.4}",
+        d,
+        short,
+        long,
+        long - short
+    );
+    assert!(
+        long - short < 0.01,
+        "the probe gains {:.4} AUROC from ten times the iterations at width {}: \
+         300 steps is measuring how far the optimiser got, not what the \
+         representation holds, and it penalises the widest set most",
+        long - short,
+        d
+    );
+}
+
+#[test]
+fn more_regularisation_shrinks_the_probe_toward_knowing_nothing() {
+    // What "more regularisation" has to mean: weights nearer zero, a flatter
+    // score, an AUROC nearer 0.5. Never an anti-predictor, and never a NaN.
+    //
+    // The explicit form `w -= lr * (grad + l2 * w)` multiplies the weight by
+    // `1 - lr*l2` every step, which passes through zero at l2 = 2/lr and
+    // reverses sign beyond it. At the lr this probe uses that made the top of
+    // its own sweep unusable: l2 = 4 scored 0.3999, l2 = 10 scored 0.2972, and
+    // l2 = 100 produced NaN and panicked inside the AUROC sort. The sweep takes
+    // the maximum so it never selected those points and no wrong number was
+    // ever printed -- the damage was that the usable ceiling was 1.0 while the
+    // grid claimed 10, and a wide sparse feature set that needed more could not
+    // ask for it.
+    let (n, d) = (1200usize, 120usize);
+    let mut x: Vec<Vec<f32>> = Vec::with_capacity(n);
+    let mut y: Vec<u8> = Vec::with_capacity(n);
+    let mut ids: Vec<u32> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut row = vec![0.0f32; d];
+        let mut s = 0.0f64;
+        for j in 0..d {
+            let u =
+                (alm::num::cbrng(0xB10 ^ j as u64, i as u64) >> 11) as f64 / (1u64 << 53) as f64;
+            let v = (u - 0.5) * 2.0;
+            row[j] = v as f32;
+            if j < 4 {
+                s += v;
+            }
+        }
+        let p = 1.0 / (1.0 + (-s).exp());
+        let u = (alm::num::cbrng(0x1AB, i as u64) >> 11) as f64 / (1u64 << 53) as f64;
+        y.push(if u < p { 1 } else { 0 });
+        x.push(row);
+        ids.push(i as u32);
+    }
+
+    let at = |l2: f64| -> f64 {
+        let folds = 5usize;
+        let mut score = vec![0.0f64; n];
+        for f in 0..folds {
+            let train: Vec<usize> = (0..n).filter(|&i| ids[i] as usize % folds != f).collect();
+            let test: Vec<usize> = (0..n).filter(|&i| ids[i] as usize % folds == f).collect();
+            let s = alm::patient::logistic_pub(&x, &y, &train, &test, l2, 300);
+            for (k, &i) in test.iter().enumerate() {
+                score[i] = s[k];
+            }
+        }
+        alm::patient::auroc_pub(&score, &y)
+    };
+
+    let grid = [0.1f64, 1.0, 4.0, 10.0, 100.0, 1000.0];
+    let vals: Vec<f64> = grid.iter().map(|&l| at(l)).collect();
+    println!(
+        "AUROC against L2: {}",
+        grid.iter()
+            .zip(vals.iter())
+            .map(|(l, a)| format!("{}={:.4}", l, a))
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
+    for (l, a) in grid.iter().zip(vals.iter()) {
+        assert!(a.is_finite(), "L2 {} produced a non-finite score", l);
+        assert!(
+            *a >= 0.45,
+            "L2 {} scored {:.4}: shrinkage has reversed the classifier rather than damping it",
+            l,
+            a
+        );
+    }
+    for w in vals.windows(2) {
+        assert!(
+            w[1] <= w[0] + 0.02,
+            "AUROC rose from {:.4} to {:.4} as the regularisation strengthened",
+            w[0],
+            w[1]
+        );
+    }
+    assert!(
+        (vals[vals.len() - 1] - 0.5).abs() < 0.1,
+        "at the strongest regularisation the probe should know almost nothing, not {:.4}",
+        vals[vals.len() - 1]
+    );
+}

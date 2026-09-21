@@ -37,6 +37,7 @@ pub mod compose;
 pub mod config;
 
 pub mod embed;
+pub mod epochs;
 pub mod experiments;
 pub mod gen;
 pub mod gencheck;
@@ -50,6 +51,7 @@ pub mod patient;
 pub mod physio;
 pub mod plastic;
 pub mod rarity;
+pub mod probe;
 pub mod scan;
 pub mod store;
 pub mod stepsize;
