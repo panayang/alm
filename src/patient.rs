@@ -220,6 +220,12 @@ pub fn run(
     bins: usize,
     valued: bool,
     dump: Option<&str>,
+    // `ablate`: comma-separated switches to turn off before the run, so a
+    // mechanism change can be compared against its own absence under one probe.
+    // The earlier comparison could not: both of its numbers were taken under a
+    // probe whose shrinkage was broken, and repairing it moved the control by
+    // +0.009 while moving the state by -0.001.
+    ablate: Option<&str>,
 ) {
     let (mut streams, mut ids, vp) = if valued {
         flat_streams_valued(dir, bins)
@@ -252,6 +258,17 @@ pub fn run(
     }
 
     let mut cfg = Config::local();
+    if let Some(a) = ablate {
+        for part in a.split(',') {
+            match part.trim() {
+                "bind_self" => cfg.bind_self = false,
+                "verify_gate" => cfg.verify_gate = false,
+                "" => {}
+                other => panic!("unknown ablation {}", other),
+            }
+        }
+        println!("ablated: {}", a);
+    }
     cfg.seed = seed;
     cfg.vocab = vp;
     cfg.d = d;
@@ -271,7 +288,29 @@ pub fn run(
     let mut y: Vec<u8> = Vec::new();
     let mut keep_ids: Vec<u32> = Vec::new();
     let mut ticks = 0u64;
-    for (s, &id) in streams.iter().zip(ids.iter()) {
+    // A line every few hundred patients.
+    //
+    // This loop is 2.5M ticks and used to print nothing until it finished,
+    // which made "slow" and "stuck" the same observation from outside. It cost
+    // three wrong calls in one session: a run that had been killed and looked
+    // like it was working, an estimate off by two orders of magnitude, and an
+    // hour spent inferring progress from a CPU counter.
+    let total_pat = streams.len();
+    let step = (total_pat / 20).max(1);
+    let t0 = std::time::Instant::now();
+    for (pi, (s, &id)) in streams.iter().zip(ids.iter()).enumerate() {
+        if pi > 0 && pi % step == 0 {
+            let el = t0.elapsed().as_secs_f64();
+            let frac = pi as f64 / total_pat as f64;
+            eprintln!(
+                "  {}/{} patients, {} ticks, {:.0}s elapsed, ~{:.0}s left",
+                pi,
+                total_pat,
+                ticks,
+                el,
+                el * (1.0 - frac) / frac.max(1e-9)
+            );
+        }
         let dy = match death.get(&id) {
             Some(&v) => v,
             None => continue,

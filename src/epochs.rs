@@ -259,3 +259,57 @@ pub fn run(dir: &str, d: usize, patients: usize, seed: u64, cap: usize, bins: us
     println!("  has finished with this data, and says the lever is the mechanism.");
     println!("  neither reading says what genuinely new patients would be worth.");
 }
+
+/// How does what transfers grow with how much has been met?
+///
+/// One pass over 800 other patients was worth 0.40 bits on 400 patients from a
+/// set never seen. That is one point on a curve, and the curve is the claim:
+/// organisation forms, and what is already stored makes the next thing cheaper.
+/// A single number cannot say whether that is still happening at scale, and it
+/// is a curve precisely because it must not become a target.
+///
+/// Same held set throughout, one pass over each pool, so the only thing moving
+/// is how much distinct experience preceded it.
+pub fn pool_curve(
+    dir: &str,
+    held_dir: &str,
+    d: usize,
+    seed: u64,
+    cap: usize,
+    bins: usize,
+    banks: usize,
+) {
+    let vocab = build_vocab(dir, bins);
+    let (pool_all, _, _) = flat_streams_valued(dir, bins);
+    let (mut held, _, dropped) = flat_streams_under(held_dir, &vocab);
+    held.truncate(400);
+    let vp = vocab.size();
+    let sizes = [0usize, 200, 400, 800, 1600, 3200];
+    println!("does what transfers keep growing with how much has been met?");
+    println!(
+        "  held {} patients from {}, never seen, under the pool's vocabulary ({} readings dropped)",
+        held.len(),
+        held_dir,
+        dropped
+    );
+    println!("  one pass over each pool. V = {}.
+", vp);
+    println!(
+        "{:>10} {:>12} {:>14} {:>8} {:>10}",
+        "pool", "ours", "PPM-C best", "order", "margin"
+    );
+    for &sz in sizes.iter() {
+        let n = sz.min(pool_all.len());
+        let pool = &pool_all[..n];
+        let epochs = if n == 0 { 0 } else { 1 };
+        let (o, p, ord, _) = run_split(pool, &held, vp, d, banks, cap, seed, epochs);
+        println!(
+            "{:>10} {:>12.4} {:>14.4} {:>8} {:>+10.4}",
+            n, o, p, ord, p - o
+        );
+    }
+    println!("
+  read the first column. a curve still bending down at the largest pool");
+    println!("  says the mechanism is still taking something out of experience it has");
+    println!("  not repeated; a curve that has flattened says this is what it extracts.");
+}

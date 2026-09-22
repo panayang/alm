@@ -41,6 +41,7 @@ fn main() {
     let mut eta: Option<f32> = None;
     let mut verify_gate = false;
     let mut held: Option<String> = None;
+    let mut ablate: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -120,6 +121,10 @@ fn main() {
                 held = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--ablate" => {
+                ablate = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--verify-gate" => {
                 verify_gate = true;
                 i += 1;
@@ -178,6 +183,7 @@ fn main() {
                 bins,
                 gran == "paramval",
                 trace.as_deref(),
+                ablate.as_deref(),
             );
         }
         // The tick loop on a real irregular stream. The first time the model
@@ -205,6 +211,13 @@ fn main() {
         }
         // Is there anything left in this data that we have not taken? Replay
         // three quarters of the patients, read only the quarter held back.
+        // How does what transfers grow with how much has been met? One pass over
+        // each pool size, the same never-seen held set throughout.
+        "poolcurve" => {
+            let dd = data.clone().expect("poolcurve wants --data DIR");
+            let h = held.clone().expect("poolcurve wants --held DIR");
+            alm::epochs::pool_curve(&dd, &h, widths[0], seed, max_given, bins, bankses[0]);
+        }
         "epochs" => {
             let dd = data.clone().expect("epochs wants --data DIR");
             match held.clone() {
