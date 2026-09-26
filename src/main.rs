@@ -209,6 +209,27 @@ fn main() {
             let f = data.expect("probe wants --data DUMPFILE");
             alm::probe::run(&f);
         }
+        // A stateful judge: declared answers, a probability, and the option to
+        // decline, on questions whose answer depends on history.
+        // Learners ordered by inclusion of the facts they maintain. Reports the
+        // order and its dimension, never a score.
+        // The outcome as an event the world speaks at the end of a stay, and the
+        // question put at any moment during it, in the architecture's own shape.
+        "bedside" => {
+            let dd = data.clone().expect("bedside wants --data DIR");
+            let o = out.clone().expect("bedside wants --out OUTCOMES.txt");
+            alm::bedside::run(&dd, &o, widths[0], limit, seed, max_given, bins, bankses[0]);
+        }
+        "facts" => {
+            alm::facts::run();
+        }
+        // Does the judge depend on order where the task does, and only there?
+        "order" => {
+            alm::judge::order_spectrum(if limit > 0 { limit } else { 20_000 }, seed);
+        }
+        "judge" => {
+            alm::judge::run(if limit > 0 { limit } else { 40_000 }, seed);
+        }
         // Is there anything left in this data that we have not taken? Replay
         // three quarters of the patients, read only the quarter held back.
         // How does what transfers grow with how much has been met? One pass over

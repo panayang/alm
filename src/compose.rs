@@ -375,3 +375,12 @@ pub fn run(train_episodes: usize, _gap: usize) {
     println!("  answer. a readout using the part it has seen charges the same for both,");
     println!("  so the ratio is the measurement and one is the target.");
 }
+
+/// (seen, novel) charge on the composition stream for a configuration. Used by
+/// the facts matrix, which needs the one fact the mechanisms added this week
+/// maintain and the other seven do not see.
+pub(crate) fn novel_charge(train_episodes: usize, set: fn(&mut Config)) -> (f64, f64) {
+    let arm = Arm { name: "facts", gap: 2, set, report_verify: false };
+    let (s, n, _, _) = run_arm(&arm, train_episodes);
+    (s, n)
+}

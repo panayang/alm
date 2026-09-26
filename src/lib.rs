@@ -29,6 +29,7 @@
 
 pub mod acquire;
 pub mod baseline;
+pub mod bedside;
 pub mod budget;
 pub mod chainmem;
 pub mod clinical;
@@ -39,9 +40,11 @@ pub mod config;
 pub mod embed;
 pub mod epochs;
 pub mod experiments;
+pub mod facts;
 pub mod gen;
 pub mod gencheck;
 pub mod graph;
+pub mod judge;
 pub mod ladder;
 pub mod metrics;
 pub mod model;
