@@ -564,6 +564,69 @@ pub struct Config {
     pub route_random: bool,
     pub bypass_graph: bool,
     pub walk_during_gap: bool,
+    /// Refuse a silent hop that would collapse the state back onto the token
+    /// the world just said, on a tick where nothing was retrieved. Off, with
+    /// the evidence on both sides below, and the decision open.
+    ///
+    /// Against it, on synthetic streams:
+    /// It was built to stop "drift": with the history wiped before a question,
+    /// accuracy fell from 0.644 at the question to 0.563 after the silence.
+    /// But an answer with nothing under it carries no information, and
+    /// accuracy at a 0.5 threshold on such an answer is noise. Under a proper
+    /// score the silence does the opposite of harm:
+    ///
+    /// ```text
+    ///   wiped, presence   Brier 0.327 -> 0.285   ECE 0.308 -> 0.184
+    ///   wiped, recency    Brier 0.464 -> 0.313   ECE 0.460 -> 0.219
+    /// ```
+    ///
+    /// At the question an ungrounded answer is badly over-confident; the walk
+    /// through the silence brings it down. The gate froze that answer instead,
+    /// changed neither its accuracy nor its calibration after the silence
+    /// (Brier 0.2891 on against 0.2894 off), and cost composition 2.3 times
+    /// over (0.096 to 0.220 bits on a new pair) because it refused 22% of all
+    /// silent hops on that stream -- the ones where the state settles onto the
+    /// cue it was just given and lets go of what preceded it, which is exactly
+    /// what a cue-only answer needs.
+    ///
+    /// For it, on PhysioNet, full stream, the collapse version of the gate
+    /// against no gate with everything else identical:
+    ///
+    /// ```text
+    ///                  gate off   gate on
+    ///   seen context    +0.726    +0.770
+    ///   novel context   +0.233    +0.357
+    ///   overall         +0.718    +0.764    bits/event below PPM-C at its best
+    /// ```
+    ///
+    /// 1.73M events, so 0.046 bits is far outside noise, and the largest gain
+    /// is in the novel column -- composition, on real data. An unverified
+    /// reading that reconciles the two: a collapse back onto the last input is
+    /// the state forgetting everything but that input. On the composition
+    /// stream the gaps are two ticks and the answer depends on the cue alone,
+    /// so forgetting helps; PhysioNet's silences run to eleven ticks and the
+    /// next event depends on more than the last one, so forgetting hurts and
+    /// the gate keeps the history. If so, whether to refuse the echo depends
+    /// on whether the future needs more than the last input, which the
+    /// mechanism cannot know in advance.
+    ///
+    /// That reading was then tested and is not supported. Items all from one
+    /// set of eight, the first one queried after four more, each followed by
+    /// a silence of the length shown (`judge::history`):
+    ///
+    /// ```text
+    ///   silence each     0      2      5      11
+    ///   gate off       0.898  0.824  0.792  0.729
+    ///   gate on        0.898  0.823  0.795  0.743
+    /// ```
+    ///
+    /// Order information about an early item does erode with elapsed silence
+    /// -- the bands decay through it -- but the gate barely touches that (0.014
+    /// at eleven ticks, about one standard error). So the PhysioNet gain is an
+    /// empirical fact without a verified mechanism, and it is in codelength,
+    /// which is an instrument and not an objective. That is not enough to turn
+    /// this on, and it stays off with the question open.
+    pub walk_needs_retrieval: bool,
 
     /// What the bound trace binds. See `BindMode`.
     pub bind_mode: BindMode,
@@ -748,6 +811,7 @@ impl Config {
             route_random: false,
             bypass_graph: false,
             walk_during_gap: true,
+            walk_needs_retrieval: false,
             anchor: 0.35,
             route_perturb: 0,
             write_toward_embedding: true,

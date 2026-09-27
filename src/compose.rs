@@ -295,6 +295,13 @@ fn run_arm(arm: &Arm, train_episodes: usize) -> (f64, f64, f64, f64) {
         println!("  a conjunction that memory does hold, which is what it costs on familiar");
         println!("  pairs.");
     }
+    eprintln!(
+        "  [{}] silent hops refused by the echo gate: {} of {} ({:.2}%)",
+        arm.name,
+        model.refused_hops,
+        model.silent_hops,
+        100.0 * model.refused_hops as f64 / model.silent_hops.max(1) as f64
+    );
     (ours[0].mean(), ours[1].mean(), theirs[best][0].mean(), theirs[best][1].mean())
 }
 
@@ -383,4 +390,50 @@ pub(crate) fn novel_charge(train_episodes: usize, set: fn(&mut Config)) -> (f64,
     let arm = Arm { name: "facts", gap: 2, set, report_verify: false };
     let (s, n, _, _) = run_arm(&arm, train_episodes);
     (s, n)
+}
+
+/// Where collapsing silent hops land on the composition stream: the token just
+/// said, the answer, or something else. Gate off, so every hop is taken and
+/// seen. Used by `judge::collapse_targets`.
+pub(crate) fn collapse_targets(train_episodes: usize) -> (u64, u64, u64, u64) {
+    let v = 3 * M + 1;
+    let (p0, q0, z0) = (1usize, 1 + M, 1 + 2 * M);
+    let mut cfg = Config::local();
+    cfg.seed = 0xC0FFEE;
+    cfg.vocab = v;
+    cfg.d = 128;
+    cfg.mem_banks = 4096;
+    cfg.cleanup_floor_mult = 1.1;
+    cfg.walk_needs_retrieval = false;
+    cfg.derive();
+    let mut model = Model::new(cfg);
+    let (mut total, mut echo, mut answer, mut other) = (0u64, 0u64, 0u64, 0u64);
+    for e in 0..train_episodes {
+        let i = (cbrng(0xA11CE, e as u64) % M as u64) as usize;
+        let j = (cbrng(0xB0B, e as u64) % M as u64) as usize;
+        let z = z0 + j;
+        for (k, tok) in [p0 + i, q0 + j, z].into_iter().enumerate() {
+            // Log only the silence after the cue, where the walk would have
+            // to carry the answer.
+            model.log_hop_cos = k == 2 && e * 2 >= train_episodes;
+            for _ in 0..2 {
+                model.tick(None, false);
+            }
+            model.log_hop_cos = false;
+            model.tick(Some(tok), false);
+        }
+        for (cos, t, last) in model.hop_tok_log.drain(..) {
+            if cos > std::f32::consts::FRAC_1_SQRT_2 {
+                total += 1;
+                if t == last {
+                    echo += 1;
+                } else if t == z {
+                    answer += 1;
+                } else {
+                    other += 1;
+                }
+            }
+        }
+    }
+    (total, echo, answer, other)
 }

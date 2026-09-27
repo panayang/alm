@@ -296,6 +296,7 @@ pub fn run(
     banks: usize,
     eta: Option<f32>,
     verify_gate: bool,
+    ablate: Option<&str>,
 ) {
     let (mut streams, _ids, vp) = flat_streams_valued(dir, bins);
     if patients > 0 && streams.len() > patients {
@@ -323,7 +324,22 @@ pub fn run(
     if let Some(e) = eta {
         cfg.eta = e;
     }
-    cfg.verify_gate = verify_gate;
+    // `--verify-gate` predates the gate being on by default; it still forces
+    // it on. `--ablate` turns named mechanisms off, which is how a mechanism
+    // is compared against its own absence on real data.
+    cfg.verify_gate = cfg.verify_gate || verify_gate;
+    if let Some(a) = ablate {
+        for part in a.split(',') {
+            match part.trim() {
+                "walk_needs_retrieval" => cfg.walk_needs_retrieval = false,
+                "bind_self" => cfg.bind_self = false,
+                "verify_gate" => cfg.verify_gate = false,
+                "" => {}
+                other => panic!("unknown ablation {}", other),
+            }
+        }
+        println!("ablated: {}", a);
+    }
     cfg.derive();
 
     // The capacity check this project derived and then never applied to this
@@ -384,7 +400,21 @@ pub fn run(
     let mut tcount: Vec<u32> = vec![0; vp.max(1)];
     let mut recs: Vec<Rec> = Vec::with_capacity(total);
 
-    for s in streams.iter() {
+    // A line every five per cent, on stderr: a four-hour run that prints
+    // nothing until it ends cannot be told apart from one that has died.
+    let npat = streams.len();
+    let t0 = std::time::Instant::now();
+    for (pi, s) in streams.iter().enumerate() {
+        if pi > 0 && pi % (npat / 20).max(1) == 0 {
+            let el = t0.elapsed().as_secs_f64();
+            eprintln!(
+                "  {}/{} patients, {:.0}s elapsed, ~{:.0}s left",
+                pi,
+                npat,
+                el,
+                el * (npat - pi) as f64 / pi as f64
+            );
+        }
         model.restore(blank.clone());
         for p in ppms.iter_mut() {
             p.reset_hist();

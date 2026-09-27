@@ -91,6 +91,8 @@ fn run_arm(
     cap: usize,
     seed: u64,
     wiped: bool,
+    eta: Option<f32>,
+    horizon: Option<f32>,
 ) -> Vec<Asked> {
     let (q_tok, died, survived) = (vp, vp + 1, vp + 2);
     let mut cfg = Config::local();
@@ -99,6 +101,12 @@ fn run_arm(
     cfg.d = d;
     cfg.cleanup_floor_mult = 1.1;
     cfg.mem_banks = banks;
+    if let Some(e) = eta {
+        cfg.eta = e;
+    }
+    if let Some(h) = horizon {
+        cfg.horizon = h;
+    }
     cfg.derive();
     let mut m = Model::new(cfg);
     let blank = m.volatile();
@@ -211,7 +219,7 @@ fn counter_auroc(x: &[Vec<f32>], y: &[u8], half: usize) -> (f64, f64) {
 fn online_counter_auroc(x: &[Vec<f32>], y: &[u8], half: usize) -> (f64, f64) {
     let d = x[0].len();
     let mut best = (0.0f64, 0.0f64, 0.0f64);
-    for &lr in [0.003f64, 0.01, 0.03, 0.1, 0.3].iter() {
+    for &lr in [0.0001f64, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3].iter() {
         let mut w = vec![0.0f64; d];
         let mut b = 0.0f64;
         let mut mean = vec![0.0f64; d];
@@ -224,8 +232,21 @@ fn online_counter_auroc(x: &[Vec<f32>], y: &[u8], half: usize) -> (f64, f64) {
                 .enumerate()
                 .map(|(j, &v)| {
                     let v = (1.0 + v.max(0.0) as f64).ln();
-                    let sd = if n > 1.0 { (m2[j] / (n - 1.0)).sqrt().max(1e-6) } else { 1.0 };
-                    (v - mean[j]) / sd
+                    // A feature that has never varied has no scale yet, so its
+                    // scale is taken as one until it does. The floor used to be
+                    // 1e-6: a rare token count, zero for every patient so far,
+                    // standardised to ln 2 / 1e-6 -- about 690000 -- the first
+                    // time it fired, and that single update hijacked the
+                    // weights for the rest of the pass. On the full stream the
+                    // counter scored 0.36-0.43 AUROC, below chance, where the
+                    // batch fit reached 0.80; on a planted linear signal it
+                    // scored 0.46. Clipping bounds what any one patient can do.
+                    let sd = if n > 1.0 && m2[j] > 0.0 {
+                        (m2[j] / (n - 1.0)).sqrt().max(0.1)
+                    } else {
+                        1.0
+                    };
+                    ((v - mean[j]) / sd).clamp(-5.0, 5.0)
                 })
                 .collect();
             let s: f64 = b + w.iter().zip(&z).map(|(a, c)| a * c).sum::<f64>();
@@ -263,6 +284,8 @@ pub fn run(
     cap: usize,
     bins: usize,
     banks: usize,
+    eta: Option<f32>,
+    horizon: Option<f32>,
 ) {
     let death = load_death(outcomes);
     let (streams_all, ids, vp) = flat_streams_valued(dir, bins);
@@ -277,6 +300,12 @@ pub fn run(
     if patients > 0 && streams.len() > patients {
         streams.truncate(patients);
         labels.truncate(patients);
+    }
+    if let Some(e) = eta {
+        println!("step size overridden: eta = {}", e);
+    }
+    if let Some(h) = horizon {
+        println!("ladder horizon overridden: {} ticks", h);
     }
     let n = streams.len();
     let half = n / 2;
@@ -294,8 +323,8 @@ pub fn run(
 
     let (full, wiped) = std::thread::scope(|sc| {
         let (s, l) = (&streams, &labels);
-        let a = sc.spawn(move || run_arm(s, l, vp, d, banks, cap, seed, false));
-        let b = sc.spawn(move || run_arm(s, l, vp, d, banks, cap, seed, true));
+        let a = sc.spawn(move || run_arm(s, l, vp, d, banks, cap, seed, false, eta, horizon));
+        let b = sc.spawn(move || run_arm(s, l, vp, d, banks, cap, seed, true, eta, horizon));
         (a.join().unwrap(), b.join().unwrap())
     });
 
@@ -333,4 +362,67 @@ pub fn run(
     println!("  first-half outcome hundreds of times and is a different acquisition regime.");
     println!("  the wiped arm is the same memory with this stay erased before each question:");
     println!("  what it knows is only what outcomes are like in general, so it sits at 0.5.");
+}
+
+/// The two comparators alone, on the same patients and the same split as
+/// `run`. They do not involve the model, so a fix to one of them does not need
+/// the model rerun.
+pub fn counters_only(dir: &str, outcomes: &str, patients: usize, bins: usize) {
+    let death = load_death(outcomes);
+    let (streams_all, ids, vp) = flat_streams_valued(dir, bins);
+    let mut streams = Vec::new();
+    let mut labels = Vec::new();
+    for (s, id) in streams_all.into_iter().zip(ids) {
+        if let Some(&y) = death.get(&id) {
+            streams.push(s);
+            labels.push(y);
+        }
+    }
+    if patients > 0 && streams.len() > patients {
+        streams.truncate(patients);
+        labels.truncate(patients);
+    }
+    let half = streams.len() / 2;
+    println!("comparators only: {} patients, {} learned from, {} read", streams.len(), half, streams.len() - half);
+    println!("{:>12} {:>16} {:>16}", "asked at", "counter online", "counter batch");
+    for f in FRACS.iter() {
+        let x: Vec<Vec<f32>> = streams.iter().map(|s| summary(s, vp, *f)).collect();
+        let (oa, olr) = online_counter_auroc(&x, &labels, half);
+        let (ca, cl2) = counter_auroc(&x, &labels, half);
+        println!(
+            "{:>11.0}% {:>16} {:>16}",
+            f * 100.0,
+            format!("{:.4} lr {}", oa, olr),
+            format!("{:.4} L2 {}", ca, cl2)
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::online_counter_auroc;
+
+    /// The online comparator must find a signal a linear model can find.
+    /// Planted: the label follows one dense feature, and a hundred rare
+    /// features are mostly zero and fire now and then, as token counts do.
+    #[test]
+    fn the_online_counter_finds_a_planted_signal() {
+        let n = 2000usize;
+        let mut x: Vec<Vec<f32>> = Vec::with_capacity(n);
+        let mut y: Vec<u8> = Vec::with_capacity(n);
+        for i in 0..n {
+            let u = |k: u64| (crate::num::cbrng(k, i as u64) >> 11) as f64 / (1u64 << 53) as f64;
+            let signal = (u(1) * 10.0) as f32;
+            let mut row = vec![signal];
+            for r in 0..100u64 {
+                row.push(if u(100 + r) < 0.01 { 1.0 } else { 0.0 });
+            }
+            let p = 1.0 / (1.0 + (-(signal as f64 - 5.0)).exp());
+            y.push(if u(7) < p { 1 } else { 0 });
+            x.push(row);
+        }
+        let (a, lr) = online_counter_auroc(&x, &y, n / 2);
+        println!("online counter on a planted signal: AUROC {:.4} (lr {})", a, lr);
+        assert!(a > 0.8, "the online counter cannot find a planted linear signal: {:.4}", a);
+    }
 }

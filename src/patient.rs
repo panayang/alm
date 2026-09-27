@@ -226,6 +226,7 @@ pub fn run(
     // probe whose shrinkage was broken, and repairing it moved the control by
     // +0.009 while moving the state by -0.001.
     ablate: Option<&str>,
+    horizon: Option<f32>,
 ) {
     let (mut streams, mut ids, vp) = if valued {
         flat_streams_valued(dir, bins)
@@ -268,6 +269,10 @@ pub fn run(
             }
         }
         println!("ablated: {}", a);
+    }
+    if let Some(h) = horizon {
+        cfg.horizon = h;
+        println!("ladder horizon overridden: {} ticks", h);
     }
     cfg.seed = seed;
     cfg.vocab = vp;

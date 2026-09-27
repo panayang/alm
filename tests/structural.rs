@@ -1966,3 +1966,27 @@ fn more_regularisation_shrinks_the_probe_toward_knowing_nothing() {
         vals[vals.len() - 1]
     );
 }
+
+#[test]
+fn silence_does_not_make_an_answer_with_nothing_under_it_worse() {
+    // With the episode wiped from the state the instant before a question,
+    // there is nothing for the silence to retrieve. What it must not do is
+    // make the answer worse under a proper score.
+    //
+    // This assertion replaced one that demanded the answer not *move* during
+    // the silence. That was the wrong property. An ungrounded answer is badly
+    // over-confident the moment it is asked, and the silence brings it down --
+    // Brier 0.327 to 0.285, ECE 0.308 to 0.184 on presence -- while accuracy
+    // at a 0.5 threshold falls, because accuracy on an answer that carries no
+    // information is noise around the base rate. A gate was built to stop the
+    // movement, froze the over-confident answer, and cost composition 2.3
+    // times over. Proper score, not accuracy, and not stillness.
+    let (at_ask, after) = alm::judge::ungrounded_brier(3000, 7, |_| {});
+    println!("ungrounded answer, Brier: at the question {:.4}, after the silence {:.4}", at_ask, after);
+    assert!(
+        after <= at_ask + 0.01,
+        "the silence made an ungrounded answer worse under a proper score: {:.4} -> {:.4}",
+        at_ask,
+        after
+    );
+}

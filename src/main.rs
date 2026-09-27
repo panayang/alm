@@ -42,6 +42,8 @@ fn main() {
     let mut verify_gate = false;
     let mut held: Option<String> = None;
     let mut ablate: Option<String> = None;
+    // Overrides the slowest timescale the ladder must reach, in ticks.
+    let mut horizon: Option<f32> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -121,6 +123,10 @@ fn main() {
                 held = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--horizon" => {
+                horizon = Some(args[i + 1].parse().expect("--horizon wants a number"));
+                i += 2;
+            }
             "--ablate" => {
                 ablate = Some(args[i + 1].clone());
                 i += 2;
@@ -165,7 +171,19 @@ fn main() {
         // whether a counter could have helped at all.
         "acquire" => {
             let dd = data.clone().expect("acquire wants --data DIR");
-            alm::acquire::run(&dd, &label, widths[0], limit, seed, max_given, bins, bankses[0], eta, verify_gate);
+            alm::acquire::run(
+                &dd,
+                &label,
+                widths[0],
+                limit,
+                seed,
+                max_given,
+                bins,
+                bankses[0],
+                eta,
+                verify_gate,
+                ablate.as_deref(),
+            );
         }
         // The model's state read as a patient, scored on the benchmark's own
         // task against its own baselines.
@@ -184,6 +202,7 @@ fn main() {
                 gran == "paramval",
                 trace.as_deref(),
                 ablate.as_deref(),
+                horizon,
             );
         }
         // The tick loop on a real irregular stream. The first time the model
@@ -215,10 +234,16 @@ fn main() {
         // order and its dimension, never a score.
         // The outcome as an event the world speaks at the end of a stay, and the
         // question put at any moment during it, in the architecture's own shape.
+        // The bedside comparators alone, without the model.
+        "bedside-counters" => {
+            let dd = data.clone().expect("bedside-counters wants --data DIR");
+            let o = out.clone().expect("bedside-counters wants --out OUTCOMES.txt");
+            alm::bedside::counters_only(&dd, &o, limit, bins);
+        }
         "bedside" => {
             let dd = data.clone().expect("bedside wants --data DIR");
             let o = out.clone().expect("bedside wants --out OUTCOMES.txt");
-            alm::bedside::run(&dd, &o, widths[0], limit, seed, max_given, bins, bankses[0]);
+            alm::bedside::run(&dd, &o, widths[0], limit, seed, max_given, bins, bankses[0], eta, horizon);
         }
         "facts" => {
             alm::facts::run();
@@ -226,6 +251,38 @@ fn main() {
         // Does the judge depend on order where the task does, and only there?
         "order" => {
             alm::judge::order_spectrum(if limit > 0 { limit } else { 20_000 }, seed);
+        }
+        // Which silent-tick process moves an answer that has nothing under it?
+        // When memory fades, does confidence fade with it?
+        "fade" => {
+            alm::judge::fade(if limit > 0 { limit } else { 20_000 }, seed);
+        }
+        // Where do silent hops land, relative to anything nameable?
+        // When a silent hop collapses onto one token, which token?
+        "collapse" => {
+            alm::judge::collapse_targets(seed);
+        }
+        "hopcos" => {
+            alm::judge::hop_cos(seed);
+        }
+        // Does instability during the silence mark a wrong answer?
+        "stability" => {
+            alm::judge::stability(if limit > 0 { limit } else { 20_000 }, seed);
+        }
+        // Does a rarely spoken answer get learned less well, other things equal?
+        "dilution" => {
+            alm::judge::dilution(if limit > 0 { limit } else { 3000 }, seed);
+        }
+        // A noisy label with a known ceiling, across step sizes.
+        "noisy" => {
+            alm::judge::noisy(if limit > 0 { limit } else { 6000 }, seed);
+        }
+        // Does the echo gate keep history across a silence, where it is needed?
+        "history" => {
+            alm::judge::history(if limit > 0 { limit } else { 6000 }, seed);
+        }
+        "drift" => {
+            alm::judge::drift_diagnosis(if limit > 0 { limit } else { 8000 }, seed);
         }
         "judge" => {
             alm::judge::run(if limit > 0 { limit } else { 40_000 }, seed);

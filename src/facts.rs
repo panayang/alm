@@ -33,7 +33,7 @@ struct Fact {
     rule: &'static str,
 }
 
-const FACTS: [Fact; 8] = [
+const FACTS: [Fact; 10] = [
     Fact { name: "learns a deterministic successor", rule: "charge < 0.5 bits (truth 0)" },
     Fact { name: "not confidently wrong on noise", rule: "i.i.d. charge < uniform 6.00" },
     Fact { name: "does not write off the rare", rule: "rare - common excess < 1 bit" },
@@ -42,6 +42,8 @@ const FACTS: [Fact; 8] = [
     Fact { name: "judges presence from history", rule: "AUROC > 0.90 (chance 0.50)" },
     Fact { name: "judges order from history", rule: "AUROC > 0.80 (chance 0.50)" },
     Fact { name: "answers a new pair from its seen part", rule: "novel charge < 0.25 bits (truth 0)" },
+    Fact { name: "silence does not worsen the ungrounded", rule: "wiped Brier after <= at ask + 0.01" },
+    Fact { name: "the walk alone answers a relation", rule: "rows off: charge < uniform 6.00" },
 ];
 
 fn base(v: usize, seed: u64, set: fn(&mut Config)) -> Model {
@@ -222,6 +224,41 @@ fn silence(set: fn(&mut Config)) -> f64 {
     centroid_acc(&rows, gaps.len())
 }
 
+/// The walk's own reading of memory: rows off, so only the state and the
+/// cursors can name the successor of a cue.
+fn walk_alone(set: fn(&mut Config)) -> f64 {
+    let v = 64usize;
+    let mut cfg = Config::local();
+    cfg.seed = 0x0DE1;
+    cfg.vocab = v;
+    cfg.d = 128;
+    cfg.mem_banks = 4096;
+    cfg.cleanup_floor_mult = 1.1;
+    set(&mut cfg);
+    cfg.no_readout = true;
+    cfg.derive();
+    let mut m = Model::new(cfg);
+    let n = 40_000usize;
+    let (mut b, mut c) = (0.0f64, 0u64);
+    let mut cue = 0usize;
+    for i in 0..n {
+        let tok = if i % 2 == 0 {
+            cue = (cbrng(0xC0E, i as u64) % v as u64) as usize;
+            cue
+        } else {
+            (cue * 7 + 3) % v
+        };
+        m.tick(None, false);
+        m.tick(None, false);
+        let o = m.tick(Some(tok), false);
+        if o.charged && i % 2 == 1 && i * 5 >= n * 4 {
+            b += o.bits;
+            c += 1;
+        }
+    }
+    b / c.max(1) as f64
+}
+
 fn evaluate(l: &Learner) -> Vec<(bool, f64)> {
     let s = successor(l.set);
     let n = noise(l.set);
@@ -235,6 +272,11 @@ fn evaluate(l: &Learner) -> Vec<(bool, f64)> {
     // pair fourfold -- so the list was missing the fact they maintain, which is
     // what an order by inclusion is for finding.
     let (_, nv) = crate::compose::novel_charge(40_000, l.set);
+    // Brier after the silence minus Brier at the question, history wiped.
+    // Formerly the drift in P(YES), which measured stillness, not harm.
+    let (ba, bb) = crate::judge::ungrounded_brier(4000, 7, l.set);
+    let dr = bb - ba;
+    let wa = walk_alone(l.set);
     vec![
         (s < 0.5, s),
         (n < 6.0, n),
@@ -244,6 +286,8 @@ fn evaluate(l: &Learner) -> Vec<(bool, f64)> {
         (jp > 0.9, jp),
         (jr > 0.8, jr),
         (nv < 0.25, nv),
+        (dr <= 0.01, dr),
+        (wa < 6.0, wa),
     ]
 }
 
@@ -256,6 +300,7 @@ pub fn run() {
         Learner { name: "default", set: |_| {} },
         Learner { name: "no self block", set: |c| c.bind_self = false },
         Learner { name: "no read-back gate", set: |c| c.verify_gate = false },
+        Learner { name: "echo gate on", set: |c| c.walk_needs_retrieval = true },
         Learner {
             name: "neither",
             set: |c| {

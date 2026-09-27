@@ -171,6 +171,21 @@ pub struct Model {
     /// The transform applied on the last tick, so the operator write is local
     /// to it and nothing has to cross a hop.
     last_step: Option<crate::graph::WalkStep>,
+    /// Whether any response retrieved something that verified on this tick.
+    /// Recomputed every silent tick before it is read, so it carries nothing
+    /// from one tick to the next and does not belong in `Volatile`.
+    retrieved: bool,
+    /// Diagnostic: when set, every silent hop records how close its landing
+    /// point is to the nearest codebook entry. Read by `judge::hop_cos`.
+    pub log_hop_cos: bool,
+    pub hop_cos_log: Vec<f32>,
+    /// Diagnostic, alongside: (cosine, the token the hop lands nearest, the
+    /// last token the world said). Separates a hop that falls back onto what
+    /// was just said from one that arrives somewhere else.
+    pub hop_tok_log: Vec<(f32, usize, usize)>,
+    /// Diagnostic: silent hops attempted, and refused by the echo gate.
+    pub silent_hops: u64,
+    pub refused_hops: u64,
 
     /// Bound traces, one per block the mode carries.
     binds: Vec<Vec<f32>>,
@@ -271,6 +286,12 @@ impl Model {
             visit: vec![0.0; n],
             hops: 0,
             last_step: None,
+            retrieved: false,
+            log_hop_cos: false,
+            hop_cos_log: Vec::new(),
+            hop_tok_log: Vec::new(),
+            silent_hops: 0,
+            refused_hops: 0,
             binds: vec![vec![0.0; d]; blocks],
             event_hist: Vec::new(),
             covert: None,
@@ -651,6 +672,7 @@ impl Model {
                 if !self.frozen {
                     self.unbind_hits += 1;
                 }
+                self.retrieved = true;
                 self.cursors[i] = clean;
                 self.cursor_tok[i] = tok;
                 self.cursor_w[i] = 1.0;
@@ -792,14 +814,24 @@ impl Model {
         // unit length, so the division was 2000 x 256 wasted operations per call
         // on top of a fresh Vec of every known token, once per response per
         // silent tick.
-        for &t in self.store.known_slice() {
-            let e = self.emb.row(t as usize);
+        //
+        // Over the whole codebook, not over the tokens that have readout rows.
+        // It iterated `store.known_slice()`, which is the same mistake the
+        // scoring made and had to be corrected for: naming a token cannot
+        // require that the token was written before. With the readout switched
+        // off no token has a row, so cleanup could never succeed and every
+        // superposed retrieval in that configuration was dead -- measured as a
+        // cosine of exactly 0.000 on every one of 36000 silent hops. Under the
+        // default dense write every token acquires a row quickly, which is why
+        // it never showed.
+        for t in 0..self.cfg.vocab {
+            let e = self.emb.row(t);
             let c = crate::num::dot(v, e);
             if c > raw_best {
                 raw_best = c;
             }
             if c > best.0 {
-                best = (c, t as usize);
+                best = (c, t);
             }
         }
         if best.1 == usize::MAX {
@@ -952,20 +984,95 @@ impl Model {
         } else {
             self.graph.select_rank(from, &q, self.cfg.route_perturb)
         };
+        if !self.frozen {
+            self.silent_hops += 1;
+        }
         let cur = self.p.clone();
         let st = self.graph.hop(a, &cur);
-        self.p = st.p_out.clone();
-
+        let mut cand = st.p_out.clone();
         if self.cfg.anchor > 0.0 {
             let b = self.cfg.anchor;
             for k in 0..self.cfg.rungs {
                 let band = self.ladder.delta(k);
                 for i in 0..self.cfg.d {
-                    self.p[i] += b * band[i];
+                    cand[i] += b * band[i];
                 }
             }
-            normalize(&mut self.p);
+            normalize(&mut cand);
         }
+        if self.log_hop_cos && !self.frozen {
+            let mut clean = Vec::new();
+            let (_, cos, _) = self.cleanup(&cand, &mut clean);
+            self.hop_cos_log.push(cos);
+            // The nearest token regardless of the acceptance threshold.
+            let mut best = (f32::MIN, 0usize);
+            for t in 0..self.cfg.vocab {
+                let c = crate::num::dot(&cand, self.emb.row(t));
+                if c > best.0 {
+                    best = (c, t);
+                }
+            }
+            let last = self.event_hist.first().copied().unwrap_or(usize::MAX);
+            self.hop_tok_log.push((best.0, best.1, last));
+        }
+        // OFF BY DEFAULT, and the account below is the record of a mistake.
+        // Everything from here to the gate itself argues for refusing hops that
+        // collapse an ungrounded state; the measurement that decided against it
+        // came afterwards and is in `Config::walk_needs_retrieval`: the "drift"
+        // this was built to stop was the silence making an over-confident,
+        // ungrounded answer less over-confident (ECE 0.308 -> 0.184), read as
+        // harm because accuracy at 0.5 was the measure.
+        //
+        // A silent hop that would collapse the state is not taken unless
+        // something was retrieved.
+        //
+        // Measured where hops land, as cosine to the nearest codebook entry:
+        // a walk answering a deterministic relation on its own lands at a
+        // median of 0.571, the grounded judge at 0.516, and the judge with its
+        // history wiped -- where the hops have nothing under them -- at 0.831.
+        // The useful hops are a mixture; the drifting ones have fallen onto a
+        // single token, and the codebook term in the score then reads that
+        // collapse as a confident answer. That is what produced 0.74 on a first
+        // choice that was right half the time.
+        //
+        // A state superposing k components sits near 1/sqrt(k) to each, so a
+        // cosine above 1/sqrt(2) means more than half its energy lies in one
+        // direction: fewer than two components, which is collapse. The
+        // threshold is arithmetic, not fitted, and it falls in the gap between
+        // the two distributions. Naming an answer is what the cursors are for;
+        // the state's own walk does not get to name one without evidence.
+        //
+        // Two earlier gates were tried and are recorded because both failed.
+        // Gating on the bank's retrievals alone stopped the drift and killed
+        // the walk's reading of operator memory (5.78 bits to 6.03 on the
+        // walk-alone relation). Gating on cleanup succeeding had the direction
+        // backwards -- it would admit exactly the collapsed hops.
+        //
+        // And not every collapse: only a collapse back onto what the world
+        // just said. Refusing every collapse stopped the drift and cost
+        // composition 2.3 times over (0.096 to 0.223 bits on a new pair),
+        // because the walk that answers a composition converges onto the answer,
+        // which is a collapse too. Where collapsing hops actually land:
+        //
+        //   composition, after the cue    3.0% the last token   96.8% the answer
+        //   judge, grounded               5.4% the last token   82.2% the answer
+        //   judge, history wiped        100.0% the last token    0.0% the answer
+        //
+        // Every one of 23351 ungrounded collapses fell back onto the token just
+        // said. That is an echo, not a read: with nothing under it the walk can
+        // only return its input. A grounded walk arrives somewhere else.
+        if self.cfg.walk_needs_retrieval && !self.retrieved {
+            let mut clean = Vec::new();
+            let (ok, cos, tok) = self.cleanup(&cand, &mut clean);
+            let echo = ok && self.event_hist.first().copied() == Some(tok);
+            if echo && cos > std::f32::consts::FRAC_1_SQRT_2 {
+                if !self.frozen {
+                    self.refused_hops += 1;
+                }
+                return;
+            }
+        }
+        self.p = cand;
 
         self.gnode = self.graph.head_of(a);
         self.last_read_node = self.gnode;
@@ -1076,6 +1183,23 @@ impl Model {
         // threshold cannot work here: it pins at its ceiling whenever the model
         // is over-confident anywhere, and then the channel never fires, never
         // generates calibration data, and stays shut.
+        //
+        // What this rule is, measured: a *timing* signal, not a *sufficiency*
+        // signal. On the stateful judge it commits on 100% of questions with the
+        // history wiped, where the answer is right half the time, exactly as
+        // often as with the history present. "The evidence stopped moving" is
+        // not "the evidence is enough", and this rule must not be read as an
+        // accept-or-escalate decision. What does sort accepted answers from
+        // unsafe ones is the probability itself, which under natural forgetting
+        // is calibrated (confidence 0.789 against accuracy 0.831 in the hardest
+        // bucket, 0.959 against 0.997 in the most faded); a caller that needs
+        // to decline should threshold that, as a decision model's caller does.
+        //
+        // A counterfactual remedy was tried and rejected on measurement:
+        // scoring the situation by how far it moves the answer from what memory
+        // alone would say. Accepting the most-evidenced 80% kept 0.908 correct
+        // against 0.987 for the most confident 80%, because a correct answer
+        // that agrees with the prior carries little evidence by construction.
         let rising = q > self.prev_answer_conf + 1e-4;
         let settled = !rising && q >= self.cfg.speak_fallback;
         self.prev_answer_conf = q;
@@ -1224,6 +1348,7 @@ impl Model {
                 // cursor itself. Stepping with the self-token instead computed
                 // `a1 (*) a1` once the cursor had already become a1, so the
                 // first link worked and the chain never advanced past it.
+                self.retrieved = false;
                 if let Some(t) = self.event_hist.first().copied() {
                     // Step the responses, but do NOT rebind. `step_cursors` uses
                     // `cursor (*) E_arriving` and never reads `binds`, so binding
@@ -1235,7 +1360,27 @@ impl Model {
                     self.step_cursors(t);
                 }
 
-                if self.cfg.walk_during_gap {
+                // The walk moves the state only on a tick that read something.
+                //
+                // It used to hop every silent tick whatever the cursors found.
+                // Measured with the episode wiped before a question, so that
+                // nothing could be retrieved: the answer the moment it was asked
+                // sat at the base rate, 0.644, and six silent ticks later it had
+                // drifted to 0.555, a mean movement of 0.333 in P(YES) with
+                // nothing under it. Switching the self-feedback channels off one
+                // at a time changed little; the walk, or all feedback together
+                // (which is what drives it), took the drift to 0.011. The
+                // grounded judge did not care either way.
+                //
+                // Silence is for reading memory -- unbind on silence is the half
+                // of the tick that speech does not do. A hop that retrieved
+                // nothing is not a read; it is the state being transformed with
+                // no evidence, and what it moves is the answer. So the state
+                // holds when nothing verified, which is also what "a finished
+                // walk holds its answer through surplus silence" already asks.
+                if self.cfg.walk_during_gap
+                    && (!self.cfg.walk_needs_retrieval || self.retrieved)
+                {
                     self.step_walk();
                 }
 
