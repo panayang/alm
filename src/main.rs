@@ -284,6 +284,21 @@ fn main() {
         "drift" => {
             alm::judge::drift_diagnosis(if limit > 0 { limit } else { 8000 }, seed);
         }
+        // Questions about a case in progress on a real process log: screen them
+        // before any model sees them.
+        // Can the mechanism retrieve a value by its key, keeping who said it?
+        "slots" => {
+            alm::slots::run(if limit > 0 { limit } else { 20_000 }, seed);
+        }
+        // What does the user want now? Dialogue state on MultiWOZ 2.2.
+        "woz" => {
+            let dd = data.clone().expect("woz wants --data MULTIWOZ_2.2_DIR");
+            alm::woz::run(&dd, limit, widths[0], bankses[0], seed, eta, horizon);
+        }
+        "bpi-screen" => {
+            let f = data.clone().expect("bpi-screen wants --data FILE.xes");
+            alm::bpi::screen(&f);
+        }
         "judge" => {
             alm::judge::run(if limit > 0 { limit } else { 40_000 }, seed);
         }

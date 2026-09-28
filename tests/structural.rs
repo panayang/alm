@@ -1990,3 +1990,34 @@ fn silence_does_not_make_an_answer_with_nothing_under_it_worse() {
         after
     );
 }
+
+/// The episode trace answers "what followed this pair here last" by content:
+/// a key set twice recalls the later value, a value set under another pair does
+/// not come back, and nothing recalled from before the context began.
+#[test]
+fn the_episode_trace_recalls_the_latest_value_by_its_pair() {
+    let mut cfg = Config::local();
+    cfg.vocab = 32;
+    cfg.d = 256;
+    cfg.mem_banks = 1024;
+    cfg.cleanup_floor_mult = 1.1;
+    cfg.episodic = true;
+    cfg.episodic_decay = 1.0;
+    cfg.derive();
+    let mut m = Model::new(cfg);
+    let (user, clerk, ask) = (0usize, 1, 2);
+    let (s1, s2) = (5usize, 6);
+    let (v1, v2, v3) = (20usize, 21, 22);
+    // user sets s1 = v1; clerk offers s1 = v3; user sets s2 = v2; user resets s1 = v2
+    let seq = [user, s1, v1, clerk, s1, v3, user, s2, v2, user, s1, v2, ask, user, s1];
+    let mut first = None;
+    for (i, &x) in seq.iter().enumerate() {
+        m.tick(Some(x), false);
+        if i == 1 {
+            first = Some(m.episodic_recall());
+        }
+    }
+    assert_eq!(first.unwrap(), None, "a fresh context recalled something before anything was bound");
+    let r = m.episodic_recall().expect("the trace named nothing for a pair written twice");
+    assert_eq!(r.0, v2, "recalled {} for (user, s1): not the latest value the user gave", r.0);
+}

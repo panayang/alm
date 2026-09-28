@@ -30,6 +30,9 @@
 pub mod acquire;
 pub mod baseline;
 pub mod bedside;
+pub mod bpi;
+pub mod woz;
+pub mod slots;
 pub mod budget;
 pub mod chainmem;
 pub mod clinical;

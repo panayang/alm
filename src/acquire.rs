@@ -328,6 +328,7 @@ pub fn run(
     // it on. `--ablate` turns named mechanisms off, which is how a mechanism
     // is compared against its own absence on real data.
     cfg.verify_gate = cfg.verify_gate || verify_gate;
+    cfg.apply_env();
     if let Some(a) = ablate {
         for part in a.split(',') {
             match part.trim() {

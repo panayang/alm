@@ -705,6 +705,53 @@ pub struct Config {
     /// would be the right thing to do even if it cost codelength. The
     /// assertion that guards it is written in those terms and mentions no bits.
     pub verify_gate: bool,
+    /// An episode trace: what this context has bound, recallable by content.
+    ///
+    /// The superposed banks are long-term memory. They are keyed by the pair of
+    /// the two previous tokens and never reset, so `(user, slot) -> value` holds
+    /// every value that slot has had in every episode, and reading it returns
+    /// the prior. Nothing in the situation held a binding for longer than the
+    /// lag blocks' reach: `rebind` overwrites every block on each event. So
+    /// "what is slot s now" -- the last value that followed s in this context
+    /// -- had nowhere to be read from. Measured with a known answer (`slots`):
+    /// with 64 values to choose among, a value set in the same turn was named
+    /// 0.10 of the time, and wrong answers were mostly some value of the episode
+    /// unrelated to the key.
+    ///
+    /// The trace is situation, not memory: a vector restored by probes and
+    /// cleared with the context. Each event adds `E_prev (*) E_x` after
+    /// decaying what is there by `episodic_decay`; each event then reads the
+    /// trace back by its own token, `E_x` unbinding it to what followed `x`
+    /// earlier in this context, most recent strongest. That recall is one more
+    /// feature block.
+    ///
+    /// Measured on `slots` (64 values, d = 512, decay 1.0, 2000 episodes,
+    /// second half read), accuracy on "what is slot s now":
+    ///
+    /// ```text
+    ///                                    off     on
+    ///   all questions                  0.229  0.895
+    ///   user set it in this turn       0.103  0.909
+    ///   user set it 6+ turns ago       0.048  0.820
+    ///   clerk offered another since    0.302  0.930
+    /// ```
+    ///
+    /// With 512 values -- each seen about ten times -- 0.787. The recall itself
+    /// is read without the readout (`Model::episodic_recall`) and names the
+    /// right value 0.975 of the time for one set this turn.
+    ///
+    /// Off by default until it has been measured on real data and in the facts
+    /// matrix.
+    pub episodic: bool,
+    /// Per-event decay of the episode trace. Speech decays it; silence does not.
+    /// Replacement already keeps a key current, so decay only trades reach
+    /// for noise: at d = 256, recall of a value set this turn was 0.91 at 0.97
+    /// and 0.75 at 1.0, of one set 6+ turns ago 0.16 and 0.39. At d = 512 the
+    /// trade vanishes and 1.0 is better everywhere.
+    pub episodic_decay: f32,
+    /// Initial gain on the recall in the codebook term. The gain is then
+    /// learned (see `Model::learn_naming_gain`).
+    pub episodic_codebook: f32,
     /// See `StepRule`. Fixed until a change-point measurement says otherwise.
     pub step_rule: StepRule,
     /// Floor on the error-driven step, so a settled row is never frozen
@@ -818,6 +865,9 @@ impl Config {
             use_binding: true,
             bind_self: true,
             verify_gate: true,
+            episodic: false,
+            episodic_decay: 0.97,
+            episodic_codebook: 1.0,
             step_rule: StepRule::Fixed,
             step_floor: 0.02,
             bind_mode: BindMode::Both,
@@ -893,6 +943,18 @@ impl Config {
     /// fed only the routing query and never the features, so the self channels
     /// -- which write into the ladder -- had no path to the prediction at all.
     /// That is why every three-stream ablation read as no effect.
+    /// Switches read from the environment, for experiments run from the
+    /// command line: ALM_EPISODIC=1 turns the episode trace on, and
+    /// ALM_EPISODIC_DECAY sets its decay (default 1.0 when turned on this way).
+    pub fn apply_env(&mut self) {
+        if std::env::var("ALM_EPISODIC").is_ok() {
+            self.episodic = true;
+            self.episodic_decay =
+                std::env::var("ALM_EPISODIC_DECAY").ok().and_then(|x| x.parse().ok()).unwrap_or(1.0);
+            eprintln!("  episode trace on, decay {}", self.episodic_decay);
+        }
+    }
+
     pub fn feature_blocks(&self) -> usize {
         1 + self.bind_blocks() + self.rungs
     }
@@ -910,7 +972,7 @@ impl Config {
         if !self.use_binding {
             return 0;
         }
-        let extra = if self.bind_self { 1 } else { 0 };
+        let extra = if self.bind_self { 1 } else { 0 } + if self.episodic { 1 } else { 0 };
         match self.bind_mode {
             // Off means no conjunctions, not no blocks: the lag-zero block is
             // the event itself and does not depend on the mode. Without this,

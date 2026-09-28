@@ -108,6 +108,9 @@ pub struct Volatile {
     prev_answer: Option<(Vec<f32>, usize)>,
     last_self_token: Option<usize>,
     prev2: Option<usize>,
+    /// The episode trace is situation: see `Config::episodic`.
+    ep_trace: Vec<f32>,
+    ep_hist: Vec<usize>,
 }
 
 pub struct Model {
@@ -130,6 +133,13 @@ pub struct Model {
     pub mem: Vec<Vec<f32>>,
     /// The token before last, so a triple can be formed without a boundary.
     prev2: Option<usize>,
+    /// Learned gain on naming the episode trace's recall; memory, not situation.
+    naming_gain: f32,
+    naming_gate: Vec<f32>,
+    /// This context's bindings, decayed per event and never renormalised.
+    ep_trace: Vec<f32>,
+    /// The two latest events, the trace's key.
+    ep_hist: Vec<usize>,
     /// Responses in flight. Each stepped every tick; the oldest is re-seeded
     /// whenever the world speaks.
     cursors: Vec<Vec<f32>>,
@@ -246,6 +256,7 @@ pub struct Model {
 
 impl Model {
     pub fn new(cfg: Config) -> Self {
+        let gain0 = cfg.episodic_codebook;
         let emb = Embeddings::new(&cfg);
         let ladder = Ladder::new(&cfg);
         let graph = Graph::new(&cfg);
@@ -269,6 +280,10 @@ impl Model {
             p,
             mem: vec![vec![0.0; d]; cfg_banks],
             prev2: None,
+            ep_trace: vec![0.0; d],
+            ep_hist: Vec::new(),
+            naming_gain: gain0,
+            naming_gate: vec![0.0; d],
             cursors: vec![vec![0.0; d]; cfg_traj],
             cursor_age: vec![0; cfg_traj],
             cursor_w: vec![0.0; cfg_traj],
@@ -351,6 +366,8 @@ impl Model {
             prev_answer: self.prev_answer.clone(),
             last_self_token: self.last_self_token,
             prev2: self.prev2,
+            ep_trace: self.ep_trace.clone(),
+            ep_hist: self.ep_hist.clone(),
         }
     }
 
@@ -378,6 +395,8 @@ impl Model {
         self.prev_answer = v.prev_answer;
         self.last_self_token = v.last_self_token;
         self.prev2 = v.prev2;
+        self.ep_trace = v.ep_trace;
+        self.ep_hist = v.ep_hist;
         self.covert_log.clear();
         self.overt_log.clear();
     }
@@ -485,6 +504,91 @@ impl Model {
     }
 
     /// The current feature vector, for the block-agreement assertion.
+    /// The token the episode trace's recall block names now, and its cosine;
+    /// None when it names nothing. A diagnostic with a known answer: it reads
+    /// the recall without the readout in between.
+    pub fn episodic_recall(&self) -> Option<(usize, f32)> {
+        if !self.cfg.episodic || self.binds.is_empty() {
+            return None;
+        }
+        let r = self.binds.last().unwrap();
+        let mut clean = Vec::new();
+        let (ok, cos, tok) = self.cleanup(r, &mut clean);
+        if ok { Some((tok, cos)) } else { None }
+    }
+
+    /// What the codebook term names from: the state, plus the episode trace's
+    /// recall when there is one. The recall is a token, so it is named the way
+    /// the state is -- through the codebook, which needs no row -- and a value
+    /// heard once in this context can be said back without having been learned.
+    fn naming(&self, p: &[f32], phi: &[f32]) -> Vec<f32> {
+        let mut out = p.to_vec();
+        let w = self.naming_weight(p);
+        if self.cfg.episodic && w != 0.0 {
+            let d = self.cfg.d;
+            let at = self.cfg.bind_blocks() * d;
+            if phi.len() >= at + d {
+                for i in 0..d.min(out.len()) {
+                    out[i] += w * phi[at + i];
+                }
+            }
+        }
+        out
+    }
+
+    /// The gain on the recall's naming term, fitted like the readout: the
+    /// exact gradient of the charge on the token the world said. It rises when
+    /// what the trace recalls is what gets said, and falls when it is not, so
+    /// whether recall is worth naming -- and how loudly -- is learned rather
+    /// than set. A fixed gain of 1 left a correct recall (0.91-1.00) unsaid
+    /// against learned rows, and the answer was mostly `<none>`.
+    fn learn_naming_gain(&mut self, sc: &code::Scored, phi: &[f32], target: usize, eta: f32) {
+        if !self.cfg.episodic || self.frozen {
+            return;
+        }
+        let d = self.cfg.d;
+        let at = self.cfg.bind_blocks() * d;
+        if phi.len() < at + d {
+            return;
+        }
+        let rec = &phi[at..at + d];
+        if crate::num::norm(rec) < 1e-6 {
+            return;
+        }
+        let mut expect = 0.0f32;
+        for &(tok, e) in sc.rows.iter() {
+            expect += (e / sc.z) * crate::num::dot(self.emb.row(tok as usize), rec);
+        }
+        let grad = crate::num::dot(self.emb.row(target), rec) - expect;
+        if self.naming_weight(&phi[..d]) <= 0.0 && grad < 0.0 {
+            return;
+        }
+        self.naming_gain += eta * grad;
+        for i in 0..d {
+            self.naming_gate[i] += eta * grad * phi[i];
+        }
+    }
+
+    /// How loudly to name the recall here: a gain plus a linear gate on the
+    /// state, floored at zero. A single gain learned from every event settled
+    /// near 2, because whenever a slot is set anew the recall at that moment is
+    /// the old value -- while at a question the same recall is exactly right.
+    /// Whether recall is worth saying depends on where one is, and the state
+    /// is where one is.
+    fn naming_weight(&self, p: &[f32]) -> f32 {
+        (self.naming_gain + crate::num::dot(&self.naming_gate, &p[..self.naming_gate.len().min(p.len())])).max(0.0)
+    }
+
+    /// The gain on the recall's naming term as it stands.
+    pub fn naming_gain(&self) -> f32 {
+        self.naming_gain
+    }
+
+    /// The episode trace's recall block as it stands (diagnostic).
+    pub fn episodic_block(&self) -> Option<&[f32]> {
+        if self.cfg.episodic { self.binds.last().map(|v| v.as_slice()) } else { None }
+    }
+
     pub fn features_now(&self) -> Vec<f32> {
         self.features(&self.p.clone())
     }
@@ -534,7 +638,7 @@ impl Model {
             &self.store,
             &phi,
             !self.cfg.no_readout,
-            Some(&p),
+            Some(&self.naming(&p, &phi)),
             self.cfg.readout_codebook,
             Some(&self.emb),
         )
@@ -886,6 +990,84 @@ impl Model {
                 slot += 1;
             }
         }
+        if self.cfg.episodic {
+            // Keyed by the ordered pair of the two latest events. At each event: recall what followed the pair that
+            // now stands -- (previous, x) -- earlier in this context; then write
+            // x under the pair that preceded it, (before-previous, previous).
+            //
+            // A key written again is replaced rather than superposed with its
+            // old value. With plain accumulation a slot set twice recalled
+            // either value about equally, and the recall named the right one
+            // 0.44 of the time on a value set in the same turn.
+            //
+            // The first factor is dilated, i -> 3 i mod d, before it is bound.
+            // A cyclic shift will not do: it commutes with convolution, so a
+            // shifted key cancels algebraically against the next one and every
+            // recall came back, exactly and at cosine 1.0, as the token two
+            // events back. A dilation by an odd factor permutes the frequencies,
+            // so it keeps a unitary vector unitary and the unbinding exact, and
+            // D(a) is unrelated to a, which makes the pair directional -- except
+            // at the frequencies the dilation fixes, k (u - 1) = 0 mod d. The
+            // factor is 3 because that fixes only k = 0 and d/2; 97 fixed 32 of
+            // 256, and the token two events back still came through.
+            let key = |a: usize, b: usize, emb: &crate::embed::Embeddings| -> Vec<f32> {
+                let ea = emb.row(a);
+                let mut da = vec![0.0f32; d];
+                for i in 0..d {
+                    da[(i * 3) % d] = ea[i];
+                }
+                let mut k = vec![0.0f32; d];
+                crate::num::circconv(&da, emb.row(b), &mut k);
+                normalize(&mut k);
+                k
+            };
+            let prev = self.ep_hist.first().copied();
+            let prev2 = self.ep_hist.get(1).copied();
+            if let (Some(a), Some(b)) = (prev2, prev) {
+                let k = key(a, b, &self.emb);
+                let lam = self.cfg.episodic_decay;
+                for v in self.ep_trace.iter_mut() {
+                    *v *= lam;
+                }
+                // Replace, do not superpose: if the key already names a token,
+                // take that token's binding out by the amount it is present.
+                // Only the named token -- with a unitary key, unbinding is an
+                // invertible rotation of the whole trace, not a projection onto
+                // one key, so subtracting the raw recall (the delta rule as the
+                // readout uses it) erased everything each time it wrote.
+                let mut old = vec![0.0f32; d];
+                crate::num::unbind(&self.ep_trace, &k, &mut old);
+                let mut clean = Vec::new();
+                let mut normed = old.clone();
+                normalize(&mut normed);
+                let (ok, _, _) = self.cleanup(&normed, &mut clean);
+                let mut w = vec![0.0f32; d];
+                let mut val = ex.clone();
+                if ok {
+                    let amount = crate::num::dot(&old, &clean);
+                    for i in 0..d {
+                        val[i] -= amount * clean[i];
+                    }
+                }
+                crate::num::circconv(&val, &k, &mut w);
+                for i in 0..d {
+                    self.ep_trace[i] += w[i];
+                }
+            }
+            let mut r = vec![0.0f32; d];
+            if let Some(b) = prev {
+                crate::num::unbind(&self.ep_trace, &key(b, x, &self.emb), &mut r);
+                normalize(&mut r);
+            }
+            // Name it if it is nameable; otherwise leave it as the mixture it is.
+            let mut clean = Vec::new();
+            let (ok, _, _) = self.cleanup(&r, &mut clean);
+            // A recall that names nothing is left out rather than passed on as
+            // noise: the block is also what names the recalled token below.
+            self.binds[slot] = if ok { clean } else { vec![0.0f32; d] };
+            self.ep_hist.insert(0, x);
+            self.ep_hist.truncate(2);
+        }
         self.event_hist.insert(0, x);
         self.event_hist.truncate(self.cfg.bind_lags.max(1));
         // The key the lag blocks stand on has just changed, and it cannot
@@ -1151,7 +1333,7 @@ impl Model {
             &self.store,
             phi,
             !self.cfg.no_readout,
-            Some(&st),
+            Some(&self.naming(&st, &phi)),
             self.cfg.readout_codebook,
             Some(&self.emb),
         )
@@ -1394,7 +1576,7 @@ impl Model {
                         &self.store,
                         &phi,
                         !self.cfg.no_readout,
-                        Some(&p),
+                        Some(&self.naming(&p, &phi)),
                         self.cfg.readout_codebook,
                         Some(&self.emb),
                     );
@@ -1423,7 +1605,7 @@ impl Model {
                 if silent {
                     self.silent_settlements += 1;
                 }
-                let sc = code::score_with(&self.store, &phi, !self.cfg.no_readout && !silent, Some(&p0), self.cfg.readout_codebook, Some(&self.emb));
+                let sc = code::score_with(&self.store, &phi, !self.cfg.no_readout && !silent, Some(&self.naming(&p0, &phi)), self.cfg.readout_codebook, Some(&self.emb));
                 let prob = sc.prob_of(&self.store, x as u32);
                 out.bits = code::charge_bits(prob);
                 self.total_bits += out.bits;
@@ -1489,7 +1671,7 @@ impl Model {
                         // The associative write: the same `Scored` the ledger
                         // charged, so the rows are fitted against the
                         // distribution that was actually settled.
-                        let sc_neg = code::score_with(&self.store, &phi, !self.cfg.no_readout, Some(&p0), self.cfg.readout_codebook, Some(&self.emb));
+                        let sc_neg = code::score_with(&self.store, &phi, !self.cfg.no_readout, Some(&self.naming(&p0, &phi)), self.cfg.readout_codebook, Some(&self.emb));
                         // Zero means every token the distribution scored: the
                         // exact softmax gradient, against exactly the
                         // distribution the ledger charged. The documentation
@@ -1509,8 +1691,9 @@ impl Model {
                         // distribution the ledger never charged -- exactly what
                         // `code.rs` says must not happen. Identical when the
                         // flag is off, which is why it stayed hidden.
-                        let sc_write = code::score_with(&self.store, &phi, !self.cfg.no_readout && !silent, Some(&p0), self.cfg.readout_codebook, Some(&self.emb));
+                        let sc_write = code::score_with(&self.store, &phi, !self.cfg.no_readout && !silent, Some(&self.naming(&p0, &phi)), self.cfg.readout_codebook, Some(&self.emb));
                         self.store.write(&sc_write, &phi, x as u32, &negs, eta);
+                        self.learn_naming_gain(&sc_write, &phi, x, eta);
                     }
                     if !self.cfg.no_eligibility {
                         // Gap-time reads get their share of the settlement

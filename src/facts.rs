@@ -33,7 +33,7 @@ struct Fact {
     rule: &'static str,
 }
 
-const FACTS: [Fact; 10] = [
+const FACTS: [Fact; 11] = [
     Fact { name: "learns a deterministic successor", rule: "charge < 0.5 bits (truth 0)" },
     Fact { name: "not confidently wrong on noise", rule: "i.i.d. charge < uniform 6.00" },
     Fact { name: "does not write off the rare", rule: "rare - common excess < 1 bit" },
@@ -44,6 +44,7 @@ const FACTS: [Fact; 10] = [
     Fact { name: "answers a new pair from its seen part", rule: "novel charge < 0.25 bits (truth 0)" },
     Fact { name: "silence does not worsen the ungrounded", rule: "wiped Brier after <= at ask + 0.01" },
     Fact { name: "the walk alone answers a relation", rule: "rows off: charge < uniform 6.00" },
+    Fact { name: "says back a key's value set this turn", rule: "accuracy > 0.50 (64 values, chance 0.015)" },
 ];
 
 fn base(v: usize, seed: u64, set: fn(&mut Config)) -> Model {
@@ -277,6 +278,9 @@ fn evaluate(l: &Learner) -> Vec<(bool, f64)> {
     let (ba, bb) = crate::judge::ungrounded_brier(4000, 7, l.set);
     let dr = bb - ba;
     let wa = walk_alone(l.set);
+    // Added when MultiWOZ showed a value said in the same turn named 0.53 of
+    // the time: can the learner say back what a key was just set to here?
+    let tt = crate::slots::this_turn(2000, 7, l.set);
     vec![
         (s < 0.5, s),
         (n < 6.0, n),
@@ -288,6 +292,7 @@ fn evaluate(l: &Learner) -> Vec<(bool, f64)> {
         (nv < 0.25, nv),
         (dr <= 0.01, dr),
         (wa < 6.0, wa),
+        (tt > 0.5, tt),
     ]
 }
 
@@ -301,6 +306,13 @@ pub fn run() {
         Learner { name: "no self block", set: |c| c.bind_self = false },
         Learner { name: "no read-back gate", set: |c| c.verify_gate = false },
         Learner { name: "echo gate on", set: |c| c.walk_needs_retrieval = true },
+        Learner {
+            name: "episode trace",
+            set: |c| {
+                c.episodic = true;
+                c.episodic_decay = 1.0;
+            },
+        },
         Learner {
             name: "neither",
             set: |c| {
