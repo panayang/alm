@@ -1,5 +1,10 @@
 //! Questions about a case in progress, on a real process log.
 //!
+//! **Open-loop instrument.** The world's next event here is fixed in advance
+//! and ignores what the model says, so this measures memory and prediction,
+//! not response. It is kept as a record; it is not the test this design is
+//! for (see the top of `lib.rs`).
+//!
 //! PhysioNet taught what this architecture is not for. In-hospital death is a
 //! function of how much and how bad, summed over a stay -- a bag of counts gets
 //! 0.80 and adding order adds nothing -- and the architecture's state is a

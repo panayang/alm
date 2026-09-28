@@ -1,5 +1,10 @@
 //! A stateful judge.
 //!
+//! **Open-loop instrument.** The world's next event here is fixed in advance
+//! and ignores what the model says, so this measures memory and prediction,
+//! not response. It is kept as a record; it is not the test this design is
+//! for (see the top of `lib.rs`).
+//!
 //! A decision model in the shape the field has just started asking for: the
 //! application declares the valid answers, the model returns one of them with a
 //! probability, and it may decline to answer when it is unsure. The one on the

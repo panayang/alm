@@ -1,5 +1,10 @@
 //! Can the mechanism retrieve a value by its key at all?
 //!
+//! **Open-loop instrument.** The world's next event here is fixed in advance
+//! and ignores what the model says, so this measures memory and prediction,
+//! not response. It is kept as a record; it is not the test this design is
+//! for (see the top of `lib.rs`).
+//!
 //! On MultiWOZ the model answers "what does the user want for slot s" at
 //! 0.52 against 0.90 for the rule "the last value the user gave", and only
 //! 0.53 when the value was said in the very same turn. Wrong answers there are

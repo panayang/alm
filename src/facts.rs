@@ -304,20 +304,15 @@ pub fn run() {
     let learners: Vec<Learner> = vec![
         Learner { name: "default", set: |_| {} },
         Learner { name: "no self block", set: |c| c.bind_self = false },
-        Learner { name: "no read-back gate", set: |c| c.verify_gate = false },
+        // The read-back gate is off by default since 2026-09-28, so this
+        // learner is the departure and the default is its absence.
+        Learner { name: "read-back gate on", set: |c| c.verify_gate = true },
         Learner { name: "echo gate on", set: |c| c.walk_needs_retrieval = true },
         Learner {
             name: "episode trace",
             set: |c| {
                 c.episodic = true;
                 c.episodic_decay = 1.0;
-            },
-        },
-        Learner {
-            name: "neither",
-            set: |c| {
-                c.bind_self = false;
-                c.verify_gate = false;
             },
         },
         Learner { name: "top-16 negatives", set: |c| c.neg_samples = 16 },

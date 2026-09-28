@@ -1,5 +1,10 @@
 //! Asked at the bedside, at any moment.
 //!
+//! **Open-loop instrument.** The world's next event here is fixed in advance
+//! and ignores what the model says, so this measures memory and prediction,
+//! not response. It is kept as a record; it is not the test this design is
+//! for (see the top of `lib.rs`).
+//!
 //! The patient readout took a snapshot -- the features at the last tick, or
 //! pooled over the stay -- and fitted a probe to it. The foundations draft says
 //! what that can and cannot see: an evaluation that can be redone at any time

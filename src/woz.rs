@@ -1,5 +1,10 @@
 //! What does the user want now? Dialogue state, asked at every turn.
 //!
+//! **Open-loop instrument.** The world's next event here is fixed in advance
+//! and ignores what the model says, so this measures memory and prediction,
+//! not response. It is kept as a record; it is not the test this design is
+//! for (see the top of `lib.rs`).
+//!
 //! BPI 2012 failed its screen: its structural questions are answered by the
 //! last two events or by counts, and its time questions reduce to keeping a
 //! clock. A task-oriented dialogue fails neither way. MultiWOZ 2.2: 10437

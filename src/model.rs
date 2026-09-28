@@ -536,6 +536,11 @@ impl Model {
         out
     }
 
+    /// Only active with `Config::episodic`, which is off by default. Note what
+    /// kind of learner this is before extending it: a gain and a state gate
+    /// fitted by the gradient of the charge. The design sanctions one such
+    /// learner, the readout rows; this is a second.
+    ///
     /// The gain on the recall's naming term, fitted like the readout: the
     /// exact gradient of the charge on the token the world said. It rises when
     /// what the trace recalls is what gets said, and falls when it is not, so

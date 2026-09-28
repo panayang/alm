@@ -704,6 +704,16 @@ pub struct Config {
     /// whether an address was written, which one convolution settles, and it
     /// would be the right thing to do even if it cost codelength. The
     /// assertion that guards it is written in those terms and mentions no bits.
+    ///
+    /// **Off by default since 2026-09-28.** It was on from 433a194 (09-21) to
+    /// then, and every experiment in that window ran with it on. The paper
+    /// had reported this check as inert and credited it nothing. Since then it
+    /// maintains none of the facts in the facts matrix, and its only support
+    /// is a snapshot probe on in-hospital death (max-pooled AUROC 0.7687 ->
+    /// 0.7835, about one standard error) -- an open-loop prediction benchmark
+    /// of the kind this design is not for. The argument above stands; the
+    /// evidence for making it the default does not. Turn it on for an
+    /// experiment that asks what it maintains, not to raise a score.
     pub verify_gate: bool,
     /// An episode trace: what this context has bound, recallable by content.
     ///
@@ -740,8 +750,22 @@ pub struct Config {
     /// is read without the readout (`Model::episodic_recall`) and names the
     /// right value 0.975 of the time for one set this turn.
     ///
-    /// Off by default until it has been measured on real data and in the facts
-    /// matrix.
+    /// **Off by default, and it should stay off unless the design is changed
+    /// on purpose.** It was built on 2026-09-28 to answer MultiWOZ dialogue
+    /// state -- a lookup the rule "the last value the user gave" answers at
+    /// 0.89 and a dictionary at 0.99. That is precise context association,
+    /// which the paper states as a non-goal ("a design that makes the
+    /// background exact has rebuilt the prefix under another name"). What it
+    /// did establish stays true and is worth keeping on record: without it
+    /// nothing in the situation holds a binding past the lag blocks, so "what
+    /// did this context bind to X" has nowhere to be read from; the long-term
+    /// banks answer it with the prior. Whether the design wants that
+    /// capability is a design question, not a tuning one.
+    ///
+    /// Measured with it on: facts matrix, all ten facts kept plus F11;
+    /// PhysioNet codelength neutral (3.380 against 3.379 bits); MultiWOZ, 1000
+    /// dialogues, d = 512, 0.525 -> 0.619 (last user mention 0.891), no gain
+    /// beyond three turn pairs and none where the rule is wrong.
     pub episodic: bool,
     /// Per-event decay of the episode trace. Speech decays it; silence does not.
     /// Replacement already keeps a key current, so decay only trades reach
@@ -750,7 +774,9 @@ pub struct Config {
     /// trade vanishes and 1.0 is better everywhere.
     pub episodic_decay: f32,
     /// Initial gain on the recall in the codebook term. The gain is then
-    /// learned (see `Model::learn_naming_gain`).
+    /// learned (see `Model::learn_naming_gain`) -- by the exact gradient of the
+    /// charge, which is the ledger being descended by something other than the
+    /// readout's delta rule. Inactive while `episodic` is off.
     pub episodic_codebook: f32,
     /// See `StepRule`. Fixed until a change-point measurement says otherwise.
     pub step_rule: StepRule,
@@ -864,7 +890,7 @@ impl Config {
             write_toward_embedding: true,
             use_binding: true,
             bind_self: true,
-            verify_gate: true,
+            verify_gate: false,
             episodic: false,
             episodic_decay: 0.97,
             episodic_codebook: 1.0,

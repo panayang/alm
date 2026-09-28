@@ -1,5 +1,10 @@
 //! Read the model's state as a patient, not as a predictor.
 //!
+//! **Open-loop instrument.** The world's next event here is fixed in advance
+//! and ignores what the model says, so this measures memory and prediction,
+//! not response. It is kept as a record; it is not the test this design is
+//! for (see the top of `lib.rs`).
+//!
 //! Four domains were measured with the same yardstick: prequential codelength
 //! on the next token. That is the autoregressive question, and this framework
 //! was specified as not autoregressive -- the founding note said in as many
