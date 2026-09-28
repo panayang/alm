@@ -61,7 +61,11 @@ construction. On a synthetic continual stream retrieval occurs and holds, and
 parallel responses are load-bearing. We rule on none of the components that
 measure net-negative, because the explanation for all of them rests on a
 property of our source rather than of the world, and because a replayed file
-cannot test a system for which time is a resource.
+cannot test a system for which time is a resource. This version describes the
+mechanism as revised since the first write-up (\S\ref{sec:revisions}), and an
+appendix records what a real clinical stream and three screened sources taught
+it, with the code version behind each result; every experiment there is
+open-loop, so none tests the response half of the design.
 \end{abstract}
 
 \section{Introduction}
@@ -172,6 +176,11 @@ similar-content-similar-bank (\S\ref{sec:addressing}).
 \item An explicit account of what a constructed source cannot settle, and of why
 a replayed stream cannot test a model for which time is a resource
 (\S\ref{sec:cannot}, \S\ref{sec:limits}).
+
+\item A record of the revisions since the first version, of which version
+produced each result, and of what real data taught the design --- including
+that every evaluation so far has been open-loop (\S\ref{sec:revisions},
+Appendix~\ref{app:empirical}).
 \end{enumerate}
 
 \section{Philosophical commitments}
@@ -407,7 +416,7 @@ picture.
 
 \paragraph{The emission reads the most matured response.} Let
 $i^{\star}=\arg\max_i (w_i, \text{recency}_i)$ lexicographically. Then
-$p=c_{i^\star}$, $\varphi=[\,p\,;\,\text{bound traces}\,;\,\text{event-locked
+$p=c_{i^\star}$, $\varphi=[\,p\,;\,E_x\,;\,\text{bound traces}\,;\,\text{event-locked
 bands}\,]$, and
 \begin{equation}
 s(o) \;=\; \underbrace{\langle R_o,\varphi\rangle}_{\text{learned}}
@@ -425,13 +434,33 @@ the strongest is the natural readout of parallel responses, not a competition
 between mechanisms.
 \end{remark}
 
+\paragraph{The event itself.} $E_x$ in $\varphi$ is the lag-zero member of the
+family the bound traces form, since $E_x\bind\delta=E_x$; the first version
+started at lag one, so a conjunction was present without its parts. Added in
+v3 (\S\ref{sec:revisions}): on a stream whose true charge is zero, a new pair
+of familiar parts cost $0.408$ bits without it and $0.103$ with it.
+
 \paragraph{The write.} Rows are updated by a delta rule
-$R_o \mathrel{+}= \eta\,(\mathbb{1}[o=x]-q(o))\,\varphi$ over the target and a
-set of negatives. Those negatives are the tokens the model currently ranks
+$R_o \mathrel{+}= \eta\,(\mathbb{1}[o=x]-q(o))\,\varphi$ against the emitted
+distribution $q$ --- the distribution the ledger charged. In the first version
+(v0) the write reached only the target and the tokens the model ranked
 highest, not a uniform sample: correcting what the model would actually have
-said is both error-driven and drawn from the same distribution the ledger
-charged. \S\ref{sec:negatives} shows this was the difference between a system
-that could represent a non-separable conjunction and one that could not.
+said. \S\ref{sec:negatives} shows this was the difference between a system
+that could represent a non-separable conjunction and one that could not. The
+same principle, taken to its limit, weights every token by $q$, and from v2 on
+that is what the write does. Truncation had a cost the synthetic source could
+not show: on an i.i.d.\ stream, where the right charge for a token of
+probability $p$ is exactly $-\log_2 p$, sixteen negatives gave tokens rarer than
+$2^{-10}$ a probability near $2^{-50}$, an excess of $41.2$ bits against $0.38$
+for the full distribution.
+
+\paragraph{Scoring.} Scores are normalised by subtracting their maximum, not by
+clamping them (v1). The delta rule is unregularised and rows grow; once several
+scores passed the clamp they became indistinguishable, and on a real stream the
+readout charged close to a uniform code ($8.05$ bits against $8.21$). The
+cleanup term $\lambda\langle E_o,p\rangle$ ranges over the whole codebook and is
+gated separately from the rows (v1): naming a token cannot require that it has
+a row.
 
 \subsection{Structural constraints}
 
@@ -468,6 +497,64 @@ ticks of silence did not answer at one, scoring $0.000$ where the same pair
 presented as an ordinary fact scored $0.74$. A clock in the key is a bug; the
 live fast rung remains available to the commit rule, which is where elapsed time
 belongs.
+
+\subsection{Revisions, and which version a result comes from}
+\label{sec:revisions}
+
+The mechanism above is the current one. Table~\ref{tab:versions} lists what
+changed since the first version and when. Sections~\ref{sec:isolated}
+to~\ref{sec:cannot} were measured on v0 and are reported as they were;
+Appendix~\ref{app:empirical} gives the version of every result it reports.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llp{9.4cm}}
+\toprule
+& commit, date & change\\
+\midrule
+v0 & \texttt{02bdf88}, 09-05 & the mechanism as first written up: top-$k$ negatives, softmax by
+clamping, cleanup term inside the readout's gate\\
+v1 & \texttt{b96b334}, 09-18 & softmax by subtracting the maximum; cleanup term over the whole
+codebook, gated separately from the rows\\
+v2 & \texttt{a2b55ee}, 09-18 & the write against the whole emitted distribution\\
+v3 & \texttt{a2e3c4a}, 09-20 & the event itself, $E_x$, in $\varphi$\\
+v4 & \texttt{433a194}, 09-21 & the read-back check reaches the emission, on by default\\
+v5 & \texttt{5ad0013}, 09-27 & cleanup over the codebook rather than over tokens with rows (no
+effect while rows are written densely)\\
+v6 & 09-28 & read-back check off by default; the switches below documented\\
+\bottomrule
+\end{tabular}
+\caption{Versions of the implementation (all dates 2026).}
+\label{tab:versions}
+\end{table}
+
+Four mechanisms exist in the code and are \emph{off} by default; each is
+documented where it is defined, with its evidence:
+\begin{itemize}
+\item the read-back check on the emission (above);
+\item a gate on the silent walk, built and withdrawn;
+\item step-size consolidation rules, measured and not adopted
+(Appendix~\ref{app:empirical});
+\item an episode trace.
+\end{itemize}
+
+The episode trace needs a word, because it touches a commitment. It is a
+vector in the volatile state, cleared with the context, into which each event
+$x$ is written under the ordered pair of the two events before it. The first
+factor of the key is permuted, $i\mapsto 3i \bmod d$, so that the pair is
+directional. A key written again has its cleaned old value taken out first. The
+recall --- what followed the pair now standing, earlier in this context --- is
+named through the codebook with a gain fitted to the charge.
+
+It was built to answer dialogue-state questions (Appendix~\ref{app:empirical}).
+It establishes something worth keeping on record: without it nothing in the
+situation holds a binding past the bound traces' reach, and the long-term
+banks answer ``what did this context bind to $X$'' with the prior. But it is
+precise context association, which \S\ref{sec:philosophy} states as a
+non-goal, and its gain is a second learner descending the ledger besides the
+rows. Whether the design wants that capability is a design question, and until
+it is decided the trace stays off.
 
 \section{Isolated verification}
 \label{sec:isolated}
@@ -614,6 +701,15 @@ exact codebook token and the write holds both identities, so the address can be
 a hash of the \emph{identities}. Vectors carry the superposition; identities
 carry the address. With that in place the read-back check becomes inert --- zero
 rejections --- and we report it as doing nothing rather than crediting it.
+
+The check was later wired to the emission (v4): a bound trace whose key the
+store reports as never written is zeroed, because what unbinding that address
+returns is a neighbour's content. For the pair the model is standing on, the
+read-back score separates written from unwritten completely ($0.931$ against
+$0.016$, floor $0.088$). It was made the default and returned to off in v6: it
+maintains none of the facts of Appendix~\ref{app:empirical}, and its only
+support was a snapshot probe on an open-loop prediction benchmark, about one
+standard error. It remains a switch.
 
 \section{The source and its instruments}
 \label{sec:source}
@@ -927,6 +1023,14 @@ finds a quiet corner \citep{friston2012free}. Real reactions are influenced by
 the individual without being generated by it, and requiring a full self-loop is
 the wrong route.
 
+\paragraph{No evaluation here is closed-loop.} Neither the synthetic source nor
+any real source of Appendix~\ref{app:empirical} lets the model's output change
+what the world does next: $\beta$ above has stayed at zero. Every result in this
+paper is therefore about memory and prediction. The response half of
+challenge--response --- what is said, and what the world does because it was
+said --- has not been tested at all, and a world in which behaviour influences
+experience without generating it is the evaluation this design most needs.
+
 \paragraph{What would settle these questions.} Real language content carrying
 real, non-authored temporal structure: timestamped transcripts, subtitle
 streams, conversation logs --- data in which silences are real silences of real
@@ -1017,11 +1121,408 @@ be substantially harder than anything reported here.
 
 \subsection*{Reproducibility}
 
-The implementation is $8953$ lines of Rust with no dependencies, deterministic
-under a counter-based generator with fixed-order float reductions, carrying $20$
-structural assertions and $6$ generator self-tests that run on every build. Two
+At v6 the implementation is $19{,}377$ lines of Rust with no dependencies,
+deterministic under a counter-based generator with fixed-order float
+reductions, carrying $36$ structural assertions and $6$ generator self-tests
+that run on every build (at v0: $8953$ lines, $20$ assertions). Two
 identical runs agree bit-for-bit. Constraints A1--A5 and each mechanism claim of
 \S\ref{sec:isolated} are asserted by a named test.
+
+\appendix
+
+\section{An empirical case: intensive-care streams, and three screened sources}
+\label{app:empirical}
+
+This appendix was added after the body of the paper and records what one real
+dataset taught the design. It is not a benchmark claim. Figures are from a
+single seed; where the number of positives is small the standard error is
+stated. Every figure was checked against a saved run output or re-run; where a
+figure could not be recovered it is stated qualitatively. Each carries the
+version of the code that produced it (Table~\ref{tab:versions} in
+\S\ref{sec:revisions}, and Table~\ref{tab:provenance} below).
+
+\paragraph{What is not tested.} Every experiment below is \emph{open-loop}: the
+world's next event is fixed in advance and does not depend on what the model
+said. The questions are answered by the world whatever the model answered. They
+therefore test memory and prediction, and not the response half of
+challenge--response. The circumstance ``what was asked before'' is never
+produced by the learner's own answers. The design calls for a world whose
+progression the learner's behaviour influences without generating it
+(\S\ref{sec:philosophy}, \S\ref{sec:limits}), and no experiment here has one.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{8.4cm}cp{3.6cm}}
+\toprule
+result & version & note\\
+\midrule
+timing alone, SAPS-I, SOFA; Electricity; panel information; PPM's use of the
+gap; the three screens & --- & no model involved\\
+probe table and the $+0.025$ of two mechanisms & v4 & the off arm is v2
+without the self block\\
+bedside table; step $0.02$ at the bedside; horizon $2048$ & v4 & \\
+codelength $3.379$ and the association table (all stays); the gate on the
+silent walk & v4 & \\
+association table on the first 400 stays; subset trend & v4 & working tree of
+\texttt{433a194}\\
+transfer across pools; replay & v4 & \\
+rarity excess ($41.2$ against $0.38$ bits) & v5 & re-run\\
+noisy-label table & v5 & re-run\\
+dilution; proper scores on the synthetic judge & v4 & \\
+descent against floor; step rules & v4 & working tree of \texttt{433a194}\\
+MultiWOZ with and without the episode trace & v6 & trace switched on\\
+facts matrix & v6 & re-run\\
+the early full-stream run near a uniform code & v0 & reported as the defect
+it exposed\\
+\bottomrule
+\end{tabular}
+\caption{Which code version produced which result of this appendix.}
+\label{tab:provenance}
+\end{table}
+
+Two results measured on v0 during this work are not reported: the value of
+silence to the memory on the clinical stream ($0.14$--$0.26$ bits per event),
+and the share of the gap the memory took against PPM ($0.169$ against $0.180$
+bits). Both were produced by the emission path that v1 repaired, and neither
+has been re-measured.
+
+\subsection{Data, and why this source}
+
+PhysioNet/CinC Challenge 2012 \citep{silva2012predicting}, set-a: 3996
+intensive-care stays, 1.73M timestamped measurements. Each measurement is one
+token (parameter, octile of its value), $V=296$. Elapsed time between
+measurements enters as idle ticks, $\lfloor\log_2\rfloor$ of the gap in minutes,
+capped at 11. In-hospital death: 554 stays (13.9\%).
+
+The source was chosen by a screen of its own. Standard concept-drift streams
+fail one. Electricity is sampled every thirty minutes without exception
+(coefficient of variation of the gaps $0.000$), and predicting the previous
+label scores 0.853 against 0.752 for naive Bayes, so the benchmark cannot show
+anything about a memory. Irregularly sampled clinical series are the opposite
+case: the observation times carry information. Using only \emph{when}
+measurements were taken and never their values, in-hospital death is predicted
+at AUROC 0.616 (the number of measurements in the last six hours), against
+0.637 for SAPS-I and 0.626 for SOFA, which are computed from the values.
+
+\subsection{A prediction at one position is not a relational question}
+
+In-hospital death is fixed at one position, the end of the stay, and it is a
+function of an order-free summary of the whole stay. Under a five-fold
+cross-validated linear probe (AUROC; memory v4):
+
+\begin{center}
+\small
+\begin{tabular}{lc}
+\toprule
+representation & AUROC\\
+\midrule
+count and mean-gap summary of the whole stay & 0.803\\
+memory state, max-pooled over the stay & 0.784\\
+memory state, mean-pooled & 0.774\\
+count summary plus hashed bigrams & 0.770\\
+hashed bigrams alone & 0.750\\
+memory state at the final tick & 0.713\\
+SAPS-I score & 0.635\\
+timing alone, best single feature & 0.616\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Adding bigrams to the count summary lowers it, from 0.803 to 0.770: order
+carries nothing here beyond counts. Two mechanisms, the lag-zero self block
+(v3) and the read-back check (v4, off by default since v6), raise the
+max-pooled readout by $0.025$ (mean-pooled by $0.017$). They lower the
+final-tick readout from 0.727 to 0.713: what they add helps the trajectory, not
+the snapshot at its end. The label is terminal structure, and an evaluation
+that can be redone at any time sees nothing that depends on position.
+
+The same question was then asked in the architecture's own shape (v4). The
+outcome is an event the world speaks at the end of the stay. Memory is
+continual across stays; the first half of the stays are learned from and the
+second half read. During a stay the question is put as a frozen probe at a
+quarter, a half and three quarters of the way through:
+
+\begin{center}
+\small
+\begin{tabular}{lcccc}
+\toprule
+asked at & memory & memory, stay wiped & counter, online & counter, batch\\
+\midrule
+25\% & 0.584 & 0.493 & 0.741 & 0.751\\
+50\% & 0.651 & 0.493 & 0.765 & 0.764\\
+75\% & 0.666 & 0.493 & 0.775 & 0.781\\
+end & 0.701 & 0.493 & 0.794 & 0.796\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The end-of-stay figure is close to the final-tick probe (0.701 against 0.713).
+The two protocols differ (a prequential half split against five-fold
+cross-validation) and are not strictly comparable. The closeness suggests that
+the readout takes out of the present state about what a linear probe does, and
+that what the present state lacks is the whole stay: the slowest background
+band spans 256 ticks, while a stay averages about 640.
+
+Lengthening that band to 2048 ticks tests this, and supports it only in part:
+\begin{itemize}
+\item the end-of-stay AUROC rises from 0.701 to 0.721 (0.605 at a quarter of
+the stay, from 0.584);
+\item the final-tick probe rises from 0.713 to 0.731;
+\item the mean-pooled probe is unchanged (0.774), and the max-pooled one falls
+(0.784 to 0.746);
+\item the gap to the online counter at the end of the stay narrows only from
+0.093 to 0.073.
+\end{itemize}
+A memory whose state is recency-weighted holds a whole-history count only in
+part, and a longer horizon alone does not make it one.
+
+\subsection{Screening a source before the model sees it}
+
+If last-$k$ events, counts, or counts with elapsed time already answer a
+question, no state can show anything on that question, however good it is.
+Three sources were screened (accuracy of memoryless judges on held-out cases):
+
+\begin{itemize}
+\item \emph{PhysioNet mortality}: the order-free count summary reaches 0.80,
+and adding order lowers it; unsuitable for showing a memory of order.
+
+\item \emph{BPI Challenge 2012} \citep{vandongen2012bpi}, a loan-application
+process log, 13087 cases. Structural questions about the case so far (``has an
+offer been sent'', ``is the latest offer event a cancellation'') are answered at
+$\ge0.95$ by the last two events or by counts. Questions about elapsed time
+leave room (``over 7 days since the offer was sent'': counts with elapsed time
+0.897), but they reduce to keeping a clock. Unsuitable.
+
+\item \emph{MultiWOZ~2.2} \citep{budzianowski2018multiwoz,zang2020multiwoz},
+10437 task-oriented dialogues, about $6\times10^5$ questions ``what value does
+the user currently want for slot $s$'', asked after every user turn. The rule
+``the last value the user gave for $s$'' answers 0.908, and restricting it costs
+0.23--0.33:
+  \begin{itemize}
+  \item the same rule over the last three turn pairs only, 0.677;
+  \item the most frequently mentioned value, 0.579;
+  \item the last value mentioned by either speaker, 0.582.
+  \end{itemize}
+The source passes the screen, and it is still unsuitable for this design.
+About nine questions in ten are literal: the answer is a value the user said,
+and a dictionary keyed by speaker, domain and slot answers them at 0.99, so no
+memory can do better than match it there. The remainder, mostly an offer
+accepted with ``yes'', is where organisation could show.
+
+With the episode trace of \S\ref{sec:revisions} switched on (v6; 1000
+dialogues, $d=512$):
+  \begin{itemize}
+  \item overall, 0.525 without the trace against 0.619 with it;
+  \item for a value said in the same turn, 0.512 against 0.789;
+  \item where the user never gave the value, 0.21 either way, against 0.51
+  for the best rule.
+  \end{itemize}
+It helped only where the answer was a recent literal, which is the part a
+dictionary already answers.
+\end{itemize}
+
+\subsection{The unit of prediction decides what is measured}
+
+At the granularity of a panel (the set of parameters recorded at one time) the
+stream appeared to hold an opening. The gap carries
+$I(\text{panel};\text{gap}\mid\text{previous panel})=0.485$ bits (a plug-in
+estimate), 10\% of the conditional entropy. Yet conditioning PPM's order-3
+context on the gap \emph{cost} it 0.047 bits per event, because 3600 distinct
+panels fragment every context it needs.
+
+At the granularity of a single parameter ($V=37$, measured on 600 stays) this
+inverts: PPM takes the gap, from 1.215 to 1.035 bits per event. The opening was
+a property of a bad prediction unit, not of the source. The choice of
+individuation is part of the question, and an advantage that appears under one
+individuation and not under a better-posed one is not an advantage of the
+learner.
+
+\subsection{Codelength is an instrument, not an objective}
+
+Next-token codelength (v4) against PPM \citep{cleary1984data} at its best order
+(order 2) over the same stream: 3.379 bits per event against 4.097. This is the
+reading \S\ref{sec:limits} calls the wrong yardstick and the right lower bound,
+and it is reported as such.
+
+Take the events whose order-2 context is new but whose order-1 context is not.
+There the margin depends on how often the (order-1 context, target)
+association had been seen before:
+\begin{itemize}
+\item never: $+2.74$ bits;
+\item once: $-1.03$;
+\item two to four times: $-0.95$;
+\item five to nineteen: $-0.26$;
+\item twenty or more: $+0.08$.
+\end{itemize}
+On the first 400 stays alone the same cell reads $+2.43$, $-1.91$, $-1.61$,
+$-0.45$, $+0.37$: the shape holds and the negative band narrows with
+experience. A counter holds an association after one occurrence; the delta rule
+needs several corrections. That band is a rate, not a price: it is where the
+memory has not yet arrived.
+
+Two earlier readings of the same column were wrong in instructive ways.
+\begin{itemize}
+\item \emph{Composition or rarity.} The loss on new contexts first looked like
+a failure to compose. Split by the rarity of the target, most of it was
+rarity. For targets seen a hundred times or more, new contexts are ahead of PPM
+as seen ones are ($+0.29$ and $+0.52$ bits, against $+0.44$ and $+0.77$). The
+losses concentrate on targets seen one to ninety-nine times ($-0.65$, $-0.60$).
+At matched rarity a new context still costs 0.15--0.75 bits more than a seen
+one, so rarity is the larger part of the loss, not all of it. The rarity loss
+was the truncated write of v0--v1, which v2 replaced (\S\ref{sec:design}).
+
+\item \emph{A trend on a subset.} On 400 stays both columns appeared to
+improve steadily through the stream; on all 3996 they settle by the second
+decile. 175k events lie entirely inside the learning phase, so a trend read
+there describes the subset.
+\end{itemize}
+
+Two findings limit what the number can say:
+\begin{itemize}
+\item \emph{It does not separate organisation from counting.} Take 400 patients
+from a set never seen, and pools of 200 to 3200 patients from the other set
+(v4).
+  \begin{itemize}
+  \item One pass over a pool lowers the codelength on the unseen patients by
+  about 0.045 bits per doubling of the pool, without saturating. PPM falls at
+  the same rate, and the margin stays flat at $0.74$--$0.76$.
+  \item Past one pass over the same pool, both absolute codelengths worsen
+  while the margin widens. The absolute column, not the margin, is the one to
+  read.
+  \end{itemize}
+
+\item \emph{A gain without a mechanism is not a reason to adopt.} A gate that
+refuses a silent hop collapsing onto the token just heard (v4, never adopted)
+improved the codelength by 0.046 bits overall and by 0.124 bits on events in
+new contexts. The explanation offered for the gain was tested and not
+supported, so the gate was not adopted. The test applied was: would this change
+still be right if the charge got worse? The read-back check is the same case in
+the other direction: made the default on an argument in v4, and returned to off
+in v6 because its measured support was a benchmark of the wrong kind.
+\end{itemize}
+
+\subsection{Noise floors depend on whether the target is noisy}
+
+A fixed-step least-mean-squares readout has a steady-state misadjustment
+proportional to the step and to the noise on the target, and none on a
+deterministic target \citep{widrow1960adaptive}. This was checked on a question
+with a known ceiling (v5): the spoken answer is flipped with probability 0.2, so
+the best AUROC is exactly 0.800 and the best Brier score exactly 0.160.
+
+\begin{center}
+\small
+\begin{tabular}{cccc}
+\toprule
+step & AUROC & Brier & ECE\\
+\midrule
+0.2 & 0.773 & 0.206 & 0.110\\
+0.05 & 0.797 & 0.178 & 0.072\\
+0.02 & 0.801 & 0.169 & 0.057\\
+0.005 & 0.807 & 0.175 & 0.059\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The alternative, that the answer is simply too rare to learn, was rejected.
+With the question held easy, accuracy stays at 0.999--1.000 as the answer grows
+rarer, down to one answer in 514 events.
+
+On the clinical stream (v4) the step of 0.02 fixed calibration, not
+discrimination. The charge on the spoken outcome fell from 0.627 bits, above the
+base-rate entropy of 0.590, to 0.586, and answers stopped changing during the
+silence. AUROC moved only from 0.701 to 0.712.
+
+The converse error was also made (v4). A residual on a stationary deterministic
+stream was first read as this misadjustment. A sweep refused it:
+\begin{itemize}
+\item the residual \emph{shrank} as the step grew (0.085 at step 0.5, 0.238 at
+0.05, measured after $10^5$ events), whereas a misadjustment grows with the
+step;
+\item recovery after a change was slower at the smaller step too (6236 against
+11483 events);
+\item on a stationary stream of $6\times10^5$ events, the residual at steps
+0.2 and 0.05 was still falling in the last segment (0.044 to 0.043, and 0.099
+to 0.091). Only at step 0.5 had it levelled.
+\end{itemize}
+It was a descent in progress, not a floor.
+
+Two step rules that shrink the step as a row settles were measured on a stream
+whose map is replaced halfway:
+\begin{itemize}
+\item a step of $\eta/(1+n)$ never learns: 5.4 bits, against 1.1 for the fixed
+step, in the first segment;
+\item an error-driven step recovers as well as it learns, but converges an
+order of magnitude worse: 0.90 against 0.11.
+\end{itemize}
+Neither can tell ``the error is small because this row has learned'' from ``the
+error is small because it is nearly there''.
+
+Next-token structure on the same stream prefers the larger step, so one global
+step cannot serve both. Separating ``learning structure'' from ``chasing noise''
+requires a quantity other than the error: on a noisy target the error never
+falls. Which quantity, without reintroducing a scalar objective, is open.
+
+\subsection{Measurement}
+
+\begin{itemize}
+\item \emph{Proper scores on uninformative answers.} On a synthetic judge
+(v4; 40000 episodes, the episode's history wiped just before the question), an
+answer with nothing under it was first read by accuracy at a 0.5 threshold,
+which is noise. Under proper scores \citep{brier1950verification} the silence
+after the question \emph{improves} such an answer: Brier $0.327\to0.285$,
+expected calibration error $0.308\to0.184$. A mechanism built on the accuracy
+reading was withdrawn.
+
+\item \emph{Known-answer tests for instruments.} The online counting comparator
+first scored 0.36--0.43, below chance: a feature with no variance yet observed
+had been standardised against a scale floor of $10^{-6}$. A planted-signal test
+caught it. It now requires the comparator to exceed 0.8 on a planted linear
+signal, and passes.
+
+\item \emph{Symmetric sources hide defects.} An early full-stream run (v0)
+charged about 8.05 bits per event after its first tenth, against 4.2 for PPM
+and 8.21 for a uniform code over the 296 tokens: the emission path could not
+represent a marginal distribution. The synthetic source of \S\ref{sec:source}
+has uniform marginals inside its squares by construction, so the defect passed
+every assertion until then. A known-answer test on an i.i.d.\ stream, on which
+the model did no better than a uniform code, isolated it, and v1 repaired it.
+
+\item \emph{One probe for both arms.} A reported gain of the state readout
+($0.758\to0.785$, against a control of 0.794) had two flaws. It compared a
+mean-pooled readout at one width with a max-pooled readout at another, and it
+used a probe whose shrinkage step inverted the weights above a threshold.
+Repairing the probe moved the control to 0.803. The gain was withdrawn, and
+re-established ($+0.025$, max-pooled) only by running both configurations
+through the repaired probe. The feature widths still differ (2304 against
+2560), because the self block is itself a block.
+
+\item \emph{Comparators in the same regime.} Online and batch counters differ
+by at most 0.01 here, so the memory's gap is not an artefact of online
+learning.
+
+\item \emph{Facts, not a score.} Nine learners (v6) were ordered by inclusion
+of eleven maintained facts, each a synthetic property with a known answer. The
+order has 8 incomparable pairs, width 4 and order dimension between 2 and 4. A
+faithful scalar exists only if such an order is total, and the least number of
+scalars that represents it is its order dimension
+\citep{dushnik1941partially}, so at least two numbers are needed here. Two
+entries show the limits of the list itself:
+  \begin{itemize}
+  \item The read-back check is \emph{equal} to the default in this order: it
+  maintains no fact the default lacks. Yet on the clinical probe it was the
+  larger of the two contributions measured (v4: max-pooled AUROC
+  $0.759\to0.769\to0.784$, standard error near 0.01). The order can name a
+  missing fact only if that fact is on the list.
+  \item The eleventh fact is ``say back the value a key was set to this turn''
+  (64 values; chance 0.015). Only the episode trace maintains it: 0.694,
+  against 0.074 for the default. So the default sits strictly below the trace,
+  although the trace is off by default for the reasons in
+  \S\ref{sec:revisions}. Whether a fact belongs on the list is a design
+  decision, and the order does not make it.
+  \end{itemize}
+\end{itemize}
+
 
 \begin{thebibliography}{99}
 
@@ -1339,6 +1840,42 @@ B.~Widrow and M.~E. Hoff.
 D.~J. Willshaw, O.~P. Buneman, and H.~C. Longuet-Higgins.
 \newblock Non-holographic associative memory.
 \newblock \emph{Nature}, 222:960--962, 1969.
+
+\bibitem[Brier(1950)]{brier1950verification}
+G.~W. Brier.
+\newblock Verification of forecasts expressed in terms of probability.
+\newblock \emph{Monthly Weather Review}, 78(1):1--3, 1950.
+
+\bibitem[Budzianowski et al.(2018)]{budzianowski2018multiwoz}
+P.~Budzianowski, T.-H. Wen, B.-H. Tseng, I.~Casanueva, S.~Ultes, O.~Ramadan,
+and M.~Ga\v{s}i\'c.
+\newblock {MultiWOZ} --- a large-scale multi-domain {Wizard-of-Oz} dataset for
+task-oriented dialogue modelling.
+\newblock In \emph{EMNLP}, pages 5016--5026, 2018.
+
+\bibitem[Dushnik and Miller(1941)]{dushnik1941partially}
+B.~Dushnik and E.~W. Miller.
+\newblock Partially ordered sets.
+\newblock \emph{American Journal of Mathematics}, 63(3):600--610, 1941.
+
+\bibitem[Silva et al.(2012)]{silva2012predicting}
+I.~Silva, G.~Moody, D.~J. Scott, L.~A. Celi, and R.~G. Mark.
+\newblock Predicting in-hospital mortality of {ICU} patients: The
+{PhysioNet}/{Computing in Cardiology} Challenge 2012.
+\newblock \emph{Computing in Cardiology}, 39:245--248, 2012.
+
+\bibitem[van Dongen(2012)]{vandongen2012bpi}
+B.~F. van Dongen.
+\newblock {BPI} Challenge 2012.
+\newblock 4TU.ResearchData, 2012.
+\newblock \url{https://data.4tu.nl/articles/dataset/BPI_Challenge_2012/12689204}.
+
+\bibitem[Zang et al.(2020)]{zang2020multiwoz}
+X.~Zang, A.~Rastogi, S.~Sunkara, R.~Gupta, J.~Zhang, and J.~Chen.
+\newblock {MultiWOZ} 2.2: A dialogue dataset with additional annotation
+corrections and state tracking baselines.
+\newblock In \emph{Proceedings of the 2nd Workshop on Natural Language
+Processing for Conversational AI}, pages 109--117, 2020.
 
 \bibitem[Yang(2026)]{yang_2026_22161096}
 X.~Yang.
