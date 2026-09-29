@@ -419,6 +419,47 @@ pub fn unitary_vector(key: u64, slot: u64, d: usize) -> Vec<f32> {
     re
 }
 
+/// The unitary vector with the same Fourier phases as `v`: every magnitude set
+/// to one. Binding by it is exactly invertible, and two such vectors bind to
+/// something whose delta component is the mean cosine of their phase
+/// differences -- their similarity. A zero vector returns None.
+pub fn unitarize(v: &[f32]) -> Option<Vec<f32>> {
+    soften(v, 0.0)
+}
+
+/// Keep the Fourier phases of `v` and raise each magnitude to `gamma`:
+/// 0 is `unitarize`, 1 leaves the vector as it is. Between the two, binding
+/// by the result is less exactly invertible and keeps more of how much each
+/// component actually carries.
+pub fn soften(v: &[f32], gamma: f32) -> Option<Vec<f32>> {
+    let d = v.len();
+    if d < 8 || d & (d - 1) != 0 {
+        return None;
+    }
+    let mut re = v.to_vec();
+    let mut im = vec![0.0f32; d];
+    fft(&mut re, &mut im, false);
+    let mut any = false;
+    for k in 0..d {
+        let m = (re[k] * re[k] + im[k] * im[k]).sqrt();
+        if m > 1e-9 {
+            let scale = m.powf(gamma) / m;
+            re[k] *= scale;
+            im[k] *= scale;
+            any = true;
+        } else {
+            re[k] = 1.0;
+            im[k] = 0.0;
+        }
+    }
+    if !any {
+        return None;
+    }
+    fft(&mut re, &mut im, true);
+    normalize(&mut re);
+    Some(re)
+}
+
 /// Running mean and variance (Welford), used for the allocation criterion.
 #[derive(Clone, Default)]
 pub struct Running {

@@ -108,6 +108,8 @@ pub struct Volatile {
     prev_answer: Option<(Vec<f32>, usize)>,
     last_self_token: Option<usize>,
     prev2: Option<usize>,
+    /// What was last said since the world last spoke: see `Config::bind_overt`.
+    last_said: Option<usize>,
     /// The episode trace is situation: see `Config::episodic`.
     ep_trace: Vec<f32>,
     ep_hist: Vec<usize>,
@@ -131,8 +133,16 @@ pub struct Model {
     gnode: usize,
     /// The superposed memory: bound triples, written on speech, read on silence.
     pub mem: Vec<Vec<f32>>,
+    /// The situated copy of the store (`Config::ep_context`): the same
+    /// addresses, holding only triples bound to their situation. Kept apart
+    /// because in one superposition the plain triples, written again and
+    /// again, dominated: unbinding by the situation turned them into noise
+    /// that grew with every repetition.
+    pub mem_ctx: Vec<Vec<f32>>,
     /// The token before last, so a triple can be formed without a boundary.
     prev2: Option<usize>,
+    /// What was last said since the world last spoke (`Config::bind_overt`).
+    last_said: Option<usize>,
     /// Learned gain on naming the episode trace's recall; memory, not situation.
     naming_gain: f32,
     naming_gate: Vec<f32>,
@@ -241,6 +251,12 @@ pub struct Model {
     pub cursor_trace: Vec<(f64, u64)>,
     pub baseline_ticks: u64,
     pub overt_emissions: u64,
+    /// Triples written with what was said in the key (`Config::bind_overt`).
+    pub said_triples: u64,
+    /// At the last event: what the bank for (previous, this) recalls in this
+    /// situation, and without it. Diagnostics for `Config::ep_context`.
+    pub ctx_recall: Option<(usize, f32)>,
+    pub plain_recall: Option<(usize, f32)>,
     pub commitments: u64,
     pub silent_settlements: u64,
     /// The node the last write landed in. Exposed only so an experiment can ask
@@ -257,6 +273,7 @@ pub struct Model {
 impl Model {
     pub fn new(cfg: Config) -> Self {
         let gain0 = cfg.episodic_codebook;
+        let ctx0 = cfg.ep_context;
         let emb = Embeddings::new(&cfg);
         let ladder = Ladder::new(&cfg);
         let graph = Graph::new(&cfg);
@@ -279,7 +296,9 @@ impl Model {
             store,
             p,
             mem: vec![vec![0.0; d]; cfg_banks],
+            mem_ctx: if ctx0 { vec![vec![0.0; d]; cfg_banks] } else { Vec::new() },
             prev2: None,
+            last_said: None,
             ep_trace: vec![0.0; d],
             ep_hist: Vec::new(),
             naming_gain: gain0,
@@ -331,6 +350,9 @@ impl Model {
             cursor_trace: vec![(0.0, 0); 10],
             baseline_ticks: 0,
             overt_emissions: 0,
+            said_triples: 0,
+            ctx_recall: None,
+            plain_recall: None,
             commitments: 0,
             silent_settlements: 0,
             last_write_node: 0,
@@ -366,6 +388,7 @@ impl Model {
             prev_answer: self.prev_answer.clone(),
             last_self_token: self.last_self_token,
             prev2: self.prev2,
+            last_said: self.last_said,
             ep_trace: self.ep_trace.clone(),
             ep_hist: self.ep_hist.clone(),
         }
@@ -395,6 +418,7 @@ impl Model {
         self.prev_answer = v.prev_answer;
         self.last_self_token = v.last_self_token;
         self.prev2 = v.prev2;
+        self.last_said = v.last_said;
         self.ep_trace = v.ep_trace;
         self.ep_hist = v.ep_hist;
         self.covert_log.clear();
@@ -515,6 +539,38 @@ impl Model {
         let mut clean = Vec::new();
         let (ok, cos, tok) = self.cleanup(r, &mut clean);
         if ok { Some((tok, cos)) } else { None }
+    }
+
+    /// The situation, for `Config::ep_context`: the sum of the world
+    /// cascade's slow levels (rung 1 up), made unitary. None before the world
+    /// has said anything.
+    /// The situation vector as `ep_context` would bind it (diagnostic).
+    pub fn situation_now(&self) -> Option<Vec<f32>> {
+        self.situation()
+    }
+
+    fn situation(&self) -> Option<Vec<f32>> {
+        let d = self.cfg.d;
+        let mut c = vec![0.0f32; d];
+        let (lo, hi) = self.cfg.ep_context_levels;
+        for k in lo..=hi {
+            if k >= self.cfg.rungs {
+                break;
+            }
+            let l = self.ladder.level(k);
+            for i in 0..d {
+                c[i] += l[i];
+            }
+        }
+        if crate::num::norm(&c) < 1e-9 {
+            return None;
+        }
+        if self.cfg.ep_context_unitary {
+            crate::num::soften(&c, self.cfg.ep_context_gamma)
+        } else {
+            normalize(&mut c);
+            Some(c)
+        }
     }
 
     /// What the codebook term names from: the state, plus the episode trace's
@@ -995,6 +1051,43 @@ impl Model {
                 slot += 1;
             }
         }
+        if self.cfg.ep_context || self.cfg.diag_recall {
+            // What followed (previous, x) in a situation like this one. The
+            // next write will be keyed by exactly this pair.
+            let mut block = vec![0.0f32; d];
+            self.ctx_recall = None;
+            self.plain_recall = None;
+            if let Some(&prev) = self.event_hist.first() {
+                let mut q = vec![0.0f32; d];
+                crate::num::circconv(self.emb.row(prev), &ex, &mut q);
+                normalize(&mut q);
+                let bank = self.bank_of_ids(prev, x);
+                let mut clean = Vec::new();
+                let mut plain = vec![0.0f32; d];
+                crate::num::unbind(&self.mem[bank], &q, &mut plain);
+                normalize(&mut plain);
+                let (ok, cos, tok) = self.cleanup(&plain, &mut clean);
+                if ok {
+                    self.plain_recall = Some((tok, cos));
+                }
+                if let (true, Some(u)) = (self.cfg.ep_context, self.situation()) {
+                    let mut cq = vec![0.0f32; d];
+                    crate::num::circconv(&u, &q, &mut cq);
+                    let mut r = vec![0.0f32; d];
+                    crate::num::unbind(&self.mem_ctx[bank], &cq, &mut r);
+                    normalize(&mut r);
+                    let (ok, cos, tok) = self.cleanup(&r, &mut clean);
+                    if ok {
+                        self.ctx_recall = Some((tok, cos));
+                        block = clean.clone();
+                    }
+                }
+            }
+            if self.cfg.ep_context {
+                self.binds[slot] = block;
+                slot += 1;
+            }
+        }
         if self.cfg.episodic {
             // Keyed by the ordered pair of the two latest events. At each event: recall what followed the pair that
             // now stands -- (previous, x) -- earlier in this context; then write
@@ -1405,6 +1498,7 @@ impl Model {
                 self.committed_token = Some(ptok);
                 self.commitments += 1;
                 self.overt = Some(ptok);
+                self.last_said = Some(ptok);
                 out.overt = Some(ptok);
                 self.overt_emissions += 1;
                 self.overt_log.push((self.ticks_since_event, ptok));
@@ -1413,6 +1507,7 @@ impl Model {
         }
         if settled && self.committed.is_none() {
             self.overt = Some(t);
+            self.last_said = Some(t);
             out.overt = Some(t);
             self.overt_emissions += 1;
             self.overt_log.push((self.ticks_since_event, t));
@@ -1767,6 +1862,46 @@ impl Model {
                         }
                         self.mem_triples += 1;
                     }
+                    // The same triple bound to the situation it happened in.
+                    if self.cfg.ep_context {
+                        if let (Some(p2), Some(&p1), Some(u)) =
+                            (self.prev2, self.event_hist.first(), self.situation())
+                        {
+                            let d = self.cfg.d;
+                            let mut pair = vec![0.0f32; d];
+                            crate::num::circconv(self.emb.row(p2), self.emb.row(p1), &mut pair);
+                            normalize(&mut pair);
+                            let mut tri = vec![0.0f32; d];
+                            crate::num::circconv(&pair, self.emb.row(x), &mut tri);
+                            let mut ctri = vec![0.0f32; d];
+                            crate::num::circconv(&u, &tri, &mut ctri);
+                            normalize(&mut ctri);
+                            let bank = self.bank_of_ids(p2, p1);
+                            for i in 0..d {
+                                self.mem_ctx[bank][i] += ctri[i];
+                            }
+                        }
+                    }
+                    // What was said is the relation in the key of what the
+                    // world did next; the value stays the world's.
+                    if self.cfg.bind_overt {
+                        if let (Some(a), Some(&w1)) = (self.last_said, self.event_hist.first()) {
+                            let d = self.cfg.d;
+                            let mut pair = vec![0.0f32; d];
+                            crate::num::circconv(self.emb.row(w1), self.emb.row(a), &mut pair);
+                            normalize(&mut pair);
+                            let mut tri = vec![0.0f32; d];
+                            crate::num::circconv(&pair, self.emb.row(x), &mut tri);
+                            normalize(&mut tri);
+                            let bank = self.bank_of_ids(w1, a);
+                            for i in 0..d {
+                                self.mem[bank][i] += tri[i];
+                            }
+                            self.mem_triples += 1;
+                            self.said_triples += 1;
+                        }
+                    }
+                    self.last_said = None;
                     self.prev2 = self.event_hist.first().copied();
                     // The cursor is the second-to-last observation. When the
                     // relation arrives it is therefore the entity, which is what

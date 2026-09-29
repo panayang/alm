@@ -562,6 +562,20 @@ pub struct Config {
     pub route_query: RouteQuery,
     pub freeze_operator: bool,
     pub route_random: bool,
+    /// Skip the operator graph: no routing, no hop, no operator write.
+    ///
+    /// **On by default since 2026-09-29 (v7).** The paper measured its
+    /// closeout with the graph bypassed, having found it behaves as a random
+    /// feature expansion whose learning does nothing (each edge ten to forty
+    /// rank-one updates against its parameters) and that removing it improved
+    /// every metric. The default had nonetheless kept it on, and every
+    /// experiment from 2026-09-16 to 09-28 ran with it. Re-measured at v6:
+    /// the facts matrix maintains the same facts either way, the walk alone
+    /// answers a relation better without it (5.32 -> 4.87 bits, F10), and
+    /// PhysioNet next-token codelength falls from 3.385 to 3.295 bits per
+    /// event -- more than the paper's full closeout configuration (3.308),
+    /// which also gave up the margin on F9. So the graph goes, and the other
+    /// closeout switches stay at their defaults.
     pub bypass_graph: bool,
     pub walk_during_gap: bool,
     /// Refuse a silent hop that would collapse the state back onto the token
@@ -715,6 +729,74 @@ pub struct Config {
     /// evidence for making it the default does not. Turn it on for an
     /// experiment that asks what it maintains, not to raise a score.
     pub verify_gate: bool,
+    /// Bind what was said into the key of what the world did next.
+    ///
+    /// The read already treats the model's own output as a relation: in a
+    /// silence the arriving token is the last thing said, and a response
+    /// unbinds the bank named by (where it stands, what was said). The write
+    /// never produced such keys -- triples were formed from world events only
+    /// -- so nothing the model said could ever be found to have been followed
+    /// by anything. In a world that reacts, that is the whole of learning what
+    /// one's own acts do.
+    ///
+    /// With this on, when the world speaks `x` after the model said `a`, a
+    /// second triple is written: key (the world's last token before `a`, `a`),
+    /// value `x`. The value is always the world's; the model's output appears
+    /// only in the key, so nothing it said is stored as having happened, which
+    /// is the spirit of A5. The world's own triple is written as before.
+    ///
+    /// Off by default (added 2026-09-28). On a static stream the world ignores
+    /// what was said, so this can only add load and noise there; it exists for
+    /// worlds that react, and its static-data cost is measured before it is
+    /// used anywhere.
+    pub bind_overt: bool,
+    /// Bind each stored triple to the situation it happened in.
+    ///
+    /// The long-term banks are keyed by the two previous tokens and nothing
+    /// else, so what they return for a key is the mixture of everything that
+    /// ever followed it, in every situation: semantic memory, not episodic.
+    /// The situation is already carried, as a drifting multi-timescale
+    /// average of what the world said (the ladder's world cascade, which the
+    /// model's own output never reaches). This follows the temporal context
+    /// model of episodic memory: an event is stored bound to the slowly
+    /// drifting context it occurred in, and recall reinstates context.
+    ///
+    /// With this on, each write adds `u(c) (*) triple` to the same bank as
+    /// the plain triple, where `c` is the sum of the slow levels (rung 1 up)
+    /// and `u` makes it unitary so that unbinding is exact and returns more
+    /// the more alike the two situations were. On each event the model reads
+    /// "what followed this pair, in a situation like this" by unbinding with
+    /// `u(c) (*) key`, and the result is one more feature block. The situation
+    /// is gist, not transcript: it is a fuzzy average, which is what the
+    /// paper asks the background to be.
+    ///
+    /// Off by default (added 2026-09-28); it doubles what each bank holds.
+    ///
+    /// Measured with `contexts` (2026-09-29; d = 512, rung 1 only, the
+    /// situated triples in their own superposition `mem_ctx`): with the
+    /// situation recurring, recall of its own successor is 0.81 against 0.25
+    /// for the plain store at 4 situations and 0.52 against 0.12 at 8, and it
+    /// barely falls with the number of other visits in between (0.88 at 0-1,
+    /// 0.76 at 10+). One write in a visit already shifts recall within that
+    /// visit (situation similarity 0.75). Across visits a single write is
+    /// weak (0.22 at 4 situations): recall is about similarity / sqrt(load),
+    /// and the load on a key is every other situation's writes of it -- the
+    /// fan effect. Slower rungs made every reading worse.
+    pub ep_context: bool,
+    /// Compute the plain recall diagnostic (`Model::plain_recall`) on every
+    /// event even with `ep_context` off, so an off arm can be read the same
+    /// way. Diagnostic only; changes nothing the model does.
+    pub diag_recall: bool,
+    /// Which levels of the world cascade make the situation for `ep_context`
+    /// (inclusive range), and whether it is made unitary before binding.
+    /// Unitary makes unbinding exact but measures similarity by phase alone;
+    /// raw makes the delta component of the unbinding exactly the dot product
+    /// of the two situations.
+    pub ep_context_levels: (usize, usize),
+    pub ep_context_unitary: bool,
+    /// With `ep_context_unitary`, raise each Fourier magnitude of the
+    /// situation to this power instead of setting it to one (0 = unitary).
+    pub ep_context_gamma: f32,
     /// An episode trace: what this context has bound, recallable by content.
     ///
     /// The superposed banks are long-term memory. They are keyed by the pair of
@@ -882,7 +964,7 @@ impl Config {
             route_query: RouteQuery::State,
             freeze_operator: false,
             route_random: false,
-            bypass_graph: false,
+            bypass_graph: true,
             walk_during_gap: true,
             walk_needs_retrieval: false,
             anchor: 0.35,
@@ -891,6 +973,12 @@ impl Config {
             use_binding: true,
             bind_self: true,
             verify_gate: false,
+            bind_overt: false,
+            ep_context: false,
+            diag_recall: false,
+            ep_context_levels: (1, 1),
+            ep_context_unitary: true,
+            ep_context_gamma: 0.0,
             episodic: false,
             episodic_decay: 0.97,
             episodic_codebook: 1.0,
@@ -973,6 +1061,44 @@ impl Config {
     /// command line: ALM_EPISODIC=1 turns the episode trace on, and
     /// ALM_EPISODIC_DECAY sets its decay (default 1.0 when turned on this way).
     pub fn apply_env(&mut self) {
+        // ALM_CONFIG=paper: the configuration `experiments::closeout` measured
+        // for the paper -- graph bypassed and frozen, routing by the bound
+        // traces, reads entered by content, no anchor.
+        if std::env::var("ALM_CONFIG").ok().as_deref() == Some("graph-bypassed") {
+            self.bypass_graph = true;
+            eprintln!("  graph bypassed, everything else default");
+        }
+        if std::env::var("ALM_CONFIG").ok().as_deref() == Some("paper") {
+            self.bypass_graph = true;
+            self.freeze_operator = true;
+            self.route_query = RouteQuery::Bound;
+            self.read_entry_by_content = true;
+            self.anchor = 0.0;
+            eprintln!("  paper configuration");
+        }
+        if let Some(r) = std::env::var("ALM_RUNGS").ok().and_then(|v| v.parse::<usize>().ok()) {
+            self.rungs = r;
+        }
+        if let Ok(v) = std::env::var("ALM_EP_CONTEXT_LEVELS") {
+            let p: Vec<usize> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if p.len() == 2 {
+                self.ep_context_levels = (p[0], p[1]);
+            }
+        }
+        if let Some(g) = std::env::var("ALM_EP_CONTEXT_GAMMA").ok().and_then(|v| v.parse().ok()) {
+            self.ep_context_gamma = g;
+        }
+        if std::env::var("ALM_EP_CONTEXT_RAW").is_ok() {
+            self.ep_context_unitary = false;
+        }
+        if std::env::var("ALM_EP_CONTEXT").is_ok() {
+            self.ep_context = true;
+            eprintln!("  triples bound to the situation they happened in");
+        }
+        if std::env::var("ALM_BIND_OVERT").is_ok() {
+            self.bind_overt = true;
+            eprintln!("  what was said binds into the key of what followed");
+        }
         if std::env::var("ALM_EPISODIC").is_ok() {
             self.episodic = true;
             self.episodic_decay =
@@ -998,7 +1124,10 @@ impl Config {
         if !self.use_binding {
             return 0;
         }
-        let extra = if self.bind_self { 1 } else { 0 } + if self.episodic { 1 } else { 0 };
+        let extra = if self.bind_self { 1 } else { 0 }
+            + if self.episodic { 1 } else { 0 }
+            + if self.ep_context { 1 } else { 0 };
+        // diag_recall adds no block: it only reads.
         match self.bind_mode {
             // Off means no conjunctions, not no blocks: the lag-zero block is
             // the event itself and does not depend on the mode. Without this,

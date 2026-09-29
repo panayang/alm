@@ -86,6 +86,7 @@ pub mod chainmem;
 pub mod clinical;
 pub mod code;
 pub mod compose;
+pub mod contexts;
 pub mod config;
 
 pub mod embed;

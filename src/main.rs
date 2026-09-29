@@ -248,6 +248,14 @@ fn main() {
         "facts" => {
             alm::facts::run();
         }
+        // Does the store recall what followed, in a situation like this one?
+        "contexts" => {
+            alm::contexts::run(if limit > 0 { limit } else { 600 }, seed);
+        }
+        // The paper's measured configuration against the default, factor by factor.
+        "facts-configs" => {
+            alm::facts::configs();
+        }
         // Does the judge depend on order where the task does, and only there?
         "order" => {
             alm::judge::order_spectrum(if limit > 0 { limit } else { 20_000 }, seed);

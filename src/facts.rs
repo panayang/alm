@@ -300,14 +300,49 @@ fn subset(a: &[bool], b: &[bool]) -> bool {
     a.iter().zip(b).all(|(x, y)| !*x || *y)
 }
 
+/// The configuration the paper measured (`experiments::closeout`) against the
+/// default every later experiment started from, and each single step from the
+/// one toward the other. Added 2026-09-28 when it was found that the two had
+/// diverged: the paper bypassed the operator graph, froze it, routed by the
+/// bound traces, entered reads by content and set the anchor to zero; the
+/// default did none of these.
+pub fn configs() {
+    use crate::config::RouteQuery;
+    fn paper(c: &mut Config) {
+        c.bypass_graph = true;
+        c.freeze_operator = true;
+        c.route_query = RouteQuery::Bound;
+        c.read_entry_by_content = true;
+        c.anchor = 0.0;
+    }
+    run_with(vec![
+        Learner { name: "default", set: |_| {} },
+        Learner { name: "paper config", set: paper },
+        Learner {
+            name: "paper, graph kept",
+            set: |c| {
+                paper(c);
+                c.bypass_graph = false;
+            },
+        },
+        Learner { name: "graph bypassed", set: |c| c.bypass_graph = true },
+        Learner { name: "operator frozen", set: |c| c.freeze_operator = true },
+        Learner { name: "route by traces", set: |c| c.route_query = RouteQuery::Bound },
+        Learner { name: "entry by content", set: |c| c.read_entry_by_content = true },
+        Learner { name: "anchor 0", set: |c| c.anchor = 0.0 },
+    ]);
+}
+
 pub fn run() {
-    let learners: Vec<Learner> = vec![
+    run_with(vec![
         Learner { name: "default", set: |_| {} },
         Learner { name: "no self block", set: |c| c.bind_self = false },
         // The read-back gate is off by default since 2026-09-28, so this
         // learner is the departure and the default is its absence.
         Learner { name: "read-back gate on", set: |c| c.verify_gate = true },
         Learner { name: "echo gate on", set: |c| c.walk_needs_retrieval = true },
+        Learner { name: "said binds", set: |c| c.bind_overt = true },
+        Learner { name: "situated memory", set: |c| c.ep_context = true },
         Learner {
             name: "episode trace",
             set: |c| {
@@ -319,7 +354,10 @@ pub fn run() {
         Learner { name: "no codebook term", set: |c| c.readout_codebook = 0.0 },
         Learner { name: "eta 0.5", set: |c| c.eta = 0.5 },
         Learner { name: "rows off", set: |c| c.no_readout = true },
-    ];
+    ]);
+}
+
+fn run_with(learners: Vec<Learner>) {
     println!("learners ordered by the facts they maintain, not by a score");
     println!("  every fact has a known answer; thresholds are listed and the measured value is printed.\n");
     for (i, f) in FACTS.iter().enumerate() {

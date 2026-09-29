@@ -146,6 +146,12 @@ impl Ladder {
     }
 
     #[inline]
+    /// The world cascade's level k: a low-pass of what the world said, slower
+    /// with k. Self channels never reach it (A5).
+    pub fn level(&self, k: usize) -> &[f32] {
+        &self.world[k]
+    }
+
     pub fn delta(&self, k: usize) -> &[f32] {
         &self.deltas[k.min(self.rungs - 1)]
     }

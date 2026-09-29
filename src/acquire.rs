@@ -553,6 +553,10 @@ pub fn run(
         );
     }
 
+    println!(
+        "  said out loud {} times; triples written {} ({} with what was said in the key)",
+        model.overt_emissions, model.mem_triples, model.said_triples
+    );
     split_novelty(&recs, best_order);
 
     println!("\n  the raw novel column mixes composition with rarity, and with what a");

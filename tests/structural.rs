@@ -269,7 +269,10 @@ fn a_probe_disturbs_neither_the_memory_nor_the_situation() {
 /// design rather than as the route not mattering.
 #[test]
 fn the_operator_memory_is_not_inert() {
-    let cfg = Config::local();
+    // The graph is bypassed by default since v7; this checks the component
+    // itself, so it switches it back on.
+    let mut cfg = Config::local();
+    cfg.bypass_graph = false;
     let mut m = Model::new(cfg);
 
     // 1. The operator write changes the transform it was applied to.
@@ -284,8 +287,11 @@ fn the_operator_memory_is_not_inert() {
     assert!(moved > 0, "no edge transform moved after forty writes: the operator write is inert");
 
     // 2. Perturbing the route actually lands somewhere else.
-    let mut a = Model::new(Config::local());
+    let mut cfg1 = Config::local();
+    cfg1.bypass_graph = false;
+    let mut a = Model::new(cfg1);
     let mut cfg2 = Config::local();
+    cfg2.bypass_graph = false;
     cfg2.route_perturb = 1;
     let mut b = Model::new(cfg2);
     let mut differed = 0usize;
