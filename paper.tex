@@ -71,8 +71,8 @@ they maintained and why they are left out; the last recalls a recurring
 situation across long gaps but not from one exposure. Every evaluation here is
 open-loop, so none tests the response half of the design. We argue that no
 static source can, set out what a world must have to test it --- its own clock,
-influence without generation, recurring laws, persistent situations --- and
-name where the design might be useful once it has been tested there.
+influence without generation, recurring laws, persistent situations ---
+explain why a learner in it still needs no reward, and name where the design might be useful once it has been tested there.
 \end{abstract}
 
 \section{Introduction}
@@ -226,7 +226,17 @@ The founding position of this work is that intelligence is an emergence of
 memory rather than a product of reward. The contrast is with the framing in
 which behaviour is whatever maximises a scalar
 \citep{sutton2018reinforcement,silver2021reward}; here there is no reward, no
-value function, and no policy. It is closer to the tradition in which memory is
+value function, and no policy. This is the paper's central claim and it is meant
+literally: nothing in the learner is maximised, no scalar reaches a memory
+write, and no quantity summarises how well the learner is doing. A companion
+mathematical study \citep{yang2026gluing} gives the reason in a form that does
+not depend on taste. Ordering learners by the facts they maintain, a faithful
+scalar score exists only if that order is total, and asking for ``one number''
+is asking for a choice of linear extension that the facts do not determine; a
+reward-free learner therefore has no scalar metric, and reintroducing one
+reintroduces the objective it gave up. When \S\ref{sec:closing} turns to what
+would make a learner move in a world, the answer it gives is not a reward under
+another name, and it says why. It is closer to the tradition in which memory is
 the computational substrate rather than a subsystem attached to one
 \citep{hebb1949organization,tulving1972episodic,gallistel2009memory}.
 
@@ -793,7 +803,8 @@ learner either maintains it or does not, and the measured value is reported
 beside the verdict. Learners are then ordered by inclusion: $a\geq b$ when $a$
 maintains every fact $b$ maintains. We report the incomparable pairs, the width
 of the order and bounds on its dimension; where the order is not total, no
-single number is faithful to it.
+single number is faithful to it, and the least number of scalars that represents
+it is its order dimension \citep{dushnik1941partially,yang2026gluing}.
 
 \begin{table}[h]
 \centering
@@ -1210,7 +1221,10 @@ margin & 0.70 & 0.80 & 0.81 & 0.80 & 0.80 & 0.80\\
 \subsection{A prediction at one position is not a relational question}
 
 In-hospital death is fixed at one position, the end of the stay, and it is a
-function of an order-free summary of the whole stay. Under a five-fold
+function of an order-free summary of the whole stay. In the terms of
+\citet{yang2026gluing}, a prediction is the task that fixes each answer ---
+structure plus position --- and a relational task is not one; an evaluation that
+can be redone at any time sees only terminal structure. Under a five-fold
 cross-validated linear probe (Table~\ref{tab:probe}), adding bigrams to the count
 summary lowers it, from $0.803$ to $0.770$: order carries nothing here beyond
 counts. The memory's state pooled over the stay comes within $0.03$ of the
@@ -1571,11 +1585,16 @@ degrades --- and prediction. They cannot test the response half of the design:
 what is said, and what the world does because it was said.
 
 This is not a shortcoming of the particular sources. It holds for any recorded
-stream, because a record is precisely an answer that does not depend on who
-asks or what was asked before. A learner whose behaviour changes what it
-subsequently experiences is not described by any record of its inputs, and the
-order in which it asks shapes what it can learn: along questions that do not
-commute, what is learned in the limit depends on the strategy of asking. That is
+stream, because a record is precisely an answer that does not depend on the
+circumstances of asking --- asking again, who asks, what was asked before, what
+is asked together --- and a behaviour has a record model only if it is public
+and undisturbed \citep{yang2026gluing}. A learner whose behaviour changes what
+it subsequently experiences disturbs its world, so it is not described by any
+record of its inputs, and the order in which it asks shapes what it can learn:
+along questions that do not commute, each path is a martingale, unasked
+branches are never revealed, and what is learned in the limit depends on the
+strategy of asking; only in the exchangeable case is it
+strategy-independent \citep{yang2026gluing}. That is
 the situation a challenge--response learner is built for, and it is the one a
 replayed file removes. Nor can a replayed file test time as a resource: the
 model receives exactly the ticks the file specifies however much computation it
@@ -1610,18 +1629,31 @@ random samples of tokens and two visits to one of them were only $0.56$ alike.
 A simulated physical environment has all six by default. Its laws are known to
 the experimenter because the experimenter wrote them, which gives a reference
 for reading what the learner has organised without handing the learner any
-answer; it contains no reward unless one is added; and its processes run
+answer; it contains no reward, and none is to be added; and its processes run
 whether or not anything attends to them. A discrete lattice physics with
 objects, collisions and gravity keeps the laws while avoiding pixels and
 continuous control, so that the difficulty lands on memory and response rather
 than on perception. Richer simulations, and eventually physical robots, are the
 later rungs of the same ladder.
 
-\subsection{Why anything would move: drives and reflexes}
+\subsection{Why anything would move, without a reward}
 
-An organism is not without reward and punishment; without them it would not
-move. The design's commitment is narrower: valence must not reach the write.
-We read that as three constraints.
+A learner with no reward still has to move, and an organism plainly does not sit
+still. This section says what would move it, and it is easy to misread, so we
+state first what it is not. It is not a reward: there is no scalar, nothing is
+summed over time, nothing is maximised or predicted as a return, and nothing
+reaches the write rule. It is not reward shaping, an intrinsic-motivation bonus,
+or an objective such as free energy restated: each of those is a single quantity
+the learner is trained to optimise, and the design has none. The claim of this
+paper, that the learner is reward-free, holds in what follows without
+qualification.
+
+What an organism has that a corpus lacks is a body that is part of the world.
+Pain, satiety, cold and fatigue happen to it. We call these \emph{valenced
+events}: events that the world, through the body, produces, and that the
+learner treats like any other. The design's commitment is that they enter in two
+places only, as the world's tokens and as a constraint on what is said, and
+never as a training signal. We read that as three constraints.
 \begin{enumerate}
 \item \emph{Valence is experienced as events.} Pain, satiety, cold and fatigue
 are tokens from the body --- part of the world --- charged and written like
@@ -1640,8 +1672,17 @@ only the first valenced event on a walk is consulted, and nothing is summed.
 \item \emph{Drives are several and incommensurable.} Hunger, pain and cold do
 not share a currency. Keeping them apart keeps valence from becoming the single
 scalar the design refuses, and makes the trade-offs between them a partial
-order like the one we measure learners by.
+order like the one we measure learners by: summing them into one number would be
+the choice of a linear extension that nothing in the world determines
+\citep{yang2026gluing}.
 \end{enumerate}
+The difference from a reward is therefore structural, not a matter of degree. A
+reward is a scalar that learning is organised to increase; here memory is
+organised by what happened, whether it hurt or not, and valence only selects,
+at the moment of speaking, among responses that memory has already matured. If
+every valenced event were removed, the learner would still learn everything it
+learns now, and would merely have less reason to act one way rather than
+another.
 A few fixed reflexes --- withdrawing from pain, orienting to a sudden event ---
 give behaviour a seed before memory holds any consequence to recall, and drives
 that rise on their own clock, like hunger, guarantee that the learner cannot
@@ -1659,7 +1700,9 @@ one. The instruments of \S\ref{sec:measure} carry over as facts about behaviour:
 falls --- a reading of whether it has learned what its acts do;
 \item whether regularities learned in one region shorten learning in another
 (acquisition that accelerates, which our sources could not show);
-\item whether its expectations stabilise, and after how many changes;
+\item whether its expectations stabilise, and after how many changes --- the
+stabilization level of a question under a recording protocol
+\citep{yang2026gluing};
 \item how its own order of looking and acting shapes what it learns;
 \item whether what it has organised in memory corresponds to the laws the
 simulator was written with.
@@ -1779,6 +1822,14 @@ take is the objective: there is no reward here
 \citep{sutton2018reinforcement,silver2021reward}, and codelength is read as an
 instrument.
 
+\paragraph{Foundations without a single context.} The measurement stance of
+this paper --- facts in place of a score, records versus disturbed behaviour,
+prediction as structure plus position, learning limits that depend on the order
+of asking --- is developed mathematically in \citet{yang2026gluing}, which drops
+the assumption that local data glue into one global object in one context and
+makes the failure measurable. We use its statements about learners and
+processes; nothing here depends on its set-theoretic base.
+
 \paragraph{Embodiment and the dark room.} That behaviour influences experience
 without generating it, and that this is what defeats the dark-room objection, is
 argued in the free-energy literature and its critics
@@ -1816,7 +1867,10 @@ and each is the part a static source cannot exercise, because on a static source
 nothing the model says changes anything.
 
 That is the claim we make and the one we cannot yet test. The design is for a
-learner in a world that has a clock and that answers back. Where it should be
+learner in a world that has a clock and that answers back, and it remains
+reward-free there: what such a world adds is consequences, which the learner
+writes as events, and a body whose valenced events constrain what it says but
+never what it stores. Where it should be
 judged is in such a world, simulated or physical, and we expect that judgement
 to be substantially harder than anything reported here.
 
@@ -2173,7 +2227,7 @@ corrections and state tracking baselines.
 \newblock In \emph{Proceedings of the 2nd Workshop on Natural Language
 Processing for Conversational AI}, pages 109--117, 2020.
 
-\bibitem[Yang(2026)]{yang_2026_22161096}
+\bibitem[Yang(2026a)]{yang_2026_22161096}
 X.~Yang.
 \newblock Trading interference for retrieval difficulty: A content-addressed
 continual memory with on-demand capacity.
@@ -2191,6 +2245,12 @@ J.~R. Anderson.
 M.~W. Howard and M.~J. Kahana.
 \newblock A distributed representation of temporal context.
 \newblock \emph{Journal of Mathematical Psychology}, 46(3):269--299, 2002.
+
+\bibitem[Yang(2026b)]{yang2026gluing}
+X.~Yang.
+\newblock Removing global gluing: A multiverse base with a global countable
+core, probability and processes without a global context.
+\newblock Manuscript, 2026.
 
 \bibitem[Yassa and Stark(2011)]{yassa2011pattern}
 M.~A. Yassa and C.~E.~L. Stark.
