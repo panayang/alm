@@ -106,8 +106,14 @@ pub fn score_with(
                 }
             }
         }
+        let masked = !store.name_mask.is_empty();
         for tok in 0..store.vocab {
-            let s = acc[tok] + codebook * crate::num::dot(tab.row(tok), p);
+            let cb = if masked && !store.name_mask[tok] {
+                0.0
+            } else {
+                codebook * crate::num::dot(tab.row(tok), p)
+            };
+            let s = acc[tok] + cb;
             if s > hi {
                 hi = s;
             }

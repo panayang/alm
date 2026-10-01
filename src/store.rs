@@ -43,6 +43,9 @@ pub struct Store {
     pub vocab: usize,
     /// One row per token, shared by everything. The only learned readout.
     pub rows: Vec<(u32, Vec<f32>)>,
+    /// Which tokens the codebook term may name: those the world has said
+    /// (`Config::cleanup_heard_only`). Empty means every token.
+    pub name_mask: Vec<bool>,
     /// A per-token additive term, off by default.
     ///
     /// This is a counted prior wearing a different hat, and this file opens by
@@ -134,6 +137,7 @@ const ERR_EMA_RATE: f32 = 0.05;
 impl Store {
     pub fn new(cfg: &Config) -> Self {
         Store {
+            name_mask: if cfg.cleanup_heard_only { vec![false; cfg.vocab] } else { Vec::new() },
             d: cfg.d,
             fw: cfg.feature_blocks() * cfg.d,
             vocab: cfg.vocab,

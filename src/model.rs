@@ -45,6 +45,11 @@ use crate::num::normalize;
 use crate::store::Store;
 
 const KEY_NEG: u64 = 0x0000_0000_0000_0031;
+const KEY_BANK: u64 = 0x0000_0000_0B4E_C0DE;
+const KEY_SEP: u64 = 0x0000_0000_05E9_A7E0;
+const KEY_SAID: u64 = 0x0000_0000_5A1D_0001;
+/// Identity space for what was said, when it names a bank.
+const SAID_ID: usize = 1 << 40;
 
 pub struct TickOutcome {
     /// Ticks after the last event at which the right answer first appeared in
@@ -110,6 +115,7 @@ pub struct Volatile {
     prev2: Option<usize>,
     /// What was last said since the world last spoke: see `Config::bind_overt`.
     last_said: Option<usize>,
+    last_bank: Option<usize>,
     /// The episode trace is situation: see `Config::episodic`.
     ep_trace: Vec<f32>,
     ep_hist: Vec<usize>,
@@ -143,8 +149,15 @@ pub struct Model {
     prev2: Option<usize>,
     /// What was last said since the world last spoke (`Config::bind_overt`).
     last_said: Option<usize>,
+    /// The bank a response last unbound successfully: which memory is being
+    /// touched, for the write channel when the graph is bypassed.
+    last_bank: Option<usize>,
     /// Learned gain on naming the episode trace's recall; memory, not situation.
     naming_gain: f32,
+    /// Which tokens the world has said, and in what order they were first
+    /// heard (`Config::cleanup_heard_only`). Memory, not situation.
+    heard: Vec<bool>,
+    heard_list: Vec<usize>,
     naming_gate: Vec<f32>,
     /// This context's bindings, decayed per event and never renormalised.
     ep_trace: Vec<f32>,
@@ -273,6 +286,7 @@ pub struct Model {
 impl Model {
     pub fn new(cfg: Config) -> Self {
         let gain0 = cfg.episodic_codebook;
+        let vocab0 = cfg.vocab;
         let ctx0 = cfg.ep_context;
         let emb = Embeddings::new(&cfg);
         let ladder = Ladder::new(&cfg);
@@ -299,9 +313,12 @@ impl Model {
             mem_ctx: if ctx0 { vec![vec![0.0; d]; cfg_banks] } else { Vec::new() },
             prev2: None,
             last_said: None,
+            last_bank: None,
             ep_trace: vec![0.0; d],
             ep_hist: Vec::new(),
             naming_gain: gain0,
+            heard: vec![false; vocab0],
+            heard_list: Vec::new(),
             naming_gate: vec![0.0; d],
             cursors: vec![vec![0.0; d]; cfg_traj],
             cursor_age: vec![0; cfg_traj],
@@ -389,6 +406,7 @@ impl Model {
             last_self_token: self.last_self_token,
             prev2: self.prev2,
             last_said: self.last_said,
+            last_bank: self.last_bank,
             ep_trace: self.ep_trace.clone(),
             ep_hist: self.ep_hist.clone(),
         }
@@ -419,6 +437,7 @@ impl Model {
         self.last_self_token = v.last_self_token;
         self.prev2 = v.prev2;
         self.last_said = v.last_said;
+        self.last_bank = v.last_bank;
         self.ep_trace = v.ep_trace;
         self.ep_hist = v.ep_hist;
         self.covert_log.clear();
@@ -544,9 +563,45 @@ impl Model {
     /// The situation, for `Config::ep_context`: the sum of the world
     /// cascade's slow levels (rung 1 up), made unitary. None before the world
     /// has said anything.
+    /// `situated_bank`, for diagnostics.
+    pub fn situated_bank_pub(&self, a: usize, b: usize) -> usize {
+        self.situated_bank(a, b)
+    }
+
     /// The situation vector as `ep_context` would bind it (diagnostic).
     pub fn situation_now(&self) -> Option<Vec<f32>> {
         self.situation()
+    }
+
+    /// The situated store's bank for a pair: the pair's own bank, moved by
+    /// the situation's sign bits when `ep_context_sep_bits` > 0.
+    fn situated_bank(&self, a: usize, b: usize) -> usize {
+        let base = self.bank_of_ids(a, b);
+        let bits = self.cfg.ep_context_sep_bits;
+        if bits == 0 {
+            return base;
+        }
+        let d = self.cfg.d;
+        let mut c = vec![0.0f32; d];
+        let (lo, hi) = self.cfg.ep_context_levels;
+        for k in lo..=hi {
+            if k >= self.cfg.rungs {
+                break;
+            }
+            let l = self.ladder.level(k);
+            for i in 0..d {
+                c[i] += l[i];
+            }
+        }
+        let mut sig = 0usize;
+        for r in 0..bits {
+            let dir = crate::num::unit_vector(self.cfg.seed ^ KEY_SEP, r as u64, d);
+            if crate::num::dot(&c, &dir) > 0.0 {
+                sig |= 1 << r;
+            }
+        }
+        let n = self.mem.len().max(1);
+        (base + sig.wrapping_mul(0x9E37_79B9)) % n
     }
 
     fn situation(&self) -> Option<Vec<f32>> {
@@ -834,6 +889,7 @@ impl Model {
                 self.unbind_cos += cos as f64;
             }
             if ok {
+                self.last_bank = Some(bank);
                 if !self.frozen {
                     self.unbind_hits += 1;
                 }
@@ -989,7 +1045,10 @@ impl Model {
         // cosine of exactly 0.000 on every one of 36000 silent hops. Under the
         // default dense write every token acquires a row quickly, which is why
         // it never showed.
-        for t in 0..self.cfg.vocab {
+        let heard = self.cfg.cleanup_heard_only && !self.heard_list.is_empty();
+        let n = if heard { self.heard_list.len() } else { self.cfg.vocab };
+        for i in 0..n {
+            let t = if heard { self.heard_list[i] } else { i };
             let e = self.emb.row(t);
             let c = crate::num::dot(v, e);
             if c > raw_best {
@@ -1074,7 +1133,8 @@ impl Model {
                     let mut cq = vec![0.0f32; d];
                     crate::num::circconv(&u, &q, &mut cq);
                     let mut r = vec![0.0f32; d];
-                    crate::num::unbind(&self.mem_ctx[bank], &cq, &mut r);
+                    let sbank = self.situated_bank(prev, x);
+                    crate::num::unbind(&self.mem_ctx[sbank], &cq, &mut r);
                     normalize(&mut r);
                     let (ok, cos, tok) = self.cleanup(&r, &mut clean);
                     if ok {
@@ -1542,7 +1602,20 @@ impl Model {
             // Where the walk is. This is the drive: it is what keeps the query
             // moving through a gap, and it is why revisiting a node becomes less
             // likely without any fatigue term.
-            let key = self.graph.node_key(self.gnode).to_vec();
+            //
+            // With the graph bypassed the node never moves, and this reported
+            // the same vector on every tick from v7 until it was noticed -- as
+            // it did in the paper's own closeout configuration. What is being
+            // touched is then the bank a response last unbound, named by a
+            // fixed vector per bank.
+            let key = if self.cfg.bypass_graph {
+                match self.last_bank {
+                    Some(b) => crate::num::unit_vector(self.cfg.seed ^ KEY_BANK, b as u64, d),
+                    None => vec![0.0f32; d],
+                }
+            } else {
+                self.graph.node_key(self.gnode).to_vec()
+            };
             let mut v = vec![0.0f32; d];
             self.emb.rotate_vec(&key, Channel::Write, &mut v);
             self.ladder.observe_self(&v);
@@ -1830,6 +1903,13 @@ impl Model {
                 // the five bound blocks, which are also three fifths of the
                 // routing query under `RouteQuery::Bound`. The trace should be
                 // "the background as it stood, bound to what just arrived".
+                if x < self.heard.len() && !self.heard[x] {
+                    self.heard[x] = true;
+                    self.heard_list.push(x);
+                    if let Some(m) = self.store.name_mask.get_mut(x) {
+                        *m = true;
+                    }
+                }
                 // Speech: bind. The standing conjunction of the two previous
                 // observations is combined with what just arrived and superposed
                 // into memory. For a presented link `x r y` the triple formed at
@@ -1876,7 +1956,7 @@ impl Model {
                             let mut ctri = vec![0.0f32; d];
                             crate::num::circconv(&u, &tri, &mut ctri);
                             normalize(&mut ctri);
-                            let bank = self.bank_of_ids(p2, p1);
+                            let bank = self.situated_bank(p2, p1);
                             for i in 0..d {
                                 self.mem_ctx[bank][i] += ctri[i];
                             }
@@ -1885,15 +1965,36 @@ impl Model {
                     // What was said is the relation in the key of what the
                     // world did next; the value stays the world's.
                     if self.cfg.bind_overt {
-                        if let (Some(a), Some(&w1)) = (self.last_said, self.event_hist.first()) {
+                        // Not when the world said exactly what was said: the
+                        // pair (w1, a) is then the world's own key for the event
+                        // after this one, and writing a -> a under it shifted the
+                        // world's chain by one -- a walk from w1 through a found
+                        // a again instead of what follows it (caught by the
+                        // surplus-silence assertion, cursor -0.004 at the first
+                        // quiet tick). A confirmed prediction says nothing about
+                        // consequence that the world's own triple does not.
+                        if let (Some(a), Some(&w1)) = (self.last_said.filter(|&a| a != x), self.event_hist.first()) {
+                            // What was said is marked as said: bound with a
+                            // fixed unitary self vector, and hashed from its
+                            // own identity space. Unmarked, (w1, a) was the very
+                            // key the silent walk reads with a as the relation
+                            // it continues by, so a response that had reached
+                            // its answer at w1 read "what the world did after I
+                            // said a there" and walked off its answer (cursor
+                            // 0.89 -> 0.03 at the first quiet tick in the
+                            // surplus-silence assertion). An act is heard back
+                            // on its own channel, not as the world's word.
                             let d = self.cfg.d;
+                            let marker = crate::num::unitary_vector(self.cfg.seed ^ KEY_SAID, 0, d);
+                            let mut said = vec![0.0f32; d];
+                            crate::num::circconv(&marker, self.emb.row(a), &mut said);
                             let mut pair = vec![0.0f32; d];
-                            crate::num::circconv(self.emb.row(w1), self.emb.row(a), &mut pair);
+                            crate::num::circconv(self.emb.row(w1), &said, &mut pair);
                             normalize(&mut pair);
                             let mut tri = vec![0.0f32; d];
                             crate::num::circconv(&pair, self.emb.row(x), &mut tri);
                             normalize(&mut tri);
-                            let bank = self.bank_of_ids(w1, a);
+                            let bank = self.bank_of_ids(w1, a | SAID_ID);
                             for i in 0..d {
                                 self.mem[bank][i] += tri[i];
                             }

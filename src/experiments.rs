@@ -1422,7 +1422,6 @@ pub fn unbindtest(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite
 /// Everything here runs on the current mechanism and the current source, one
 /// factor at a time off a fixed baseline.
 pub fn closeout(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
-    use crate::config::RouteQuery;
     let mut suite = Suite::new();
     let mut gcfg = GenConfig::fast();
     gcfg.seed = seed ^ 0xA11CE;
@@ -1435,12 +1434,10 @@ pub fn closeout(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
         c.d = 256;
         c.mem_banks = 8192;
         c.traj = 4;
-        c.superpose = true;
-        c.route_query = RouteQuery::Bound;
-        c.read_entry_by_content = true;
-        c.freeze_operator = true;
-        c.bypass_graph = true;
-        c.anchor = 0.0;
+        // The mechanism as it stands (Config::local()): graph bypassed, what
+        // was said bound on its own channel, the read-back check off. The
+        // paper's first closeout also set the routing switches, which act only
+        // on the graph, and anchor 0; the anchor is kept as an arm below.
         c
     };
     let mut arms: Vec<(String, Config)> = Vec::new();
@@ -1495,6 +1492,45 @@ pub fn closeout(ticks: usize, seed: u64, shard: usize, shards: usize) -> Suite {
     c.use_binding = false;
     c.bind_mode = crate::config::BindMode::Off;
     add("bind off (must collapse)", c, &mut arms);
+
+    // 4. what was tried on top of the mechanism
+    let mut c = base(seed, gcfg.vocab);
+    c.anchor = 0.0;
+    add("anchor 0 (first closeout)", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.bind_overt = false;
+    add("said not bound", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.bind_self = false;
+    add("no self block", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.verify_gate = true;
+    add("read-back gate on", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.ep_context = true;
+    add("situated memory on", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.feedback_write = false;
+    add("write stream off", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.neg_samples = 16;
+    add("top-16 negatives", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.eta = 0.5;
+    add("step 0.5 (first write-up)", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.cleanup_heard_only = true;
+    add("cleanup heard only", c, &mut arms);
+    let mut c = base(seed, gcfg.vocab);
+    c.cleanup_heard_only = true;
+    c.feedback_write = false;
+    add("heard only, write off", c, &mut arms);
+
+    // ALM_CLOSEOUT_ONLY=a,b runs only the arms whose names contain a or b.
+    if let Ok(only) = std::env::var("ALM_CLOSEOUT_ONLY") {
+        let keys: Vec<String> = only.split(',').map(|x| x.trim().to_string()).collect();
+        arms.retain(|(n, _)| keys.iter().any(|k| n.contains(k.as_str())));
+    }
 
     for (i, (name, c)) in arms.into_iter().enumerate() {
         if shards > 1 && i % shards != shard {

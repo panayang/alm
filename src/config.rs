@@ -455,6 +455,13 @@ pub struct Config {
     /// both at once cannot say which of the two streams does the poisoning.
     pub feedback_covert: bool,
     /// Feed the write/activity channel back into the context at all.
+    /// **Off by default since 2026-09-30.** The write stream reports which
+    /// memory is being touched; its job was to drive the operator graph's
+    /// routing away from where it had just been (inhibition of return). With
+    /// the graph bypassed nothing consumes it, and the vector it reports only
+    /// adds variance to the fastest band: PhysioNet codelength 3.343 bits with
+    /// it against 3.319 without, and on the synthetic source every
+    /// self-stream-off arm reads better. It goes with the graph.
     pub feedback_write: bool,
 
     /// Weight of the background anchor in the state update.
@@ -563,6 +570,11 @@ pub struct Config {
     pub freeze_operator: bool,
     pub route_random: bool,
     /// Skip the operator graph: no routing, no hop, no operator write.
+    ///
+    /// With it on, `nodes`, `shortcuts`, `hops`, `route_query`,
+    /// `read_entry_by_content`, `freeze_operator`, `route_random`,
+    /// `route_perturb`, `w_init`, `op_gain` and `op_mix` do nothing. `anchor`
+    /// still acts: the state is pulled toward the background on every read.
     ///
     /// **On by default since 2026-09-29 (v7).** The paper measured its
     /// closeout with the graph bypassed, having found it behaves as a random
@@ -739,17 +751,35 @@ pub struct Config {
     /// by anything. In a world that reacts, that is the whole of learning what
     /// one's own acts do.
     ///
-    /// With this on, when the world speaks `x` after the model said `a`, a
-    /// second triple is written: key (the world's last token before `a`, `a`),
-    /// value `x`. The value is always the world's; the model's output appears
+    /// With this on, when the world speaks `x` after the model said `a` (and
+    /// `x` is not `a`), a second triple is written: key (the world's last
+    /// token before `a`, `a` marked as said), value `x`. The mark -- `a` bound
+    /// with a fixed unitary self vector, hashed from its own identity space --
+    /// keeps these keys apart from the world's: unmarked, they were exactly
+    /// the keys the silent walk reads with the last thing said as its
+    /// relation, and a finished walk read what followed its own utterance and
+    /// left its answer. Nothing reads the marked keys yet; a world that reacts
+    /// is where a read path for them belongs. The value is always the world's; the model's output appears
     /// only in the key, so nothing it said is stored as having happened, which
     /// is the spirit of A5. The world's own triple is written as before.
     ///
-    /// Off by default (added 2026-09-28). On a static stream the world ignores
-    /// what was said, so this can only add load and noise there; it exists for
-    /// worlds that react, and its static-data cost is measured before it is
-    /// used anywhere.
+    /// **On by default since 2026-09-29 (v8).** On a static stream the world
+    /// ignores what was said, so this could only add load and noise there;
+    /// measured, it adds neither: the facts matrix is unchanged and PhysioNet
+    /// codelength is 3.3840 against 3.3848 bits (179154 said-keyed triples
+    /// of 1904680). It is the write half of what the read already does, and a
+    /// world that reacts cannot be learned from without it.
     pub bind_overt: bool,
+    /// Clean up against, and name through the codebook term, only the tokens
+    /// the world has said -- not the whole codebook.
+    ///
+    /// A token never heard cannot have been stored, so it can never be the
+    /// right answer to an unbinding; including it only raises the noise floor
+    /// the right answer has to clear, by sqrt(2 ln V / d) with V the number
+    /// of candidates. This is not "tokens that have readout rows" -- the
+    /// mistake the codebook-wide cleanup corrected: with the readout off no
+    /// token has a row, while every stored token has been heard.
+    pub cleanup_heard_only: bool,
     /// Bind each stored triple to the situation it happened in.
     ///
     /// The long-term banks are keyed by the two previous tokens and nothing
@@ -797,6 +827,18 @@ pub struct Config {
     /// With `ep_context_unitary`, raise each Fourier magnitude of the
     /// situation to this power instead of setting it to one (0 = unitary).
     pub ep_context_gamma: f32,
+    /// Pattern separation for the situated store: this many sign bits of
+    /// the situation, projected on fixed random directions, join the pair in
+    /// naming the bank. 0 (the default) addresses by the pair alone.
+    ///
+    /// Recall across visits is about similarity over the square root of the
+    /// load on a bank, and with the pair alone the load on a key is every
+    /// situation's writes of it -- the fan effect. The dentate gyrus is the
+    /// biological answer: a fixed random projection that sends different
+    /// situations to different places and the same situation to the same
+    /// place. There are no prototypes and nothing is placed or learned; how
+    /// coarse the separation is, is the number of bits.
+    pub ep_context_sep_bits: usize,
     /// An episode trace: what this context has bound, recallable by content.
     ///
     /// The superposed banks are long-term memory. They are keyed by the pair of
@@ -959,7 +1001,7 @@ impl Config {
             self_max_rung: 0,
             feedback_overt: true,
             feedback_covert: true,
-            feedback_write: true,
+            feedback_write: false,
             read_entry_by_content: false,
             route_query: RouteQuery::State,
             freeze_operator: false,
@@ -973,12 +1015,14 @@ impl Config {
             use_binding: true,
             bind_self: true,
             verify_gate: false,
-            bind_overt: false,
+            bind_overt: true,
+            cleanup_heard_only: false,
             ep_context: false,
             diag_recall: false,
             ep_context_levels: (1, 1),
             ep_context_unitary: true,
             ep_context_gamma: 0.0,
+            ep_context_sep_bits: 0,
             episodic: false,
             episodic_decay: 0.97,
             episodic_codebook: 1.0,
@@ -1064,6 +1108,10 @@ impl Config {
         // ALM_CONFIG=paper: the configuration `experiments::closeout` measured
         // for the paper -- graph bypassed and frozen, routing by the bound
         // traces, reads entered by content, no anchor.
+        if std::env::var("ALM_CONFIG").ok().as_deref() == Some("graph-on") {
+            self.bypass_graph = false;
+            eprintln!("  operator graph on, everything else default");
+        }
         if std::env::var("ALM_CONFIG").ok().as_deref() == Some("graph-bypassed") {
             self.bypass_graph = true;
             eprintln!("  graph bypassed, everything else default");
@@ -1085,11 +1133,22 @@ impl Config {
                 self.ep_context_levels = (p[0], p[1]);
             }
         }
+        if let Some(b) = std::env::var("ALM_EP_CONTEXT_SEP").ok().and_then(|v| v.parse().ok()) {
+            self.ep_context_sep_bits = b;
+        }
         if let Some(g) = std::env::var("ALM_EP_CONTEXT_GAMMA").ok().and_then(|v| v.parse().ok()) {
             self.ep_context_gamma = g;
         }
         if std::env::var("ALM_EP_CONTEXT_RAW").is_ok() {
             self.ep_context_unitary = false;
+        }
+        if std::env::var("ALM_CLEANUP_HEARD").is_ok() {
+            self.cleanup_heard_only = true;
+            eprintln!("  cleanup against heard tokens only");
+        }
+        if std::env::var("ALM_NO_WRITE_STREAM").is_ok() {
+            self.feedback_write = false;
+            eprintln!("  write stream off");
         }
         if std::env::var("ALM_EP_CONTEXT").is_ok() {
             self.ep_context = true;
@@ -1098,6 +1157,10 @@ impl Config {
         if std::env::var("ALM_BIND_OVERT").is_ok() {
             self.bind_overt = true;
             eprintln!("  what was said binds into the key of what followed");
+        }
+        if std::env::var("ALM_ECHO_GATE").is_ok() {
+            self.walk_needs_retrieval = true;
+            eprintln!("  silent hops that collapse onto the token just heard are refused");
         }
         if std::env::var("ALM_EPISODIC").is_ok() {
             self.episodic = true;

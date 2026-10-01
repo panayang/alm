@@ -119,7 +119,7 @@ fn run_arm(situations: usize, d: usize, visits: usize, seed: u64, on: bool) -> V
                         let mut cq = vec![0.0f32; d];
                         crate::num::circconv(&u, &q, &mut cq);
                         let mut r = vec![0.0f32; d];
-                        crate::num::unbind(&m.mem_ctx[m.bank_of_ids(a, b)], &cq, &mut r);
+                        crate::num::unbind(&m.mem_ctx[m.situated_bank_pub(a, b)], &cq, &mut r);
                         crate::num::normalize(&mut r);
                         for t in 0..m.emb.vocab {
                             let c = crate::num::dot(&r, m.emb.row(t));
